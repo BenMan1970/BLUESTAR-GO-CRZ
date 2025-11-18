@@ -13,12 +13,16 @@ from datetime import datetime
 # ==================== CONFIGURATION & STYLE ====================
 st.set_page_config(page_title="Hedge Fund FX Scanner", layout="wide")
 
-# CSS pour cacher les index et styliser
+# CSS pour supprimer les index, gérer l'affichage et supprimer les marges inutiles
 st.markdown("""
 <style>
     thead tr th:first-child {display:none}
     tbody th {display:none}
     .stDataFrame {font-size: 0.9rem;}
+    /* On force l'affichage complet sans scroll interne bizarre */
+    .stDataFrame div[data-testid="stDataFrame"] > div {
+        height: auto !important; 
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -37,7 +41,7 @@ def get_oanda_client():
     try:
         return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
     except:
-        st.error("Token OANDA manquant.")
+        st.error("Token OANDA manquant dans les secrets.")
         st.stop()
 
 client = get_oanda_client()
@@ -100,7 +104,6 @@ def calculate_indicators(df):
 
 @st.cache_data(ttl=60)
 def get_macro_bias(pair, current_tf):
-    # Si on est en D1, on regarde le Weekly, sinon D1
     target_tf = "W" if current_tf == "D1" else "D1"
     df = get_candles_quant(pair, target_tf, 100)
     if len(df) < 50: return "Neutral"
@@ -148,7 +151,7 @@ def analyze_pair(pair, tf, mode_live):
     
     if last.adx > 25: score += 20
     elif last.adx > 20: score += 10
-    else: score -= 10 # Pénalité range
+    else: score -= 10 
     
     if signal_buy and above_ema200: score += 10
     if signal_sell and not above_ema200: score += 10
@@ -176,7 +179,7 @@ def analyze_pair(pair, tf, mode_live):
         "ADX": int(last.adx),
         "Bias": macro,
         "RSI": int(last.rsi),
-        "_raw_action": action # Pour le PDF et tri
+        "_raw_action": action
     }
 
 def run_scan(pairs, tfs, mode_live):
@@ -214,7 +217,6 @@ def create_pdf(results):
     # Données
     for row in results:
         pdf.set_font("Arial", size=9)
-        # Couleur texte selon action
         if "ACHAT" in row["_raw_action"]:
             pdf.set_text_color(0, 100, 0)
         else:
@@ -237,7 +239,6 @@ st.sidebar.header("Configuration")
 scan_mode = st.sidebar.radio("Mode", ["Sécurisé (Clôture)", "Aggressif (0-Lag ⚡)"], index=0)
 is_live = "Aggressif" in scan_mode
 
-# D1 est bien sélectionné par défaut
 selected_tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], default=["H1","H4","D1"])
 min_score = st.sidebar.slider("Score Quant Min", 0, 100, 60)
 scan_btn = st.sidebar.button("SCANNER LE MARCHÉ", type="primary", use_container_width=True)
@@ -257,7 +258,7 @@ if scan_btn:
         
         st.markdown("---")
 
-        # --- FONCTION STYLISATION (Code 1 Style) ---
+        # --- FONCTION STYLISATION ---
         def style_quant(row):
             base = "color: black;"
             if "ACHAT" in row["Action"]: 
@@ -270,8 +271,7 @@ if scan_btn:
             
             return [base] * len(row)
 
-        # --- BOUCLE D'AFFICHAGE PAR TF (Séparés) ---
-        # On force l'ordre logique
+        # --- BOUCLE D'AFFICHAGE PAR TF ---
         tf_order = ["H1", "H4", "D1"]
         
         for tf in tf_order:
@@ -281,40 +281,41 @@ if scan_btn:
             if subset:
                 st.subheader(f"🕒 Timeframe {tf} ({len(subset)})")
                 
-                # Tri par score
                 subset.sort(key=lambda x: x["Score"], reverse=True)
                 
-                # Création DF Propre
                 df_show = pd.DataFrame(subset)
                 cols_to_show = ["Heure", "Instrument", "Action", "Score", "Prix", "SL", "TP", "ADX", "Bias"]
+                
+                # --- HAUTEUR DYNAMIQUE (LE FIX) ---
+                # On calcule la hauteur : (Nbre lignes + 1 header) * 35 pixels par ligne + un petit buffer
+                height_dynamic = (len(df_show) + 1) * 35 + 3
                 
                 st.dataframe(
                     df_show[cols_to_show].style.apply(style_quant, axis=1).format({
                         "Prix": "{:.5f}", "SL": "{:.5f}", "TP": "{:.5f}"
                     }),
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
+                    height=height_dynamic  # <-- C'EST ICI QUE LA MAGIE OPÈRE
                 )
-                st.markdown(" ") # Espace
+                st.markdown(" ")
 
         # --- EXPORT PDF & CSV ---
         st.markdown("---")
         col_dl1, col_dl2 = st.columns(2)
         
-        # CSV
         df_all = pd.DataFrame(results)
         csv = df_all.to_csv(index=False).encode()
         col_dl1.download_button("📥 Télécharger CSV", csv, "quant_signals.csv", "text/csv", use_container_width=True)
         
-        # PDF
         try:
             pdf_bytes = create_pdf(results)
             b64 = base64.b64encode(pdf_bytes).decode()
             href = f'<a href="data:application/octet-stream;base64,{b64}" download="quant_report.pdf" style="text-decoration:none; color:white; background-color:#FF4B4B; padding:10px 20px; border-radius:5px; display:block; text-align:center;">📄 Télécharger Rapport PDF</a>'
             col_dl2.markdown(href, unsafe_allow_html=True)
         except Exception as e:
-            col_dl2.error(f"Erreur PDF (fpdf installé?): {e}")
+            col_dl2.error(f"Pour le PDF, ajoutez 'fpdf' au requirements.txt. Erreur: {e}")
 
     else:
-        st.warning("Aucun signal ne correspond à vos critères de risque (Score trop faible).")
- 
+        st.warning("Aucun signal ne correspond à vos critères de risque.")
+        
