@@ -1,13 +1,14 @@
-# app.py → Version ULTIME 100% fonctionnelle (D1 + Top 5 + Étoile jaune + Couleurs)
 import streamlit as st
 import pandas as pd
 import numpy as np
+import time
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import pytz
 
-# ==================== WEBHOOK 0 LAG ====================
+# ==================== WEBHOOK 0 LAG (TradingView → Streamlit) ====================
 def process_webhook():
     params = st.query_params
     sig = params.get("signal", [None])[0]
@@ -26,9 +27,11 @@ def process_webhook():
             st.session_state.live_signals = st.session_state.live_signals[:20]
 
 process_webhook()
+# ==============================================================================
 
 st.set_page_config(page_title="Forex Scanner PRO", layout="wide")
-st.title("Forex Scanner PRO + Signaux Live TradingView")
+st.title("Forex Multi-Timeframe Signal Scanner Pro")
+st.write("Scanner ultra-rapide + Signaux LIVE TradingView 0 lag")
 
 # ==================== BANDEAU SIGNAUX LIVE ====================
 if hasattr(st.session_state, "live_signals") and st.session_state.live_signals:
@@ -43,10 +46,10 @@ if hasattr(st.session_state, "live_signals") and st.session_state.live_signals:
     st.markdown("---")
 
 # ==================== CONFIG ====================
-PAIRS = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD","EUR_GBP",
-         "EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY","EUR_AUD","EUR_CAD","EUR_NZD",
-         "GBP_AUD","GBP_CAD","GBP_NZD","AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF",
-         "NZD_CHF","EUR_CHF","GBP_CHF","USD_SEK"]
+PAIRS_DEFAULT = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD","EUR_GBP",
+                 "EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY","EUR_AUD","EUR_CAD","EUR_NZD",
+                 "GBP_AUD","GBP_CAD","GBP_NZD","AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF",
+                 "NZD_CHF","EUR_CHF","GBP_CHF","USD_SEK"]
 
 client = API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
 
@@ -122,7 +125,7 @@ def analyze(pair, tf):
     return {
         "Instrument": pair.replace("_","/"),
         "TF": tf,
-        "Signal": "ACHAT" if buy else "VENTE",
+        "Signal": ("NEW ACHAT" if buy and star else "ACHAT") if buy else ("NEW VENTE" if sell and star else "VENTE"),
         "Confiance": conf,
         "Prix": round(last.c, 5),
         "SL": round(sl, 5),
@@ -130,7 +133,6 @@ def analyze(pair, tf):
         "R:R": "1:1.5",
         "RSI": round(last.rsi, 1),
         "Heure": last.time.strftime("%H:%M"),
-        "Étoile": star,
         "_conf": conf,
         "_time": last.time
     }
@@ -144,30 +146,75 @@ def scan(pairs, tfs):
             if r: results.append(r)
     return results
 
-# ==================== INTERFACE ====================
-st.sidebar.header("Configuration")
-pairs = st.sidebar.multiselect("Paires", PAIRS, default=PAIRS[:12])
-tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], default=["H1","H4","D1"])
-min_conf = st.sidebar.slider("Confiance min (%)", 0, 100, 15)
-scan_btn = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
+# ==================== INTERFACE EXACTEMENT COMME AVANT ====================
+st.sidebar.header("Configuration du Scanner")
+with st.sidebar.expander("Filtrer les paires", expanded=False):
+    selected_pairs = st.multiselect("Paires à scanner :", PAIRS_DEFAULT, default=PAIRS_DEFAULT[:15])
+selected_tfs = st.sidebar.multiselect("Timeframes :", ["H1","H4","D1"], default=["H1","H4","D1"])
+min_confidence = st.sidebar.slider("Confiance minimale (%) :", 0, 100, 20)
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5 min)")
+scan_button = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
 
-if scan_btn:
-    with st.spinner("Scan en cours…"):
-        results = scan(pairs, tfs)
-        results = [r for r in results if r["_conf"] >= min_conf]
+# Session de marché
+def get_market_session():
+    tz = pytz.timezone('Africa/Tunis')
+    now = datetime.now(tz)
+    hour = now.hour
+    sessions = {
+        "Tokyo": (1,10,"orange","Moyenne"),
+        "Londres": (9,18,"green","Excellente"),
+        "New York": (14,23,"green","Excellente"),
+        "Overlap": (14,18,"red","Maximum")
+    }
+    active = []
+    quality = "Faible"
+    color = "blue"
+    for name, (s,e,c,q) in sessions.items():
+        if s <= hour < e:
+            active.append(name)
+            if q == "Maximum": quality, color = q, c
+            elif q == "Excellente" and quality != "Maximum": quality, color = q, c
+            elif q == "Moyenne" and quality == "Faible": quality, color = q, c
+    return {"sessions": ", ".join(active) or "Calme", "quality": quality, "color": color, "hour": now.strftime("%H:%M")}
+
+market = get_market_session()
+if "Maximum" in market["quality"]: st.success(f"SESSION OPTIMALE - {market['sessions']}")
+elif "Excellente" in market["quality"]: st.info(f"Session active - {market['sessions']}")
+elif "Moyenne" in market["quality"]: st.warning(f"Session modérée - {market['sessions']}")
+else: st.error("Marché calme")
+
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("Paires", len(selected_pairs))
+col2.metric("Timeframes", len(selected_tfs))
+col3.metric("Validations MTF", "H1→H4 | H4→D1 | D1→W")
+col4.metric("Indicateurs", "HMA20 + RSI7 + ATR")
+col5.metric("Heure Tunis", market["hour"], market["sessions"])
+st.markdown("---")
+
+if scan_button or auto_refresh:
+    if auto_refresh and not scan_button:
+        for i in range(300, 0, -1):
+            st.toast(f"Prochain scan dans {i}s", icon="clock")
+            time.sleep(1)
+        st.rerun()
+
+    with st.spinner("Scan ultra-rapide en cours..."):
+        results = scan(selected_pairs or PAIRS_DEFAULT, selected_tfs)
+        results = [r for r in results if r["_conf"] >= min_confidence]
 
     if results:
-        # === TOP 5 avec étoile jaune ===
+        # Top 5
         top5 = sorted(results, key=lambda x: x["_conf"], reverse=True)[:5]
-        if top5:
-            st.markdown("### TOP 5 SIGNAUX LES PLUS FORTS")
-            for sig in top5:
-                color = "ACHAT" if sig["Signal"] == "ACHAT" else "VENTE"
-                star = " NEW" if sig["Étoile"] else ""
-                st.markdown(f"**{color} {sig['Instrument']} {sig['TF']}** → {sig['Signal']} | Confiance {sig['Confiance']}% | Prix {sig['Prix']} {star}")
+        st.subheader("Top 5 Signaux par Confiance")
+        cols = st.columns(5)
+        for i, r in enumerate(top5):
+            with cols[i]:
+                emoji = "ACHAT" if "ACHAT" in r["Signal"] else "VENTE"
+                st.metric(f"{emoji} {r['Instrument']}", f"{r['Prix']}", f"{r['TF']} • {r['Confiance']}%")
+                st.caption(f"SL {r['SL']} | TP {r['TP']} • R:R {r['R:R']}")
 
-        # === AFFICHAGE PAR TF ===
-        for tf in ["H1", "H4", "D1"]:
+        # Par timeframe
+        for tf in ["H1","H4","D1"]:
             tf_data = [r for r in results if r["TF"] == tf]
             if tf_data:
                 tf_data.sort(key=lambda x: x["_conf"], reverse=True)
@@ -176,20 +223,19 @@ if scan_btn:
                 df_show = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in tf_data])
 
                 def color_row(row):
-                    if row.Étoile:
-                        return ["background-color: #fff3cd; color: black; font-weight: bold"] * len(row)  # jaune
-                    elif "ACHAT" in row.Signal:
-                        return ["background-color: #d4edda; color: black;"] * len(row)  # vert clair
-                    else:
-                        return ["background-color: #f8d7da; color: black;"] * len(row)  # rouge clair
+                    if "NEW" in row.Signal: return ["background-color: #fff3cd; color: black; font-weight: bold"] * len(row)
+                    elif "ACHAT" in row.Signal: return ["background-color: #d4edda; color: black;"] * len(row)
+                    else: return ["background-color: #f8d7da; color: black;"] * len(row)
 
-                st.dataframe(
-                    df_show.style.apply(color_row, axis=1)
-                    .set_properties(**{'text-align': 'center', 'font-size': '15px'}),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.dataframe(df_show.style.apply(color_row, axis=1).set_properties(**{'text-align': 'center'}), 
+                            use_container_width=True, hide_index=True)
+
+        # Téléchargement CSV
+        df_all = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in results])
+        csv = df_all.to_csv(index=False).encode()
+        st.download_button("Télécharger tous les signaux (CSV)", csv, f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
+
     else:
-        st.success("Aucun signal pour le moment")
+        st.info("Aucun signal détecté avec ces critères.")
 else:
     st.info("Configure et clique sur **LANCER LE SCAN**")
