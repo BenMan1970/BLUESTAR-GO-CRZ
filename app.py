@@ -1,17 +1,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Tuple, List, Dict, Optional
+from typing import Dict, Optional
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import pytz
 
-# ==================== WEBHOOK SANS UVICORN (compatible Streamlit Cloud) ====================
-# Méthode 2025 officielle : on utilise st.experimental_get_query_params + rerun
-# Le webhook TradingView pointe vers : https://ton-app.streamlit.app/?signal=BUY&pair=EUR_USD&tf=H1&price=1.0850
-
+# ==================== WEBHOOK SANS UVICORN (Streamlit Cloud compatible) ====================
 def process_webhook():
     params = st.query_params
     sig = params.get("signal", [None])[0]
@@ -25,20 +21,19 @@ def process_webhook():
         }
         if not hasattr(st.session_state, "live_signals"):
             st.session_state.live_signals = []
-        # Évite les doublons
         if not st.session_state.live_signals or st.session_state.live_signals[0] != data:
             st.session_state.live_signals.insert(0, data)
             st.session_state.live_signals = st.session_state.live_signals[:20]
 
-process_webhook()  # Appel au démarrage et à chaque refresh
+process_webhook()
 # =====================================================================================
 
 st.set_page_config(page_title="Forex Scanner PRO", layout="wide")
 st.title("Forex Multi-Timeframe Scanner PRO + Signaux Live TradingView")
 
-# ==================== BANDEAU SIGNAUX EN DIRECT ====================
+# ==================== BANDEAU SIGNAUX LIVE ====================
 if hasattr(st.session_state, "live_signals") and st.session_state.live_signals:
-    st.markdown("### SIGNAUX EN DIRECT (0 lag – via TradingView)")
+    st.markdown("### SIGNAUX EN DIRECT (0 lag TradingView)")
     cols = st.columns(min(6, len(st.session_state.live_signals)))
     for i, sig in enumerate(st.session_state.live_signals[:6]):
         with cols[i]:
@@ -95,9 +90,9 @@ def get_candles(pair: str, tf: str, count: int = 200, include_incomplete: bool =
         return pd.DataFrame()
 
 def hma(s, length=20):
-    return s.rolling(window=length).apply(
-        lambda x: 2 * pd.Series(x).rolling(int(length/2)).mean().iloc[-1] - pd.Series(x).rolling(length).mean().iloc[-1], raw=False
-    ).rolling(int(np.sqrt(length))).mean()
+    wma1 = s.rolling(length//2).mean()
+    wma2 = s.rolling(length).mean()
+    return (2*wma1 - wma2).rolling(int(np.sqrt(length))).mean()
 
 def rsi(s, length=7):
     delta = s.diff()
@@ -114,9 +109,9 @@ def atr(df, length=14):
 @st.cache_data(ttl=120)
 def check_mtf_trend(pair, tf):
     higher = {"H1":"H4", "H4":"D1", "D1":"W"}.get(tf)
-    if not higher: return {"trend":"neutral", "strength":0}
+    if not higher: return {"trend":"neutral","strength":0}
     df = get_candles(pair, higher, 100)
-    if len(df)<40: return {"trend":"neutral", "strength":0}
+    if len(df)<40: return {"trend":"neutral","strength":0}
     ema20 = df.close.ewm(span=20).mean().iloc[-1]
     ema50 = df.close.ewm(span=50).mean().iloc[-1]
     price = df.close.iloc[-1]
@@ -159,14 +154,13 @@ def analyze_pair(pair, tf, count=200, back=3):
         "Prix": round(last.close,5),
         "SL": round(sl,5),
         "TP": round(tp,5),
-        "R:R": f"1:{round(1.5,1)}",
+        "R:R": "1:1.5",
         "RSI": round(last.rsi7,1),
         "Heure": last.time.strftime("%H:%M"),
         "_confidence_val": conf
     }
 
-# ==================== SCAN CORRIGÉ (max_workers remis) ====================
-def scan_parallel(pairs, tfs, count, max_workers=6, back=3):
+def scan_parallel(pairs, tfs, count=200, max_workers=6, back=3):
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(analyze_pair, p, tf, count, back): (p,tf) for p in pairs for tf in tfs}
@@ -174,30 +168,29 @@ def scan_parallel(pairs, tfs, count, max_workers=6, back=3):
             r = f.result()
             if r: results.append(r)
     return results
-# ====================================================================
 
 # ==================== INTERFACE ====================
 st.sidebar.header("Configuration")
-selected_pairs = st.sidebar.multiselect("Paires", PAIRS_DEFAULT, default=PAIRS_DEFAULT, key="pairs")
-selected_tfs = st.sidebar.multiselect("TF", ["H1","H4","D1"], default=["H1","H4","D1"])
-min_conf = st.sidebar.slider("Confiance min",0,100,20)
-scan_btn = st.sidebar.button("LANCER SCAN", type="primary")
+selected_pairs = st.sidebar.multiselect("Paires", PAIRS_DEFAULT, default=PAIRS_DEFAULT)
+selected_tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], default=["H1","H4","D1"])
+min_conf = st.sidebar.slider("Confiance min (%)", 0, 100, 20)
+scan_btn = st.sidebar.button("LANCER LE SCAN", type="primary")
 
-if scan_btn or st.sidebar.checkbox("Auto-refresh 5min"):
+if scan_btn:
     with st.spinner("Scan en cours…"):
-        results = scan_parallel(selected_pairs or PAIRS_DEFAULT, selected_tfs, 200, max_workers=6)
-        results = [r for r["_confidence_val"] >= min_conf for r in results]
+        results = scan_parallel(selected_pairs, selected_tfs, 200, max_workers=6)
+        results = [r for r in results if r["_confidence_val"] >= min_conf]  # ← Ligne corrigée
 
     if results:
         for tf in ["H1","H4","D1"]:
             tf_res = [r for r in results if r["TF"]==tf]
             if tf_res:
                 tf_res.sort(key=lambda x: x["_confidence_val"], reverse=True)
-                st.markdown(f"### {tf} – {len(tf_res)} signaux")
+                st.markdown(f"### {tf} – {len(tf_res)} signal(s)")
                 df_show = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in tf_res])
-                st.dataframe(df_show.style.apply(lambda row: ['background: rgba(0,255,0,0.15)' if 'ACHAT' in row.Signal else 'background: rgba(255,0,0,0.15)'], axis=1),
+                st.dataframe(df_show.style.apply(lambda row: ['background: rgba(0,255,0,0.15)' if 'ACHAT' in row.Signal else 'background: rgba(255,0,0,0.15)' if 'VENTE' in row.Signal else '' for _ in row], axis=1),
                              use_container_width=True, hide_index=True)
     else:
-        st.info("Aucun signal pour l’instant")
+        st.info("Aucun signal détecté avec ces critères")
 else:
-    st.info("Clique sur LANCER SCAN")
+    st.info("Clique sur **LANCER LE SCAN** pour démarrer")
