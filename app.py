@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import time
 import base64
+import pytz # Indispensable pour l'heure de Tunis
 from fpdf import FPDF
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
@@ -10,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar MTF Cascade", layout="wide")
+st.set_page_config(page_title="BlueStar Cascade", layout="wide")
 
+# CSS pour cacher les erreurs de contexte et styliser
 st.markdown("""
 <style>
     thead tr th:first-child {display:none}
@@ -28,7 +30,6 @@ PAIRS_DEFAULT = [
     "NZD_CHF","EUR_CHF","GBP_CHF","USD_SEK"
 ]
 
-# Mapping pour OANDA
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 
 # ==================== API ====================
@@ -50,13 +51,15 @@ def get_candles(pair, tf, count=300):
         data = []
         for c in req.response.get("candles", []):
             data.append({
-                "time": c["time"],
+                "time": c["time"], # Format UTC brut
                 "open": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
                 "l": float(c["mid"]["l"]), "close": float(c["mid"]["c"]),
                 "complete": c.get("complete", False)
             })
         df = pd.DataFrame(data)
-        if not df.empty: df["time"] = pd.to_datetime(df["time"])
+        if not df.empty: 
+            # Conversion propre des dates
+            df["time"] = pd.to_datetime(df["time"])
         return df
     except: return pd.DataFrame()
 
@@ -81,7 +84,7 @@ def calculate_indicators(df):
     up, down = delta.clip(lower=0), -delta.clip(upper=0)
     df['rsi'] = 100 - 100/(1 + up.ewm(alpha=1/7).mean()/down.ewm(alpha=1/7).mean())
     
-    # UT BOT (Sensitivity 2.0)
+    # UT BOT
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     xATR = tr.rolling(1).mean()
     nLoss = 2.0 * xATR
@@ -114,32 +117,20 @@ def calculate_indicators(df):
     df['atr_val'] = atr14
     return df
 
-# ==================== LOGIQUE CASCADE STRICTE ====================
+# ==================== LOGIQUE CASCADE ====================
 @st.cache_data(ttl=60)
 def get_trend_alignment(pair, signal_tf):
-    """
-    Vérifie la tendance sur le timeframe supérieur immédiat.
-    H1 -> Doit être validé par H4
-    H4 -> Doit être validé par D1
-    D1 -> Doit être validé par W
-    """
-    
-    # 1. Définir le patron
     map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
     higher_tf = map_higher.get(signal_tf)
-    
     if not higher_tf: return "Neutral"
     
-    # 2. Analyser le patron
     df = get_candles(pair, higher_tf, 100)
     if len(df) < 50: return "Neutral"
     
     close = df['close']
-    
-    # EMA 50 (Tendance de fond du TF supérieur)
     ema50 = close.ewm(span=50).mean().iloc[-1]
     
-    # HMA (Momentum du TF supérieur)
+    # HMA TF Supérieur
     def wma(s, l):
         w = np.arange(1, l+1)
         return s.rolling(l).apply(lambda x: np.dot(x, w)/w.sum(), raw=True)
@@ -152,16 +143,11 @@ def get_trend_alignment(pair, signal_tf):
     hma_prev = hma.iloc[-2]
     price = close.iloc[-1]
     
-    # 3. Verdict Strict
-    # Bullish si : Prix > EMA50 ET HMA Supérieur monte
     if price > ema50 and hma_now > hma_prev: return "Bullish"
-    
-    # Bearish si : Prix < EMA50 ET HMA Supérieur descend
     if price < ema50 and hma_now < hma_prev: return "Bearish"
-    
     return "Neutral"
 
-# ==================== ANALYSE ====================
+# ==================== ANALYSE & TIMEZONE FIX ====================
 def analyze_pair(pair, tf, mode_live):
     df = get_candles(pair, tf, 300)
     if len(df) < 100: return None
@@ -179,13 +165,11 @@ def analyze_pair(pair, tf, mode_live):
     prev = df.iloc[idx-1]
     prev2 = df.iloc[idx-2]
     
-    # 1. Signal Technique (BlueStar)
+    # Signal BlueStar
     hma_flip_green = last.hma_up and not prev.hma_up
     hma_flip_red = not last.hma_up and prev.hma_up
-    
     rsi_ok_buy = last.rsi > 50
     rsi_ok_sell = last.rsi < 50
-    
     ut_bull = last.ut_state == 1
     ut_bear = last.ut_state == -1
     
@@ -193,27 +177,19 @@ def analyze_pair(pair, tf, mode_live):
     raw_sell = (hma_flip_red or (not last.hma_up and prev2.hma_up)) and rsi_ok_sell and ut_bear
     
     if not (raw_buy or raw_sell): return None
-    
     action = "ACHAT" if raw_buy else "VENTE"
     
-    # 2. FILTRE CASCADE STRICT (Le point crucial)
+    # Cascade Check
     higher_trend = get_trend_alignment(pair, tf)
-    
-    # SI PAS ALIGNÉ, ON REJETTE LE SIGNAL
     if action == "ACHAT" and higher_trend != "Bullish": return None
     if action == "VENTE" and higher_trend != "Bearish": return None
     
-    # 3. Scoring Qualité (Puisqu'il est déjà aligné, le score est déjà bon)
-    score = 70 # Base élevée car MTF validé
-    
-    # Bonus ADX
+    # Scoring
+    score = 70
     if last.adx > 25: score += 15
     elif last.adx > 20: score += 10
-    
-    # Bonus Fresh Signal
     is_fresh = (action == "ACHAT" and hma_flip_green) or (action == "VENTE" and hma_flip_red)
     if is_fresh: score += 15
-    
     score = min(100, score)
     
     # SL/TP
@@ -226,13 +202,23 @@ def analyze_pair(pair, tf, mode_live):
         tp = last.close - 3.0 * atr
         
     tag = "⚡" if is_live_signal else ""
-    fmt = "%H:%M" if tf != "D1" else "%Y-%m-%d"
     
-    # Nom du TF supérieur pour l'affichage
+    # --- FIX TIMEZONE (UTC -> TUNIS) ---
+    utc_time = last.time # C'est du datetime UTC
+    if utc_time.tzinfo is None:
+        utc_time = pytz.utc.localize(utc_time) # On s'assure qu'il sait qu'il est UTC
+    
+    tunis_tz = pytz.timezone('Africa/Tunis')
+    local_time = utc_time.astimezone(tunis_tz)
+    
+    # Formatage
+    fmt = "%H:%M" if tf != "D1" else "%Y-%m-%d"
+    time_str = local_time.strftime(fmt)
+    
     higher_tf_name = {"H1": "H4", "H4": "D1", "D1": "W"}.get(tf, "")
     
     return {
-        "Heure": last.time.strftime(fmt),
+        "Heure": time_str,
         "Instrument": pair.replace("_", "/"),
         "TF": tf,
         "Action": f"{action} {tag}",
@@ -241,7 +227,7 @@ def analyze_pair(pair, tf, mode_live):
         "Prix": last.close,
         "SL": sl, "TP": tp,
         "ADX": int(last.adx),
-        "Validation": f"✅ {higher_tf_name} {higher_trend}", # Preuve de validation
+        "Validation": f"✅ {higher_tf_name} {higher_trend}",
         "_raw_action": action
     }
 
@@ -282,12 +268,10 @@ def create_pdf(results):
 
 # ==================== INTERFACE ====================
 st.title("💎 BlueStar Cascade (Alignement Strict)")
-st.markdown("""
-**Filtre Strict Activé :**
-*   Signal **H1** ➔ Affiché uniquement si **H4** est aligné.
-*   Signal **H4** ➔ Affiché uniquement si **Daily** est aligné.
-*   Signal **D1** ➔ Affiché uniquement si **Weekly** est aligné.
-""")
+
+# Affichage de l'heure locale pour vérification
+now_tunis = datetime.now(pytz.timezone('Africa/Tunis'))
+st.caption(f"Heure Serveur (Tunis) : {now_tunis.strftime('%H:%M:%S')}")
 
 st.sidebar.header("Configuration")
 scan_mode = st.sidebar.radio("Mode", ["Signaux Confirmés", "Temps Réel (⚡)"], index=0)
@@ -296,12 +280,11 @@ tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], ["H1","H4","D1"])
 scan_btn = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
 
 if scan_btn:
-    with st.spinner("Vérification de l'alignement des tendances..."):
+    with st.spinner("Analyse en cours..."):
         results = run_scan(PAIRS_DEFAULT, tfs, is_live)
         
     if results:
-        # TOP 5
-        st.subheader("🏆 Top Opportunités Alignées")
+        st.subheader("🏆 Top Opportunités")
         top5 = sorted(results, key=lambda x: x["Score"], reverse=True)[:5]
         cols = st.columns(5)
         for i, r in enumerate(top5):
@@ -309,11 +292,10 @@ if scan_btn:
                 color = "green" if "ACHAT" in r["_raw_action"] else "red"
                 st.markdown(f":{color}[**{r['Action']}**]")
                 st.metric(r['Instrument'], r['Prix'], f"Score {r['Score']}")
-                st.caption(f"{r['Validation']}")
+                st.caption(r['Validation'])
         
         st.markdown("---")
         
-        # TABLES
         def style_cascade(row):
             base = "color: black;"
             if "ACHAT" in row["Action"]: base += "background-color: #d4edda;"
@@ -329,13 +311,11 @@ if scan_btn:
                 subset.sort(key=lambda x: x["Score"], reverse=True)
                 df_s = pd.DataFrame(subset)
                 h_dyn = (len(df_s)+1)*35+3
-                
                 st.dataframe(
                     df_s[["Heure","Instrument","Action","Score","Prix","SL","TP","ADX","Validation"]].style.apply(style_cascade, axis=1).format({"Prix":"{:.5f}","SL":"{:.5f}","TP":"{:.5f}"}),
                     use_container_width=True, hide_index=True, height=h_dyn
                 )
 
-        # EXPORT
         c1, c2 = st.columns(2)
         try:
             pdf = create_pdf(results)
@@ -347,4 +327,4 @@ if scan_btn:
         csv = pd.DataFrame(results).to_csv(index=False).encode()
         c1.download_button("📥 CSV Data", csv, "cascade_data.csv", "text/csv", use_container_width=True)
 
-    else: st.warning("Aucun signal trouvé. Cela signifie qu'aucune paire n'a un signal BlueStar parfaitement aligné avec sa tendance supérieure.")
+    else: st.warning("Aucun signal parfaitement aligné détecté.")
