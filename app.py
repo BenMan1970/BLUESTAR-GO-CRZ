@@ -8,10 +8,17 @@ from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# Configuration de la page (Style Code 1)
-st.set_page_config(page_title="Forex Scanner PRO", layout="wide")
+# ==================== CONFIG "QUANT" ====================
+st.set_page_config(page_title="Hedge Fund FX Scanner", layout="wide", initial_sidebar_state="expanded")
 
-# ==================== CONFIGURATION & API ====================
+# CSS Pro sombre et épuré
+st.markdown("""
+<style>
+    .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
+    .stDataFrame {border: 1px solid #333;}
+</style>
+""", unsafe_allow_html=True)
+
 PAIRS_DEFAULT = [
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD","EUR_GBP",
     "EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY","EUR_AUD","EUR_CAD","EUR_NZD",
@@ -19,28 +26,24 @@ PAIRS_DEFAULT = [
     "NZD_CHF","EUR_CHF","GBP_CHF","USD_SEK"
 ]
 
-# Mapping des granularités OANDA
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 
+# ==================== API & DATA ====================
 @st.cache_resource
 def get_oanda_client():
     try:
-        token = st.secrets["OANDA_ACCESS_TOKEN"]
-        return API(access_token=token)
-    except Exception as e:
-        st.error(f"Erreur de connexion API : {e}")
+        return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
+    except:
+        st.error("Manque le Token OANDA dans les secrets.")
         st.stop()
 
 client = get_oanda_client()
 
-# ==================== FONCTIONS DATA (Moteur Code 2) ====================
-@st.cache_data(ttl=10) # Cache court pour réactivité
-def get_candles(pair, tf, count=150):
+@st.cache_data(ttl=15)
+def get_candles_quant(pair, tf, count=200):
     gran = GRANULARITY_MAP.get(tf)
     if not gran: return pd.DataFrame()
-    
     try:
-        # On récupère TOUJOURS la dernière bougie (même incomplète) pour avoir le choix après
         params = {"granularity": gran, "count": count, "price": "M"}
         req = InstrumentsCandles(instrument=pair, params=params)
         client.request(req)
@@ -51,239 +54,261 @@ def get_candles(pair, tf, count=150):
                 "time": c["time"],
                 "o": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
                 "l": float(c["mid"]["l"]), "c": float(c["mid"]["c"]),
+                "vol": int(c["volume"]),
                 "complete": c.get("complete", False)
             })
-            
         df = pd.DataFrame(data)
-        if not df.empty:
-            df["time"] = pd.to_datetime(df["time"])
+        if not df.empty: df["time"] = pd.to_datetime(df["time"])
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-# Indicateurs optimisés (Numpy)
-def hma(s, length=20):
-    weights = np.arange(1, length + 1)
-    def wma(x, w): return np.dot(x, w) / w.sum()
+# ==================== MATHÉMATIQUES FINANCIÈRES (NUMPY) ====================
+def calculate_indicators(df):
+    # 1. HMA (Hull Moving Average) - Réactivité
+    def wma(s, l):
+        w = np.arange(1, l+1)
+        return s.rolling(l).apply(lambda x: np.dot(x, w)/w.sum(), raw=True)
     
-    wma1 = s.rolling(length//2).apply(lambda x: wma(x, weights[:length//2]), raw=True)
-    wma2 = s.rolling(length).apply(lambda x: wma(x, weights), raw=True)
-    diff = 2 * wma1 - wma2
-    sqrt_l = int(np.sqrt(length))
-    return diff.rolling(sqrt_l).apply(lambda x: wma(x, weights[:sqrt_l]), raw=True)
+    close = df.c
+    df["hma20"] = wma(2 * wma(close, 10) - wma(close, 20), int(np.sqrt(20)))
+    
+    # 2. RSI 7 (Momentum)
+    delta = close.diff()
+    up, down = delta.clip(lower=0), -delta.clip(upper=0)
+    rs = up.ewm(alpha=1/7).mean() / down.ewm(alpha=1/7).mean()
+    df["rsi"] = 100 - 100/(1+rs)
 
-def rsi(s, length=7):
-    d = s.diff()
-    up, down = d.clip(lower=0), -d.clip(upper=0)
-    roll_up = up.ewm(alpha=1/length).mean()
-    roll_down = down.ewm(alpha=1/length).mean()
-    rs = roll_up / roll_down
-    return 100 - 100/(1 + rs)
-
-def atr(df, length=14):
+    # 3. ATR 14 (Volatilité)
     tr = pd.concat([df.h-df.l, (df.h-df.c.shift()).abs(), (df.l-df.c.shift()).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/length).mean()
+    df["atr"] = tr.ewm(alpha=1/14).mean()
+    
+    # 4. ADX 14 (Force de Tendance - INSTITUTIONNEL)
+    plus_dm = df.h.diff().clip(lower=0)
+    minus_dm = -df.l.diff().clip(upper=0)
+    tr_smooth = tr.ewm(alpha=1/14).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / tr_smooth)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / tr_smooth)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    df["adx"] = dx.ewm(alpha=1/14).mean()
+
+    # 5. EMA 200 (Biais Long Terme)
+    df["ema200"] = close.ewm(span=200).mean()
+
+    return df
 
 @st.cache_data(ttl=60)
-def mtf_trend(pair, tf):
-    higher = {"H1":"H4", "H4":"D1", "D1":"W"}.get(tf, "W")
-    df = get_candles(pair, higher, 100)
-    if len(df) < 40: return "neutral", 0
-    
-    # Pour la tendance de fond, on préfère travailler sur du clôturé
-    if not df.iloc[-1]["complete"]: df = df[:-1]
-    
-    ema20 = df.c.ewm(span=20).mean().iloc[-1]
-    ema50 = df.c.ewm(span=50).mean().iloc[-1]
-    price = df.c.iloc[-1]
-    
-    dist = abs(ema20-ema50)/ema50*100
-    if ema20 > ema50 and price > ema20: return "bullish", min(dist*10,100)
-    if ema20 < ema50 and price < ema20: return "bearish", min(dist*10,100)
-    return "neutral", 0
+def get_macro_bias(pair):
+    """Check D1 Trend pour filtrer les faux signaux H1/H4"""
+    df = get_candles_quant(pair, "D1", 100)
+    if len(df) < 50: return "Neutral"
+    df = calculate_indicators(df)
+    last = df.iloc[-1]
+    # Si Prix > EMA200 et HMA monte = Bias Bullish
+    if last.c > last.ema200 and last.hma20 > df.iloc[-2].hma20: return "Bullish"
+    if last.c < last.ema200 and last.hma20 < df.iloc[-2].hma20: return "Bearish"
+    return "Neutral"
 
-# ==================== ANALYSE (Hybride) ====================
-def analyze(pair, tf, mode_live):
-    df = get_candles(pair, tf, 150)
-    if len(df) < 50: return None
-
-    # Calculs sur tout l'historique
-    df["hma"] = hma(df.c)
-    df["rsi"] = rsi(df.c)
-    df["atr"] = atr(df)
-    df["up"] = df.hma > df.hma.shift(1)
-
-    # SELECTION DE LA BOUGIE SELON LE MODE
+# ==================== LOGIQUE DE TRADING "QUANT" ====================
+def analyze_pair(pair, tf, mode_live):
+    df = get_candles_quant(pair, tf, 250)
+    if len(df) < 200: return None
+    
+    df = calculate_indicators(df)
+    
+    # Gestion Live vs Clôture
     if mode_live:
-        # Mode 0-LAG : On prend la dernière ligne, qu'elle soit finie ou non
         last = df.iloc[-1]
         prev = df.iloc[-2]
-        tag = "⚡" if not last.complete else "" # Petit éclair si live
+        is_live_signal = not last.complete
     else:
-        # Mode CONFIRMÉ : Si la dernière n'est pas finie, on l'ignore et on prend celle d'avant
-        if not df.iloc[-1]["complete"]:
-            last = df.iloc[-2]
-            prev = df.iloc[-3]
-        else:
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
-        tag = ""
+        # Si la dernière n'est pas finie, on recule d'un cran
+        idx = -2 if not df.iloc[-1].complete else -1
+        last = df.iloc[idx]
+        prev = df.iloc[idx-1]
+        is_live_signal = False
 
-    # Logique de signal
-    trend, strength = mtf_trend(pair, tf)
+    # --- 1. ANALYSE TECHNIQUE ---
+    hma_bull = last.hma20 > df.iloc[-3].hma20 # Pente HMA
+    hma_bear = last.hma20 < df.iloc[-3].hma20
     
-    hma_flip_bull = last.up and not prev.up
-    hma_flip_bear = not last.up and prev.up
+    # Cross RSI
+    rsi_buy = last.rsi > 50
+    rsi_sell = last.rsi < 50
     
-    # Conditions strictes
-    buy  = (hma_flip_bull or last.up) and last.rsi > 50 and trend == "bullish"
-    sell = (hma_flip_bear or not last.up) and last.rsi < 50 and trend == "bearish"
+    # --- 2. FILTRES INSTITUTIONNELS ---
+    # A. Filtre ADX (Le plus important) : On évite le "Chop"
+    is_trending = last.adx > 20 
+    trend_strength = "Fort" if last.adx > 30 else ("Moyen" if last.adx > 20 else "Faible")
+    
+    # B. Biais Macro (D1)
+    macro = get_macro_bias(pair)
+    
+    # C. Alignement EMA200 (On n'achète pas sous la 200 en général, sauf retournement violent)
+    above_ema200 = last.c > last.ema200
+    
+    # --- 3. DÉCISION ---
+    # Signal Achat : HMA Monte + RSI > 50 + (Idéalement ADX ok ou Macro ok)
+    signal_buy = hma_bull and rsi_buy
+    signal_sell = hma_bear and rsi_sell
+    
+    if not (signal_buy or signal_sell): return None
 
-    if not (buy or sell): return None
-
-    # Gestion SL/TP
-    sl = last.c - 2*last.atr if buy else last.c + 2*last.atr
-    tp = last.c + 3*last.atr if buy else last.c - 3*last.atr
+    # --- 4. SCORING QUANT (0 à 100) ---
+    score = 0
+    # Base technique (40 pts)
+    score += 40 
     
-    # Calcul confiance
-    dist_rsi = abs(last.rsi - 50)
-    conf = (dist_rsi/50 * 40) + (strength * 0.6)
-    if (buy and hma_flip_bull) or (sell and hma_flip_bear): conf += 10 # Bonus si nouveau signal
+    # Alignement Macro D1 (30 pts)
+    if signal_buy and macro == "Bullish": score += 30
+    elif signal_sell and macro == "Bearish": score += 30
     
-    signal_txt = f"{'ACHAT' if buy else 'VENTE'} {tag}"
-    if (buy and hma_flip_bull) or (sell and hma_flip_bear):
-        signal_txt = f"NEW {signal_txt}"
+    # Qualité de la tendance ADX (20 pts)
+    if last.adx > 25: score += 20
+    elif last.adx > 20: score += 10
+    else: score -= 10 # Pénalité si marché plat
+    
+    # Position / EMA 200 (10 pts)
+    if signal_buy and above_ema200: score += 10
+    if signal_sell and not above_ema200: score += 10
 
+    # RSI Extrême (Bonus/Malus)
+    if signal_buy and last.rsi > 75: score -= 10 # Attention surachat
+    if signal_sell and last.rsi < 25: score -= 10 # Attention survente
+    
+    final_score = max(0, min(100, score))
+
+    # Gestion SL/TP Dynamique
+    sl_dist = 2.0 * last.atr
+    tp_dist = 3.0 * last.atr # Risk Reward 1:1.5
+    
+    sl = last.c - sl_dist if signal_buy else last.c + sl_dist
+    tp = last.c + tp_dist if signal_buy else last.c - tp_dist
+
+    tag = "⚡" if is_live_signal else ""
+    
     return {
-        "Instrument": pair.replace("_","/"),
+        "Instrument": pair.replace("_", "/"),
         "TF": tf,
-        "Signal": signal_txt,
-        "Confiance": min(round(conf, 0), 100),
-        "Prix": round(last.c, 5),
-        "SL": round(sl, 5),
-        "TP": round(tp, 5),
-        "R:R": "1:1.5",
-        "RSI": round(last.rsi, 1),
-        "Heure": last.time.strftime("%H:%M"),
-        "_conf": conf,
-        "_raw_sig": "ACHAT" if buy else "VENTE"
+        "Action": "ACHAT" if signal_buy else "VENTE",
+        "Tag": tag,
+        "Score": final_score,
+        "Prix": last.c,
+        "SL": sl, "TP": tp,
+        "ADX": f"{int(last.adx)} ({trend_strength})",
+        "Macro": macro,
+        "RSI": int(last.rsi),
+        "Time": last.time
     }
 
-def scan(pairs, tfs, mode_live):
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        # On envoie le paramètre mode_live à l'analyse
-        futures = [ex.submit(analyze, p, tf, mode_live) for p in pairs for tf in tfs]
+def run_scan(pairs, tfs, mode_live):
+    res = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(analyze_pair, p, tf, mode_live) for p in pairs for tf in tfs]
         for f in as_completed(futures):
             try:
                 r = f.result()
-                if r: results.append(r)
+                if r: res.append(r)
             except: pass
-    return results
+    return res
 
-# ==================== INTERFACE (Design Code 1) ====================
-st.title("Forex Multi-Timeframe Signal Scanner Pro")
-st.write("Scanner hybride : Choisissez entre sécurité (Clôture) ou vitesse (0-Lag)")
+# ==================== INTERFACE ====================
+st.title("🛡️ Hedge Fund FX Scanner • Quant Edition")
+st.markdown("Algorithme Institutionnel : **ADX Filter + Macro Bias + Dynamic Risk**")
 
-# --- SIDEBAR ---
-st.sidebar.header("Configuration")
-with st.sidebar.expander("Filtrer les paires", expanded=False):
-    selected_pairs = st.multiselect("Paires :", PAIRS_DEFAULT, default=PAIRS_DEFAULT)
+# Sidebar
+st.sidebar.header("Paramètres Stratégie")
+mode = st.sidebar.radio("Type de Signal", ["Sécurisé (Clôture)", "Aggressif (0-Lag ⚡)"], index=0)
+is_live = "Aggressif" in mode
 
-# LE BOUTON MAGIQUE pour choisir le mode
-scan_mode = st.sidebar.radio(
-    "Mode de détection :",
-    ["Signaux Confirmés (Clôture)", "Temps Réel (0-Lag ⚡)"],
-    index=0,
-    help="Clôture = Signal validé à la fin de la bougie (Sûr).\nTemps Réel = Signal immédiat (Rapide mais peut changer)."
-)
-is_live_mode = "Temps Réel" in scan_mode
+st.sidebar.subheader("Filtres")
+pairs_sel = st.sidebar.multiselect("Univers", PAIRS_DEFAULT, PAIRS_DEFAULT)
+tfs_sel = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], ["H1","H4"])
+min_score = st.sidebar.slider("Quant Score Min", 0, 100, 60, help="Score < 50 = Signal faible ou contre-tendance.")
 
-selected_tfs = st.sidebar.multiselect("Timeframes :", ["H1","H4","D1"], default=["H1","H4","D1"])
-min_confidence = st.sidebar.slider("Confiance minimale (%) :", 0, 100, 20)
-auto_refresh = st.sidebar.checkbox("Auto-refresh (5 min)")
-scan_button = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
+if st.sidebar.button("🔍 LANCER L'ANALYSE QUANT", type="primary"):
+    
+    # Dashboard Info Marché
+    tz = pytz.timezone('Africa/Tunis')
+    now = datetime.now(tz)
+    
+    with st.spinner("Calcul des métriques institutionnelles..."):
+        results = run_scan(pairs_sel, tfs_sel, is_live)
+        # Filtre par score
+        results = [r for r in results if r["Score"] >= min_score]
+        results.sort(key=lambda x: x["Score"], reverse=True)
 
-# --- SESSION MARKET (Info utile) ---
-tz = pytz.timezone('Africa/Tunis')
-now = datetime.now(tz)
-sessions = {
-    "Londres": (9, 18, "green"), "New York": (14, 23, "green"), 
-    "Overlap": (14, 18, "red"), "Tokyo": (1, 10, "orange")
-}
-active_sess = [k for k,v in sessions.items() if v[0] <= now.hour < v[1]]
-st.markdown("---")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Paires", len(selected_pairs))
-c2.metric("Mode", "LIVE ⚡" if is_live_mode else "CONFIRMÉ ⭐")
-c3.metric("Heure Tunis", now.strftime("%H:%M"))
-c4.markdown(f"**Sessions :** {', '.join(active_sess) if active_sess else 'Calme'}")
-
-# --- EXECUTION DU SCAN ---
-if scan_button or auto_refresh:
-    if auto_refresh and not scan_button:
-        with st.spinner(f"Attente refresh..."):
-            time.sleep(1) 
-
-    with st.spinner("Analyse du marché en cours..."):
-        # On passe le mode choisi à la fonction de scan
-        results = scan(selected_pairs, selected_tfs, is_live_mode)
-        results = [r for r in results if r["_conf"] >= min_confidence]
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Paires Analysées", len(pairs_sel))
+    c2.metric("Signaux Qualifiés", len(results))
+    c3.metric("Filtre ADX", "Activé (>20)")
+    c4.metric("Session", now.strftime("%H:%M"))
 
     if results:
-        # 1. TOP 5 (Comme Code 1)
-        st.subheader("🏆 Top 5 Signaux par Confiance")
-        top5 = sorted(results, key=lambda x: x["_conf"], reverse=True)[:5]
-        cols = st.columns(5)
-        for i, r in enumerate(top5):
-            with cols[i]:
-                color = "green" if r["_raw_sig"] == "ACHAT" else "red"
-                st.markdown(f":{color}[**{r['Signal']}**]")
-                st.metric(f"{r['Instrument']}", f"{r['Prix']}", f"{r['TF']} • {int(r['Confiance'])}%")
-                st.caption(f"SL {r['SL']} | TP {r['TP']}")
+        st.markdown("### 🔥 Top Opportunités (Score > 80)")
+        top_tier = [r for r in results if r["Score"] >= 80]
+        
+        if top_tier:
+            cols = st.columns(min(4, len(top_tier)))
+            for i, r in enumerate(top_tier[:4]):
+                with cols[i]:
+                    color = "green" if r["Action"] == "ACHAT" else "red"
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3 style="color:{color}; margin:0">{r['Action']} {r['Tag']}</h3>
+                        <h4 style="margin:0">{r['Instrument']}</h4>
+                        <p style="font-size:0.9em; color:#888">{r['TF']} • Score: <b>{r['Score']}/100</b></p>
+                        <hr style="border-color:#444">
+                        <p style="font-size:0.8em">TP: {r['TP']:.5f}<br>SL: {r['SL']:.5f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("Aucune opportunité 'Premium' (Score > 80) détectée. Le marché est peut-être indécis.")
 
-        # 2. TABLEAUX SEPARÉS PAR TIMEFRAME (Design Code 1 que tu aimais)
         st.markdown("---")
         
-        # Fonction de style (Couleurs pastels Code 1)
-        def style_df(row):
-            if "ACHAT" in row["Signal"]: 
-                return ["background-color: #d4edda; color: black"] * len(row) # Vert pastel
-            elif "VENTE" in row["Signal"]: 
-                return ["background-color: #f8d7da; color: black"] * len(row) # Rouge pastel
-            return [""] * len(row)
-
-        # On boucle sur l'ordre logique H1 -> H4 -> D1
-        for tf in ["H1", "H4", "D1"]:
-            if tf not in selected_tfs: continue
-            
-            tf_data = [r for r in results if r["TF"] == tf]
-            if tf_data:
-                st.markdown(f"### 📅 Signaux {tf} ({len(tf_data)})")
-                
-                # On prépare le dataframe propre pour l'affichage
-                df_show = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in tf_data])
-                
-                # On trie par confiance
-                df_show = df_show.sort_values("Confiance", ascending=False)
-                
-                st.dataframe(
-                    df_show.style.apply(style_df, axis=1).format({"Prix": "{:.5f}", "SL": "{:.5f}", "TP": "{:.5f}"}),
-                    use_container_width=True, 
-                    hide_index=True
-                )
+        # TABLEAU COMPLET
+        df_disp = pd.DataFrame(results)
         
-        # Export CSV
-        df_all = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in results])
-        csv = df_all.to_csv(index=False).encode()
-        st.download_button("📥 Télécharger CSV", csv, "signaux.csv", "text/csv")
+        # Mise en forme pour affichage
+        df_show = df_disp[["Instrument", "TF", "Action", "Tag", "Score", "Prix", "SL", "TP", "ADX", "Macro", "RSI"]]
+        
+        def highlight(row):
+            styles = [''] * len(row)
+            if row["Action"] == "ACHAT":
+                base = "background-color: rgba(40, 167, 69, 0.2);"
+            else:
+                base = "background-color: rgba(220, 53, 69, 0.2);"
+            
+            # Si Score très élevé, on met en gras/plus visible
+            if row["Score"] >= 80:
+                base += " font-weight: bold; border-left: 4px solid gold;"
+            
+            return [base] * len(row)
 
+        st.dataframe(
+            df_show.style.apply(highlight, axis=1).format({
+                "Prix": "{:.5f}", "SL": "{:.5f}", "TP": "{:.5f}"
+            }),
+            use_container_width=True,
+            height=800,
+            hide_index=True
+        )
+        
     else:
-        st.warning("Aucun signal trouvé avec ces critères. Essayez de baisser la confiance min.")
-
-    if auto_refresh:
-        time.sleep(300)
-        st.rerun()
+        st.warning("Aucun signal ne respecte vos critères de risque (Score insuffisant).")
+        st.caption("Conseil : Si l'ADX est faible partout, restez à l'écart.")
 
 else:
-    st.info("👈 Configurez vos paramètres et cliquez sur **LANCER LE SCAN**")
+    st.info("Prêt pour l'analyse. Cliquez sur le bouton dans la barre latérale.")
+
+with st.expander("📚 Comprendre le Score Quant"):
+    st.markdown("""
+    Le **Score (0-100)** n'est pas juste technique, il est probabiliste :
+    - **Base Technique (40%)** : HMA + RSI valident la direction.
+    - **Biais Macro (30%)** : Le D1 confirme-t-il le trade H1/H4 ? (Alignement des planètes).
+    - **Force ADX (20%)** : Y a-t-il une vraie tendance ou juste du bruit ? (ADX > 25 est idéal).
+    - **Zone Institutionnelle (10%)** : Sommes-nous du bon côté de l'EMA 200 ?
+    
+    *Un score > 80 est une opportunité statistiquement très forte.*
+    """)
