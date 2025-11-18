@@ -1,4 +1,4 @@
-# app.py → Version ULTIME (tout ce que tu aimais + encore mieux)
+# app.py → Version ULTIME 100% fonctionnelle (D1 + Top 5 + Étoile jaune + Couleurs)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,7 +6,6 @@ from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import pytz
 
 # ==================== WEBHOOK 0 LAG ====================
 def process_webhook():
@@ -60,10 +59,8 @@ def get_candles(pair, tf, count=250):
     for c in req.response.get("candles", []):
         data.append({
             "time": c["time"],
-            "o": float(c["mid"]["o"]),
-            "h": float(c["mid"]["h"]),
-            "l": float(c["mid"]["l"]),
-            "c": float(c["mid"]["c"]),
+            "o": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
+            "l": float(c["mid"]["l"]), "c": float(c["mid"]["c"]),
             "complete": c.get("complete", False)
         })
     df = pd.DataFrame(data)
@@ -106,7 +103,6 @@ def analyze(pair, tf):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # Détection du changement sur les 2 dernières bougies
     hma_became_bull = df["up"].iloc[-1] and not df["up"].iloc[-2]
     hma_became_bear = not df["up"].iloc[-1] and df["up"].iloc[-2]
 
@@ -121,7 +117,6 @@ def analyze(pair, tf):
     tp = last.c + 3*last.atr if buy else last.c - 3*last.atr
     conf = round((abs(last.rsi-50)/50*100*0.4 + strength*0.6), 1)
 
-    # Étoile jaune si signal sur bougie en cours
     star = "NEW" if not last.complete else ""
 
     return {
@@ -143,32 +138,33 @@ def analyze(pair, tf):
 def scan(pairs, tfs):
     results = []
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for f in as_completed([ex.submit(analyze, p, tf) for p in pairs for tf in tfs]):
+        futures = [ex.submit(analyze, p, tf) for p in pairs for tf in tfs]
+        for f in as_completed(futures):
             r = f.result()
             if r: results.append(r)
     return results
 
-# ==================== SIDEBAR ====================
+# ==================== INTERFACE ====================
 st.sidebar.header("Configuration")
 pairs = st.sidebar.multiselect("Paires", PAIRS, default=PAIRS[:12])
 tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], default=["H1","H4","D1"])
 min_conf = st.sidebar.slider("Confiance min (%)", 0, 100, 15)
 scan_btn = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
 
-if scan прекрасно_btn:
-    with st.spinner("Scan ultra-rapide…"):
+if scan_btn:
+    with st.spinner("Scan en cours…"):
         results = scan(pairs, tfs)
         results = [r for r in results if r["_conf"] >= min_conf]
 
     if results:
-        # === TOP 5 + ÉTOILE JAUNE ===
+        # === TOP 5 avec étoile jaune ===
         top5 = sorted(results, key=lambda x: x["_conf"], reverse=True)[:5]
         if top5:
             st.markdown("### TOP 5 SIGNAUX LES PLUS FORTS")
             for sig in top5:
-                color = "🟢" if sig["Signal"] == "ACHAT" else "🔴"
+                color = "ACHAT" if sig["Signal"] == "ACHAT" else "VENTE"
                 star = " NEW" if sig["Étoile"] else ""
-                st.markdown(f"{color} **{sig['Instrument']} {sig['TF']}** → {sig['Signal']} | Confiance {sig['Confiance']}% | {sig['Prix']} {star}")
+                st.markdown(f"**{color} {sig['Instrument']} {sig['TF']}** → {sig['Signal']} | Confiance {sig['Confiance']}% | Prix {sig['Prix']} {star}")
 
         # === AFFICHAGE PAR TF ===
         for tf in ["H1", "H4", "D1"]:
@@ -177,12 +173,15 @@ if scan прекрасно_btn:
                 tf_data.sort(key=lambda x: x["_conf"], reverse=True)
                 st.markdown(f"### {tf} – {len(tf_data)} signal(s)")
 
-                df_show = pd.DataFrame([{k:v for k,v in r.items() if k != "_conf" and k != "_time"} for r in tf_data])
+                df_show = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in tf_data])
 
                 def color_row(row):
-                    bg = "#d4edda" if "ACHAT" in row.Signal else "#f8d7da"  # vert clair / rouge clair
-                    if row.Étoile: bg = "#fff3cd"  # jaune clair pour les signaux frais
-                    return [f"background-color: {bg}; color: black;"] * len(row)
+                    if row.Étoile:
+                        return ["background-color: #fff3cd; color: black; font-weight: bold"] * len(row)  # jaune
+                    elif "ACHAT" in row.Signal:
+                        return ["background-color: #d4edda; color: black;"] * len(row)  # vert clair
+                    else:
+                        return ["background-color: #f8d7da; color: black;"] * len(row)  # rouge clair
 
                 st.dataframe(
                     df_show.style.apply(color_row, axis=1)
@@ -193,4 +192,4 @@ if scan прекрасно_btn:
     else:
         st.success("Aucun signal pour le moment")
 else:
-    st.info("Clique sur **LANCER LE SCAN**")
+    st.info("Configure et clique sur **LANCER LE SCAN**")
