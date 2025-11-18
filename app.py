@@ -499,7 +499,7 @@ def main():
                             "_score": s.score
                         } for s in tf_signals])
                         
-                        # Style
+                        # Style (appliqué AVANT de supprimer les colonnes)
                         def style_row(row):
                             if row["_action"] == "BUY":
                                 base = "background-color: rgba(0, 255, 136, 0.12);"
@@ -513,9 +513,18 @@ def main():
                             
                             return [base] * len(row)
                         
-                        styled = df_display.drop(columns=["_action", "_score"]).style.apply(style_row, axis=1)
+                        # Appliquer le style PUIS supprimer les colonnes helper
+                        styled = df_display.style.apply(style_row, axis=1)
                         
-                        st.dataframe(styled, use_container_width=True, hide_index=True, height=min(len(df_display) * 35 + 38, 600))
+                        # Afficher sans les colonnes helper
+                        display_columns = [c for c in df_display.columns if not c.startswith('_')]
+                        
+                        st.dataframe(
+                            styled[display_columns], 
+                            use_container_width=True, 
+                            hide_index=True, 
+                            height=min(len(df_display) * 35 + 38, 600)
+                        )
                     else:
                         st.info(f"No {tf} signals")
         
