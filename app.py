@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-import pytz
 import base64
 from fpdf import FPDF
 from oandapyV20 import API
@@ -11,17 +10,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # ==================== CONFIGURATION & STYLE ====================
-st.set_page_config(page_title="Hedge Fund FX Scanner", layout="wide")
+st.set_page_config(page_title="BlueStar HedgeFund Pro", layout="wide")
 
-# CSS : Cache les index, ajuste la police et force la hauteur auto (pas de scroll)
 st.markdown("""
 <style>
     thead tr th:first-child {display:none}
     tbody th {display:none}
     .stDataFrame {font-size: 0.9rem;}
-    .stDataFrame div[data-testid="stDataFrame"] > div {
-        height: auto !important; 
-    }
+    .stDataFrame div[data-testid="stDataFrame"] > div {height: auto !important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -34,19 +30,16 @@ PAIRS_DEFAULT = [
 
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 
-# ==================== API & DATA ====================
+# ==================== API OANDA ====================
 @st.cache_resource
 def get_oanda_client():
-    try:
-        return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
-    except:
-        st.error("Token OANDA manquant dans les secrets.")
-        st.stop()
+    try: return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
+    except: st.error("Token manquant"); st.stop()
 
 client = get_oanda_client()
 
 @st.cache_data(ttl=15)
-def get_candles_quant(pair, tf, count=200):
+def get_candles(pair, tf, count=300):
     gran = GRANULARITY_MAP.get(tf)
     if not gran: return pd.DataFrame()
     try:
@@ -57,9 +50,8 @@ def get_candles_quant(pair, tf, count=200):
         for c in req.response.get("candles", []):
             data.append({
                 "time": c["time"],
-                "o": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
-                "l": float(c["mid"]["l"]), "c": float(c["mid"]["c"]),
-                "vol": int(c["volume"]),
+                "open": float(c["mid"]["o"]), "high": float(c["mid"]["h"]),
+                "low": float(c["mid"]["l"]), "close": float(c["mid"]["c"]),
                 "complete": c.get("complete", False)
             })
         df = pd.DataFrame(data)
@@ -67,100 +59,170 @@ def get_candles_quant(pair, tf, count=200):
         return df
     except: return pd.DataFrame()
 
-# ==================== INDICATEURS INSTITUTIONNELS ====================
+# ==================== INDICATEURS FUSIONNÉS ====================
+
 def calculate_indicators(df):
+    close = df['close']
+    high = df['high']
+    low = df['low']
+    
+    # --- 1. LOGIQUE BLUESTAR (TRIGGER) ---
+    # HMA 20
     def wma(s, l):
         w = np.arange(1, l+1)
         return s.rolling(l).apply(lambda x: np.dot(x, w)/w.sum(), raw=True)
     
-    close = df.c
-    # HMA 20
-    df["hma20"] = wma(2 * wma(close, 10) - wma(close, 20), int(np.sqrt(20)))
+    hma_period = 20
+    half = int(hma_period / 2)
+    sqrt_l = int(np.sqrt(hma_period))
+    wma_half = wma(close, half)
+    wma_full = wma(close, hma_period)
+    df['hma'] = wma(2 * wma_half - wma_full, sqrt_l)
+    df['hma_up'] = df['hma'] > df['hma'].shift(1)
     
     # RSI 7
     delta = close.diff()
     up, down = delta.clip(lower=0), -delta.clip(upper=0)
-    rs = up.ewm(alpha=1/7).mean() / down.ewm(alpha=1/7).mean()
-    df["rsi"] = 100 - 100/(1+rs)
-
-    # ATR 14 & ADX
-    tr = pd.concat([df.h-df.l, (df.h-df.c.shift()).abs(), (df.l-df.c.shift()).abs()], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1/14).mean()
+    df['rsi'] = 100 - 100/(1 + up.ewm(alpha=1/7).mean()/down.ewm(alpha=1/7).mean())
     
-    plus_dm = df.h.diff().clip(lower=0)
-    minus_dm = -df.l.diff().clip(upper=0)
-    tr_smooth = tr.ewm(alpha=1/14).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / tr_smooth)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / tr_smooth)
+    # UT BOT (Sensitivity 2.0)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    xATR = tr.rolling(1).mean() # Period 1
+    nLoss = 2.0 * xATR
+    
+    xATRTrailingStop = [0.0] * len(df)
+    for i in range(1, len(df)):
+        prev_stop = xATRTrailingStop[i-1]
+        curr_src = close.iloc[i]
+        prev_src = close.iloc[i-1]
+        loss = nLoss.iloc[i]
+        if (curr_src > prev_stop) and (prev_src > prev_stop):
+            xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
+        elif (curr_src < prev_stop) and (prev_src < prev_stop):
+            xATRTrailingStop[i] = min(prev_stop, curr_src + loss)
+        elif curr_src > prev_stop:
+            xATRTrailingStop[i] = curr_src - loss
+        else:
+            xATRTrailingStop[i] = curr_src + loss
+    
+    df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
+    
+    # --- 2. LOGIQUE HEDGE FUND (FILTRES) ---
+    # ADX 14
+    atr14 = tr.ewm(alpha=1/14).mean()
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = -low.diff().clip(upper=0)
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr14)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr14)
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    df["adx"] = dx.ewm(alpha=1/14).mean()
-
-    # EMA 200
-    df["ema200"] = close.ewm(span=200).mean()
+    df['adx'] = dx.ewm(alpha=1/14).mean()
+    
+    # EMA 200 (Institutionnel)
+    df['ema200'] = close.ewm(span=200).mean()
+    
+    # ATR pour SL/TP
+    df['atr_val'] = atr14
+    
     return df
 
+# --- FONCTION MACRO BIAS (Hedge Fund) ---
 @st.cache_data(ttl=60)
-def get_macro_bias(pair, current_tf):
-    target_tf = "W" if current_tf == "D1" else "D1"
-    df = get_candles_quant(pair, target_tf, 100)
+def get_macro_bias(pair):
+    # On regarde toujours le D1 pour la macro trend
+    df = get_candles(pair, "D1", 100)
     if len(df) < 50: return "Neutral"
-    df = calculate_indicators(df)
-    last = df.iloc[-1]
-    if last.c > last.ema200: return "Bullish"
-    if last.c < last.ema200: return "Bearish"
+    
+    close = df['close']
+    ema200 = close.ewm(span=200).mean().iloc[-1]
+    # HMA D1 pour la direction court terme du daily
+    def wma(s, l):
+        w = np.arange(1, l+1)
+        return s.rolling(l).apply(lambda x: np.dot(x, w)/w.sum(), raw=True)
+    
+    wma_half = wma(close, 10)
+    wma_full = wma(close, 20)
+    hma = wma(2 * wma_half - wma_full, int(np.sqrt(20))).iloc[-1]
+    hma_prev = wma(2 * wma_half - wma_full, int(np.sqrt(20))).iloc[-2]
+    
+    price = close.iloc[-1]
+    
+    if price > ema200 and hma > hma_prev: return "Bullish"
+    if price < ema200 and hma < hma_prev: return "Bearish"
     return "Neutral"
 
-# ==================== ANALYSE ====================
+# ==================== ANALYSE CORE ====================
 def analyze_pair(pair, tf, mode_live):
-    df = get_candles_quant(pair, tf, 250)
-    if len(df) < 200: return None
+    df = get_candles(pair, tf, 300)
+    if len(df) < 100: return None
+    
     df = calculate_indicators(df)
     
     if mode_live:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        is_live_signal = not last.complete
+        idx = -1
+        is_live_signal = not df.iloc[-1]['complete']
     else:
-        idx = -2 if not df.iloc[-1].complete else -1
-        last = df.iloc[idx]
-        prev = df.iloc[idx-1]
+        idx = -2 if not df.iloc[-1]['complete'] else -1
         is_live_signal = False
-
-    # Logique technique
-    hma_bull = last.hma20 > df.iloc[-3].hma20
-    hma_bear = last.hma20 < df.iloc[-3].hma20
-    rsi_buy = last.rsi > 50
-    rsi_sell = last.rsi < 50
+        
+    last = df.iloc[idx]
+    prev = df.iloc[idx-1]
+    prev2 = df.iloc[idx-2]
     
-    signal_buy = hma_bull and rsi_buy
-    signal_sell = hma_bear and rsi_sell
+    # --- 1. DÉTECTION DU SIGNAL (BLUESTAR LOGIC) ---
+    hma_flip_green = last.hma_up and not prev.hma_up
+    hma_flip_red = not last.hma_up and prev.hma_up
     
-    if not (signal_buy or signal_sell): return None
-
-    # Filtres Hedge Fund
-    macro = get_macro_bias(pair, tf)
-    above_ema200 = last.c > last.ema200
+    rsi_ok_buy = last.rsi > 50
+    rsi_ok_sell = last.rsi < 50
     
-    # Scoring
-    score = 40
-    if signal_buy and macro == "Bullish": score += 30
-    elif signal_sell and macro == "Bearish": score += 30
+    ut_bull = last.ut_state == 1
+    ut_bear = last.ut_state == -1
     
-    if last.adx > 25: score += 20
-    elif last.adx > 20: score += 10
-    else: score -= 10 
+    raw_buy = (hma_flip_green or (last.hma_up and not prev2.hma_up)) and rsi_ok_buy and ut_bull
+    raw_sell = (hma_flip_red or (not last.hma_up and prev2.hma_up)) and rsi_ok_sell and ut_bear
     
-    if signal_buy and above_ema200: score += 10
-    if signal_sell and not above_ema200: score += 10
-
+    if not (raw_buy or raw_sell): return None
+    
+    action = "ACHAT" if raw_buy else "VENTE"
+    
+    # --- 2. FILTRAGE HEDGE FUND (QUANT LOGIC) ---
+    score = 50 # Base score
+    
+    # A. Filtre ADX (Force de la tendance)
+    adx_val = last.adx
+    if adx_val > 25: score += 20 # Autoroute
+    elif adx_val > 20: score += 10 # Correct
+    else: score -= 20 # Range/Chop (Dangereux)
+    
+    # B. Filtre Macro Bias (Tendance D1)
+    macro = get_macro_bias(pair)
+    if action == "ACHAT" and macro == "Bullish": score += 20
+    elif action == "VENTE" and macro == "Bearish": score += 20
+    elif macro == "Neutral": score += 0
+    else: score -= 15 # Contre-tendance Daily
+    
+    # C. Filtre EMA 200 (Zone Institutionnelle)
+    above_ema = last.close > last.ema200
+    if (action == "ACHAT" and above_ema) or (action == "VENTE" and not above_ema):
+        score += 10
+        
+    # D. Bonus Fresh Signal
+    is_fresh = (action == "ACHAT" and hma_flip_green) or (action == "VENTE" and hma_flip_red)
+    if is_fresh: score += 10
+    
+    # Note finale
     final_score = max(0, min(100, score))
     
     # SL/TP
-    sl = last.c - 2.0 * last.atr if signal_buy else last.c + 2.0 * last.atr
-    tp = last.c + 3.0 * last.atr if signal_buy else last.c - 3.0 * last.atr
-
+    atr = last.atr_val
+    if action == "ACHAT":
+        sl = last.close - 2.0 * atr
+        tp = last.close + 3.0 * atr
+    else:
+        sl = last.close + 2.0 * atr
+        tp = last.close - 3.0 * atr
+        
     tag = "⚡" if is_live_signal else ""
-    action = "ACHAT" if signal_buy else "VENTE"
     fmt = "%H:%M" if tf != "D1" else "%Y-%m-%d"
     
     return {
@@ -168,12 +230,12 @@ def analyze_pair(pair, tf, mode_live):
         "Instrument": pair.replace("_", "/"),
         "TF": tf,
         "Action": f"{action} {tag}",
+        "IsFresh": is_fresh,
         "Score": final_score,
-        "Prix": last.c,
+        "Prix": last.close,
         "SL": sl, "TP": tp,
-        "ADX": int(last.adx),
-        "Bias": macro,
-        "RSI": int(last.rsi),
+        "ADX": int(adx_val),
+        "Macro": macro,
         "_raw_action": action
     }
 
@@ -188,141 +250,92 @@ def run_scan(pairs, tfs, mode_live):
             except: pass
     return res
 
-# ==================== GENERATEUR PDF ====================
+# ==================== PDF ====================
 def create_pdf(results):
     class PDF(FPDF):
         def header(self):
             self.set_font('Arial', 'B', 15)
-            self.cell(0, 10, 'Hedge Fund Scanner Report', 0, 1, 'C')
+            self.cell(0, 10, 'BlueStar HedgeFund Report', 0, 1, 'C')
             self.ln(5)
-
     pdf = PDF()
     pdf.add_page()
     pdf.set_font("Arial", size=10)
-    
-    headers = ["Heure", "Instrument", "TF", "Action", "Score", "Prix", "SL", "TP"]
-    col_widths = [25, 25, 15, 25, 15, 25, 25, 25]
-    
+    headers = ["Heure", "Instrument", "TF", "Action", "Score", "ADX", "Macro", "TP"]
+    col_widths = [20, 25, 15, 30, 15, 15, 25, 25]
     pdf.set_fill_color(200, 200, 200)
-    for i, h in enumerate(headers):
-        pdf.cell(col_widths[i], 10, h, 1, 0, 'C', 1)
+    for i, h in enumerate(headers): pdf.cell(col_widths[i], 10, h, 1, 0, 'C', 1)
     pdf.ln()
-    
     for row in results:
         pdf.set_font("Arial", size=9)
-        if "ACHAT" in row["_raw_action"]:
-            pdf.set_text_color(0, 100, 0)
-        else:
-            pdf.set_text_color(150, 0, 0)
+        pdf.set_text_color(0, 100, 0) if "ACHAT" in row["_raw_action"] else pdf.set_text_color(150, 0, 0)
         data = [str(row["Heure"]), row["Instrument"], row["TF"], row["Action"].replace("⚡",""), 
-                str(row["Score"]), str(row["Prix"]), str(row["SL"]), str(row["TP"])]
-        for i, datum in enumerate(data):
-            pdf.cell(col_widths[i], 10, datum, 1, 0, 'C')
+                str(row["Score"]), str(row["ADX"]), row["Macro"], str(round(row["TP"],4))]
+        for i, d in enumerate(data): pdf.cell(col_widths[i], 10, d, 1, 0, 'C')
         pdf.ln()
     return pdf.output(dest='S').encode('latin-1')
 
 # ==================== INTERFACE ====================
-st.title("🛡️ Hedge Fund FX Scanner • Quant Edition")
+st.title("🚀 BlueStar x Hedge Fund Ultimate")
+st.markdown("Déclencheur : **BlueStar (HMA+RSI+UTBot)**  |  Filtres : **Institutionnels (ADX+D1+EMA200)**")
 
-# --- SIDEBAR ---
-st.sidebar.header("Configuration")
-scan_mode = st.sidebar.radio("Mode", ["Sécurisé (Clôture)", "Aggressif (0-Lag ⚡)"], index=0)
-is_live = "Aggressif" in scan_mode
+st.sidebar.header("Paramètres")
+scan_mode = st.sidebar.radio("Mode", ["Signaux Confirmés", "Temps Réel (⚡)"], index=0)
+is_live = "Temps Réel" in scan_mode
+tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], ["H1","H4","D1"])
+min_score = st.sidebar.slider("Score Min (Qualité)", 0, 100, 50, help="Filtre les signaux faibles (ADX bas ou Contre-tendance)")
+scan_btn = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
 
-selected_tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], default=["H1","H4","D1"])
-min_score = st.sidebar.slider("Score Quant Min", 0, 100, 60)
-scan_btn = st.sidebar.button("SCANNER LE MARCHÉ", type="primary", use_container_width=True)
-
-# --- EXECUTION ---
 if scan_btn:
-    with st.spinner("Analyse algorithmique en cours..."):
-        results = run_scan(PAIRS_DEFAULT, selected_tfs, is_live)
+    with st.spinner("Fusion BlueStar & Données Institutionnelles..."):
+        results = run_scan(PAIRS_DEFAULT, tfs, is_live)
         results = [r for r in results if r["Score"] >= min_score]
         
     if results:
-        # Stats basiques
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Signaux", len(results))
-        c2.metric("Meilleur Score", max(r["Score"] for r in results) if results else 0)
-        c3.metric("Mode", "LIVE" if is_live else "CONFIRMÉ")
-        
-        st.markdown("---")
-
-        # ==========================================
-        # 🏆 RETOUR DU TOP 5 (La section manquante)
-        # ==========================================
-        st.subheader("🏆 Top 5 Meilleures Opportunités")
-        
-        # Tri global par score décroissant
+        # TOP 5
+        st.subheader("🏆 Top 5 Opportunités (Validées HF)")
         top5 = sorted(results, key=lambda x: x["Score"], reverse=True)[:5]
-        
         cols = st.columns(5)
-        for i, row in enumerate(top5):
+        for i, r in enumerate(top5):
             with cols[i]:
-                color = "green" if "ACHAT" in row["_raw_action"] else "red"
-                # Affichage convivial style Code 1
-                st.markdown(f":{color}[**{row['Action']}**]")
-                st.metric(
-                    label=row['Instrument'],
-                    value=row['Prix'],
-                    delta=f"{row['TF']} • Score {row['Score']}/100"
-                )
-                st.caption(f"TP: {row['TP']:.5f}")
+                color = "green" if "ACHAT" in r["_raw_action"] else "red"
+                st.markdown(f":{color}[**{r['Action']}**]")
+                st.metric(r['Instrument'], r['Prix'], f"Score {r['Score']}/100")
+                st.caption(f"ADX: {r['ADX']} | Bias: {r['Macro']}")
         
         st.markdown("---")
-        # ==========================================
-
-        # Fonction de style
-        def style_quant(row):
+        
+        # TABLES
+        def style_hf(row):
             base = "color: black;"
-            if "ACHAT" in row["Action"]: 
-                base += "background-color: #d4edda;" # Vert pastel
-            else: 
-                base += "background-color: #f8d7da;" # Rouge pastel
-            if row["Score"] >= 80: 
-                base += "font-weight: bold; border-left: 4px solid gold;"
+            if "ACHAT" in row["Action"]: base += "background-color: #d4edda;"
+            else: base += "background-color: #f8d7da;"
+            if row["Score"] >= 80: base += "font-weight: bold; border-left: 5px solid gold;"
             return [base] * len(row)
 
-        # Affichage par Timeframe
-        tf_order = ["H1", "H4", "D1"]
-        for tf in tf_order:
-            if tf not in selected_tfs: continue
+        for tf in ["H1","H4","D1"]:
+            if tf not in tfs: continue
             subset = [r for r in results if r["TF"] == tf]
             if subset:
-                st.subheader(f"🕒 Timeframe {tf} ({len(subset)})")
+                st.subheader(f"Timeframe {tf} ({len(subset)})")
                 subset.sort(key=lambda x: x["Score"], reverse=True)
-                
-                df_show = pd.DataFrame(subset)
-                cols_to_show = ["Heure", "Instrument", "Action", "Score", "Prix", "SL", "TP", "ADX", "Bias"]
-                
-                # Hauteur dynamique pour éviter le scroll
-                height_dynamic = (len(df_show) + 1) * 35 + 3
+                df_s = pd.DataFrame(subset)
+                h_dyn = (len(df_s)+1)*35+3
                 
                 st.dataframe(
-                    df_show[cols_to_show].style.apply(style_quant, axis=1).format({
-                        "Prix": "{:.5f}", "SL": "{:.5f}", "TP": "{:.5f}"
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=height_dynamic
+                    df_s[["Heure","Instrument","Action","Score","Prix","SL","TP","ADX","Macro"]].style.apply(style_hf, axis=1).format({"Prix":"{:.5f}","SL":"{:.5f}","TP":"{:.5f}"}),
+                    use_container_width=True, hide_index=True, height=h_dyn
                 )
-                st.markdown(" ")
 
-        # Export PDF & CSV
-        st.markdown("---")
-        col_dl1, col_dl2 = st.columns(2)
-        
-        df_all = pd.DataFrame(results)
-        csv = df_all.to_csv(index=False).encode()
-        col_dl1.download_button("📥 Télécharger CSV", csv, "quant_signals.csv", "text/csv", use_container_width=True)
-        
+        # EXPORT
+        c1, c2 = st.columns(2)
         try:
-            pdf_bytes = create_pdf(results)
-            b64 = base64.b64encode(pdf_bytes).decode()
-            href = f'<a href="data:application/octet-stream;base64,{b64}" download="quant_report.pdf" style="text-decoration:none; color:white; background-color:#FF4B4B; padding:10px 20px; border-radius:5px; display:block; text-align:center;">📄 Télécharger Rapport PDF</a>'
-            col_dl2.markdown(href, unsafe_allow_html=True)
-        except Exception as e:
-            col_dl2.error(f"Ajoutez 'fpdf' dans requirements.txt pour le PDF. Erreur: {e}")
+            pdf = create_pdf(results)
+            b64 = base64.b64encode(pdf).decode()
+            href = f'<a href="data:application/octet-stream;base64,{b64}" download="hf_report.pdf" style="text-decoration:none; color:white; background-color:#FF4B4B; padding:10px; border-radius:5px; display:block; text-align:center">📄 PDF Rapport</a>'
+            c2.markdown(href, unsafe_allow_html=True)
+        except: pass
+        
+        csv = pd.DataFrame(results).to_csv(index=False).encode()
+        c1.download_button("📥 CSV Data", csv, "hf_data.csv", "text/csv", use_container_width=True)
 
-    else:
-        st.warning("Aucun signal ne correspond à vos critères.")
+    else: st.warning("Aucun signal ne passe les filtres Hedge Fund (Essayez de baisser le Score Min).")
