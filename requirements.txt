@@ -4,3 +4,4 @@ numpy
 oandapyV20
 fastapi
 uvicorn[standard]
+fpdf
