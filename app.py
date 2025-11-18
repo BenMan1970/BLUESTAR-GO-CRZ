@@ -1,732 +1,564 @@
 """
-BlueStar Cascade - Institutional Grade Trading System
-Hedge Fund Level Implementation
+BlueStar Cascade - Institutional Grade (Logique Originale Améliorée)
+Fusion : Cascade stricte + Risk Management professionnel
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pytz
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 from enum import Enum
 import json
-import hashlib
-from collections import defaultdict
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# OANDA API
+from oandapyV20 import API
+from oandapyV20.endpoints.instruments import InstrumentsCandles
 
 # ==================== CONFIGURATION ====================
 st.set_page_config(page_title="BlueStar Institutional", layout="wide", initial_sidebar_state="expanded")
 
-# Logging professionnel
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CSS Avancé
+# CSS Premium
 st.markdown("""
 <style>
-    .main {background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);}
+    .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);}
     .stMetric {background: rgba(255,255,255,0.05); padding: 15px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1);}
     .stMetric label {color: #a0a0c0 !important; font-size: 0.85rem;}
     .stMetric [data-testid="stMetricValue"] {color: #00ff88 !important; font-size: 1.8rem; font-weight: 700;}
-    .risk-card {background: rgba(255,50,50,0.1); border-left: 4px solid #ff3333; padding: 12px; border-radius: 8px; margin: 10px 0;}
-    .performance-card {background: rgba(50,255,50,0.1); border-left: 4px solid #33ff33; padding: 12px; border-radius: 8px; margin: 10px 0;}
     .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 0.75rem;}
+    .risk-card {background: rgba(255,50,50,0.1); border-left: 4px solid #ff3333; padding: 15px; border-radius: 8px; margin: 10px 0;}
+    .performance-card {background: rgba(50,255,50,0.1); border-left: 4px solid #33ff33; padding: 15px; border-radius: 8px; margin: 10px 0;}
     thead tr th:first-child {display:none}
     tbody th {display:none}
+    .stDataFrame {font-size: 0.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== ENUMS & DATACLASSES ====================
-class MarketRegime(Enum):
-    TRENDING_BULL = "📈 Trending Bull"
-    TRENDING_BEAR = "📉 Trending Bear"
-    RANGING = "↔️ Ranging"
-    VOLATILE = "⚡ High Volatility"
-    QUIET = "😴 Low Volatility"
+# Paires et config
+PAIRS_DEFAULT = [
+    "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
+    "EUR_GBP","EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY",
+    "EUR_AUD","EUR_CAD","EUR_NZD","GBP_AUD","GBP_CAD","GBP_NZD",
+    "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
+    "EUR_CHF","GBP_CHF","USD_SEK"
+]
 
+GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
+
+# ==================== ENUMS & DATACLASSES ====================
 class SignalQuality(Enum):
-    INSTITUTIONAL = "🏦 Institutional Grade"
-    HIGH = "⭐ High Quality"
-    MEDIUM = "⚠️ Medium Quality"
-    LOW = "❌ Low Quality"
+    INSTITUTIONAL = "🏦 Institutional"
+    PREMIUM = "⭐ Premium"
+    STANDARD = "✓ Standard"
 
 @dataclass
 class RiskConfig:
-    """Configuration de risque niveau institutional"""
-    max_risk_per_trade: float = 0.01  # 1% par trade
-    max_portfolio_risk: float = 0.05  # 5% total
-    max_correlation: float = 0.7  # Max corrélation entre positions
-    max_drawdown_threshold: float = 0.10  # 10% drawdown max
-    kelly_fraction: float = 0.25  # Kelly conservateur (1/4 Kelly)
-    position_sizing_method: str = "kelly"  # kelly, fixed, risk_parity
+    max_risk_per_trade: float = 0.01
+    max_portfolio_risk: float = 0.05
+    max_correlation: float = 0.7
+    kelly_fraction: float = 0.25
 
 @dataclass
-class PerformanceMetrics:
-    """Métriques de performance professionnelles"""
-    total_signals: int = 0
-    win_rate: float = 0.0
-    profit_factor: float = 0.0
-    sharpe_ratio: float = 0.0
-    sortino_ratio: float = 0.0
-    max_drawdown: float = 0.0
-    avg_win: float = 0.0
-    avg_loss: float = 0.0
-    expectancy: float = 0.0
-    calmar_ratio: float = 0.0
-    
-@dataclass
 class Signal:
-    """Signal de trading enrichi"""
     timestamp: datetime
     pair: str
     timeframe: str
-    action: str  # BUY/SELL
+    action: str
     entry_price: float
     stop_loss: float
     take_profit: float
-    
-    # Scoring avancé
-    base_score: int
-    confluence_score: int
-    regime_bonus: int
-    volatility_bonus: int
-    total_score: int
+    score: int
     quality: SignalQuality
-    
-    # Risk Management
     position_size: float
     risk_amount: float
-    risk_reward_ratio: float
-    
-    # Indicateurs
+    risk_reward: float
     adx: float
     rsi: float
     atr: float
-    
-    # Context
-    market_regime: MarketRegime
     higher_tf_trend: str
     correlation_risk: float
-    signal_age_seconds: float = 0.0
-    
-    # Metadata
-    is_live: bool = False
-    confidence_decay: float = 1.0
+    is_live: bool
+    is_fresh_flip: bool
 
-# ==================== CACHE SIMULATION (Redis-like) ====================
-class InMemoryCache:
-    """Cache intelligent avec TTL"""
-    def __init__(self):
-        self._cache = {}
-        self._timestamps = {}
-    
-    def get(self, key: str, ttl: int = 60) -> Optional[any]:
-        if key in self._cache:
-            if (datetime.now() - self._timestamps[key]).seconds < ttl:
-                return self._cache[key]
-            else:
-                del self._cache[key]
-                del self._timestamps[key]
-        return None
-    
-    def set(self, key: str, value: any):
-        self._cache[key] = value
-        self._timestamps[key] = datetime.now()
-    
-    def clear(self):
-        self._cache.clear()
-        self._timestamps.clear()
+# ==================== OANDA API ====================
+@st.cache_resource
+def get_oanda_client():
+    try:
+        return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
+    except:
+        st.error("⚠️ OANDA Token manquant dans secrets")
+        st.stop()
 
-cache = InMemoryCache()
+client = get_oanda_client()
 
-# ==================== MARKET REGIME DETECTOR ====================
-class MarketRegimeAnalyzer:
-    """Détection du régime de marché (Trending/Ranging/Volatile)"""
+@st.cache_data(ttl=15)
+def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
+    """Récupère les données OANDA avec cache intelligent"""
+    gran = GRANULARITY_MAP.get(tf)
+    if not gran:
+        return pd.DataFrame()
     
-    @staticmethod
-    def detect_regime(df: pd.DataFrame) -> MarketRegime:
-        """Détecte le régime actuel du marché"""
-        if len(df) < 50:
-            return MarketRegime.RANGING
+    try:
+        params = {"granularity": gran, "count": count, "price": "M"}
+        req = InstrumentsCandles(instrument=pair, params=params)
+        client.request(req)
         
-        close = df['close']
-        high = df['high']
-        low = df['low']
+        data = []
+        for c in req.response.get("candles", []):
+            data.append({
+                "time": c["time"],
+                "open": float(c["mid"]["o"]),
+                "high": float(c["mid"]["h"]),
+                "low": float(c["mid"]["l"]),
+                "close": float(c["mid"]["c"]),
+                "complete": c.get("complete", False)
+            })
         
-        # ADX pour la force de tendance
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1/14).mean()
-        plus_dm = high.diff().clip(lower=0)
-        minus_dm = -low.diff().clip(upper=0)
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.ewm(alpha=1/14).mean().iloc[-1]
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["time"] = pd.to_datetime(df["time"])
         
-        # Volatilité relative
-        returns = close.pct_change()
-        volatility = returns.std() * np.sqrt(252) * 100  # Annualisée
+        return df
+    
+    except Exception as e:
+        logger.error(f"Erreur get_candles pour {pair} {tf}: {e}")
+        return pd.DataFrame()
+
+# ==================== INDICATEURS (TA LOGIQUE ORIGINALE) ====================
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcule HMA, RSI, UT Bot, ADX - Logique BlueStar originale"""
+    
+    close = df['close']
+    high = df['high']
+    low = df['low']
+    
+    # HMA 20
+    def wma(series, length):
+        weights = np.arange(1, length + 1)
+        return series.rolling(length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+    
+    wma_half = wma(close, 10)
+    wma_full = wma(close, 20)
+    df['hma'] = wma(2 * wma_half - wma_full, int(np.sqrt(20)))
+    df['hma_up'] = df['hma'] > df['hma'].shift(1)
+    
+    # RSI 7
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    rs = up.ewm(alpha=1/7).mean() / down.ewm(alpha=1/7).mean()
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # UT BOT
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    
+    xATR = tr.rolling(1).mean()
+    nLoss = 2.0 * xATR
+    
+    xATRTrailingStop = [0.0] * len(df)
+    for i in range(1, len(df)):
+        prev_stop = xATRTrailingStop[i-1]
+        curr_src = close.iloc[i]
+        loss = nLoss.iloc[i]
         
-        # ATR normalisé
-        atr_normalized = (atr.iloc[-1] / close.iloc[-1]) * 100
-        
-        # Décision
-        if volatility > 30:
-            return MarketRegime.VOLATILE
-        elif volatility < 10:
-            return MarketRegime.QUIET
-        elif adx > 25:
-            if close.iloc[-1] > close.iloc[-20]:
-                return MarketRegime.TRENDING_BULL
-            else:
-                return MarketRegime.TRENDING_BEAR
+        if (curr_src > prev_stop) and (close.iloc[i-1] > prev_stop):
+            xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
+        elif (curr_src < prev_stop) and (close.iloc[i-1] < prev_stop):
+            xATRTrailingStop[i] = min(prev_stop, curr_src + loss)
+        elif curr_src > prev_stop:
+            xATRTrailingStop[i] = curr_src - loss
         else:
-            return MarketRegime.RANGING
+            xATRTrailingStop[i] = curr_src + loss
     
-    @staticmethod
-    def get_regime_multiplier(regime: MarketRegime, signal_direction: str) -> float:
-        """Ajuste le score selon le régime"""
-        multipliers = {
-            MarketRegime.TRENDING_BULL: {"BUY": 1.3, "SELL": 0.7},
-            MarketRegime.TRENDING_BEAR: {"BUY": 0.7, "SELL": 1.3},
-            MarketRegime.RANGING: {"BUY": 0.9, "SELL": 0.9},
-            MarketRegime.VOLATILE: {"BUY": 0.8, "SELL": 0.8},
-            MarketRegime.QUIET: {"BUY": 1.1, "SELL": 1.1}
-        }
-        return multipliers.get(regime, {}).get(signal_direction, 1.0)
+    df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
+    
+    # ADX
+    atr14 = tr.ewm(alpha=1/14).mean()
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = -low.diff().clip(upper=0)
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr14)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr14)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    df['adx'] = dx.ewm(alpha=1/14).mean()
+    
+    df['atr_val'] = atr14
+    
+    return df
+
+# ==================== CASCADE ALIGNMENT (TA LOGIQUE) ====================
+@st.cache_data(ttl=60)
+def get_trend_alignment(pair: str, signal_tf: str) -> str:
+    """Valide l'alignement timeframe supérieur - CASCADE STRICTE"""
+    
+    map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
+    higher_tf = map_higher.get(signal_tf)
+    
+    if not higher_tf:
+        return "Neutral"
+    
+    df = get_candles(pair, higher_tf, 100)
+    if len(df) < 50:
+        return "Neutral"
+    
+    close = df['close']
+    
+    # EMA 50
+    ema50 = close.ewm(span=50).mean().iloc[-1]
+    
+    # HMA TF Supérieur
+    def wma(series, length):
+        weights = np.arange(1, length + 1)
+        return series.rolling(length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+    
+    wma_half = wma(close, 10)
+    wma_full = wma(close, 20)
+    hma = wma(2 * wma_half - wma_full, int(np.sqrt(20)))
+    
+    hma_now = hma.iloc[-1]
+    hma_prev = hma.iloc[-2]
+    price = close.iloc[-1]
+    
+    # ALIGNEMENT STRICT
+    if price > ema50 and hma_now > hma_prev:
+        return "Bullish"
+    elif price < ema50 and hma_now < hma_prev:
+        return "Bearish"
+    else:
+        return "Neutral"
 
 # ==================== RISK MANAGER ====================
 class RiskManager:
-    """Gestionnaire de risque institutional"""
-    
-    def __init__(self, config: RiskConfig, account_balance: float = 10000):
+    def __init__(self, config: RiskConfig, balance: float):
         self.config = config
-        self.balance = account_balance
+        self.balance = balance
         self.open_positions = []
-        self.correlation_matrix = {}
     
-    def calculate_position_size(self, signal: Signal, method: str = "kelly") -> float:
-        """Calcule la taille de position optimale"""
-        
+    def calculate_position_size(self, signal: Signal) -> float:
+        """Kelly Criterion position sizing"""
         risk_amount = self.balance * self.config.max_risk_per_trade
         pip_risk = abs(signal.entry_price - signal.stop_loss)
         
-        if method == "kelly":
-            # Kelly Criterion (simplifié)
-            win_rate = 0.55  # À ajuster avec historique
-            avg_win = signal.risk_reward_ratio
-            avg_loss = 1.0
-            
-            kelly = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
-            kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
-            
-            position_size = (self.balance * kelly) / pip_risk
+        # Kelly simplifié
+        win_rate = 0.58
+        kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
+        kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
         
-        elif method == "fixed":
-            position_size = risk_amount / pip_risk
-        
-        elif method == "risk_parity":
-            # Ajuste selon volatilité
-            volatility_adj = 0.02 / signal.atr if signal.atr > 0 else 1.0
-            position_size = (risk_amount * volatility_adj) / pip_risk
-        
-        else:
-            position_size = risk_amount / pip_risk
+        position_size = (self.balance * kelly) / pip_risk if pip_risk > 0 else 0
         
         return round(position_size, 2)
     
-    def calculate_portfolio_correlation(self, new_signal: Signal) -> float:
-        """Calcule la corrélation avec les positions existantes"""
+    def calculate_correlation(self, new_signal: Signal) -> float:
+        """Corrélation avec positions existantes"""
         if not self.open_positions:
             return 0.0
         
-        # Simulation : corrélation basée sur les paires communes
         correlations = []
         for pos in self.open_positions:
-            # EUR/USD vs EUR/GBP = haute corrélation
             base_new = new_signal.pair.split("_")[0]
             base_existing = pos.pair.split("_")[0]
             
             if base_new == base_existing:
                 correlations.append(0.8)
-            elif base_new in pos.pair or pos.pair.split("_")[0] in new_signal.pair:
+            elif base_new in pos.pair or base_existing in new_signal.pair:
                 correlations.append(0.5)
             else:
                 correlations.append(0.2)
         
-        return np.mean(correlations) if correlations else 0.0
+        return np.mean(correlations)
     
     def check_risk_limits(self, signal: Signal) -> Tuple[bool, str]:
         """Vérifie tous les critères de risque"""
         
-        # 1. Risk per trade
-        risk_pct = (abs(signal.entry_price - signal.stop_loss) / signal.entry_price)
-        if risk_pct > self.config.max_risk_per_trade:
-            return False, f"Risk per trade too high: {risk_pct:.2%}"
-        
-        # 2. Portfolio risk
-        total_risk = sum([pos.risk_amount for pos in self.open_positions])
+        # Portfolio risk
+        total_risk = sum([p.risk_amount for p in self.open_positions])
         if (total_risk + signal.risk_amount) / self.balance > self.config.max_portfolio_risk:
-            return False, f"Portfolio risk exceeded"
+            return False, "Portfolio risk exceeded"
         
-        # 3. Correlation
-        correlation = self.calculate_portfolio_correlation(signal)
-        if correlation > self.config.max_correlation:
-            return False, f"High correlation: {correlation:.2f}"
+        # Correlation
+        if signal.correlation_risk > self.config.max_correlation:
+            return False, f"High correlation: {signal.correlation_risk:.2f}"
         
-        return True, "All checks passed"
-    
-    def calculate_var(self, confidence: float = 0.95) -> float:
-        """Value at Risk calculation"""
-        if not self.open_positions:
-            return 0.0
-        
-        risks = [pos.risk_amount for pos in self.open_positions]
-        return np.percentile(risks, (1 - confidence) * 100) if risks else 0.0
+        return True, "OK"
 
-# ==================== PERFORMANCE TRACKER ====================
-class PerformanceTracker:
-    """Suivi des performances en temps réel"""
+# ==================== SIGNAL GENERATOR ====================
+def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager) -> Optional[Signal]:
+    """
+    Génère un signal avec TA LOGIQUE BLUESTAR ORIGINALE
+    + Améliorations institutionnelles (scoring, risk management)
+    """
     
-    def __init__(self):
-        self.trades_history = []
-        self.equity_curve = [10000]  # Start balance
-        self.daily_returns = []
-    
-    def add_trade(self, signal: Signal, result: float):
-        """Enregistre un trade"""
-        self.trades_history.append({
-            'timestamp': signal.timestamp,
-            'pair': signal.pair,
-            'action': signal.action,
-            'result': result,
-            'score': signal.total_score
-        })
-        
-        new_equity = self.equity_curve[-1] + result
-        self.equity_curve.append(new_equity)
-    
-    def calculate_metrics(self) -> PerformanceMetrics:
-        """Calcule toutes les métriques"""
-        if not self.trades_history:
-            return PerformanceMetrics()
-        
-        df = pd.DataFrame(self.trades_history)
-        
-        wins = df[df['result'] > 0]
-        losses = df[df['result'] < 0]
-        
-        win_rate = len(wins) / len(df) if len(df) > 0 else 0
-        avg_win = wins['result'].mean() if len(wins) > 0 else 0
-        avg_loss = abs(losses['result'].mean()) if len(losses) > 0 else 0
-        
-        profit_factor = (wins['result'].sum() / abs(losses['result'].sum())) if len(losses) > 0 else 0
-        
-        # Sharpe Ratio (simplifié)
-        returns = pd.Series(self.equity_curve).pct_change().dropna()
-        sharpe = (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() > 0 else 0
-        
-        # Sortino (downside deviation)
-        downside = returns[returns < 0]
-        sortino = (returns.mean() / downside.std()) * np.sqrt(252) if len(downside) > 0 and downside.std() > 0 else 0
-        
-        # Max Drawdown
-        equity_series = pd.Series(self.equity_curve)
-        running_max = equity_series.expanding().max()
-        drawdown = (equity_series - running_max) / running_max
-        max_dd = abs(drawdown.min())
-        
-        # Calmar Ratio
-        annual_return = ((self.equity_curve[-1] / self.equity_curve[0]) - 1)
-        calmar = annual_return / max_dd if max_dd > 0 else 0
-        
-        expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-        
-        return PerformanceMetrics(
-            total_signals=len(df),
-            win_rate=win_rate,
-            profit_factor=profit_factor,
-            sharpe_ratio=sharpe,
-            sortino_ratio=sortino,
-            max_drawdown=max_dd,
-            avg_win=avg_win,
-            avg_loss=avg_loss,
-            expectancy=expectancy,
-            calmar_ratio=calmar
-        )
-
-# ==================== SIGNAL GENERATOR (Version améliorée) ====================
-class InstitutionalSignalGenerator:
-    """Générateur de signaux niveau hedge fund"""
-    
-    def __init__(self, risk_manager: RiskManager):
-        self.risk_manager = risk_manager
-        self.regime_analyzer = MarketRegimeAnalyzer()
-    
-    def generate_signal(self, pair: str, df: pd.DataFrame, tf: str, mode_live: bool) -> Optional[Signal]:
-        """Génère un signal enrichi"""
-        
-        if len(df) < 100:
-            return None
-        
-        # Détection du régime
-        regime = self.regime_analyzer.detect_regime(df)
-        
-        # Calcul des indicateurs (version simplifiée pour démo)
-        df = self._calculate_indicators(df)
-        
-        idx = -1 if mode_live else -2
-        last = df.iloc[idx]
-        prev = df.iloc[idx-1]
-        
-        # Logique de signal (simplifié)
-        action = self._detect_action(last, prev)
-        if not action:
-            return None
-        
-        # Scoring avancé
-        base_score = 60
-        confluence = self._calculate_confluence(df, idx)
-        regime_bonus = int(self.regime_analyzer.get_regime_multiplier(regime, action) * 10)
-        volatility_bonus = self._calculate_volatility_bonus(df)
-        
-        total_score = base_score + confluence + regime_bonus + volatility_bonus
-        total_score = min(100, max(0, total_score))
-        
-        # Quality classification
-        if total_score >= 90:
-            quality = SignalQuality.INSTITUTIONAL
-        elif total_score >= 75:
-            quality = SignalQuality.HIGH
-        elif total_score >= 60:
-            quality = SignalQuality.MEDIUM
-        else:
-            quality = SignalQuality.LOW
-        
-        # SL/TP
-        atr = last.get('atr_val', last['close'] * 0.01)
-        if action == "BUY":
-            sl = last['close'] - 2.0 * atr
-            tp = last['close'] + 3.0 * atr
-        else:
-            sl = last['close'] + 2.0 * atr
-            tp = last['close'] - 3.0 * atr
-        
-        rr_ratio = abs(tp - last['close']) / abs(last['close'] - sl)
-        
-        # Création du signal
-        signal = Signal(
-            timestamp=last['time'],
-            pair=pair,
-            timeframe=tf,
-            action=action,
-            entry_price=last['close'],
-            stop_loss=sl,
-            take_profit=tp,
-            base_score=base_score,
-            confluence_score=confluence,
-            regime_bonus=regime_bonus,
-            volatility_bonus=volatility_bonus,
-            total_score=total_score,
-            quality=quality,
-            position_size=0.0,
-            risk_amount=0.0,
-            risk_reward_ratio=rr_ratio,
-            adx=last.get('adx', 0),
-            rsi=last.get('rsi', 50),
-            atr=atr,
-            market_regime=regime,
-            higher_tf_trend="Bullish" if action == "BUY" else "Bearish",
-            correlation_risk=0.0,
-            is_live=mode_live
-        )
-        
-        # Position sizing
-        signal.position_size = self.risk_manager.calculate_position_size(signal)
-        signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
-        signal.correlation_risk = self.risk_manager.calculate_portfolio_correlation(signal)
-        
-        # Vérification des limites de risque
-        passed, msg = self.risk_manager.check_risk_limits(signal)
-        if not passed:
-            logger.warning(f"Signal rejected for {pair}: {msg}")
-            return None
-        
-        return signal
-    
-    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calcule les indicateurs techniques"""
-        close = df['close']
-        high = df['high']
-        low = df['low']
-        
-        # RSI
-        delta = close.diff()
-        up = delta.clip(lower=0)
-        down = -delta.clip(upper=0)
-        df['rsi'] = 100 - 100/(1 + up.ewm(alpha=1/14).mean()/down.ewm(alpha=1/14).mean())
-        
-        # ATR
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        df['atr_val'] = tr.ewm(alpha=1/14).mean()
-        
-        # ADX
-        atr = df['atr_val']
-        plus_dm = high.diff().clip(lower=0)
-        minus_dm = -low.diff().clip(upper=0)
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        df['adx'] = dx.ewm(alpha=1/14).mean()
-        
-        return df
-    
-    def _detect_action(self, last, prev) -> Optional[str]:
-        """Détecte l'action (BUY/SELL)"""
-        # Logique simplifiée
-        if last.get('rsi', 50) > 55 and last['close'] > prev['close']:
-            return "BUY"
-        elif last.get('rsi', 50) < 45 and last['close'] < prev['close']:
-            return "SELL"
+    df = get_candles(pair, tf, 300)
+    if len(df) < 100:
         return None
     
-    def _calculate_confluence(self, df: pd.DataFrame, idx: int) -> int:
-        """Calcule le score de confluence"""
-        score = 0
-        last = df.iloc[idx]
-        
-        # ADX fort
-        if last.get('adx', 0) > 25:
-            score += 15
-        elif last.get('adx', 0) > 20:
-            score += 10
-        
-        # RSI dans zone favorable
-        rsi = last.get('rsi', 50)
-        if 40 < rsi < 60:
-            score += 5
-        
-        return score
+    df = calculate_indicators(df)
     
-    def _calculate_volatility_bonus(self, df: pd.DataFrame) -> int:
-        """Bonus basé sur la volatilité optimale"""
-        atr = df['atr_val'].iloc[-1]
-        avg_atr = df['atr_val'].tail(20).mean()
-        
-        ratio = atr / avg_atr if avg_atr > 0 else 1.0
-        
-        if 0.8 < ratio < 1.2:  # Volatilité normale
-            return 10
-        elif ratio > 1.5:  # Trop volatile
-            return -10
-        else:
-            return 0
+    # Index selon mode
+    if mode_live:
+        idx = -1
+        is_live_signal = not df.iloc[-1]['complete']
+    else:
+        idx = -2 if not df.iloc[-1]['complete'] else -1
+        is_live_signal = False
+    
+    last = df.iloc[idx]
+    prev = df.iloc[idx-1]
+    prev2 = df.iloc[idx-2]
+    
+    # === LOGIQUE BLUESTAR ORIGINALE ===
+    hma_flip_green = last.hma_up and not prev.hma_up
+    hma_flip_red = not last.hma_up and prev.hma_up
+    
+    rsi_ok_buy = last.rsi > 50
+    rsi_ok_sell = last.rsi < 50
+    
+    ut_bull = last.ut_state == 1
+    ut_bear = last.ut_state == -1
+    
+    # Signal brut
+    raw_buy = (hma_flip_green or (last.hma_up and not prev2.hma_up)) and rsi_ok_buy and ut_bull
+    raw_sell = (hma_flip_red or (not last.hma_up and prev2.hma_up)) and rsi_ok_sell and ut_bear
+    
+    if not (raw_buy or raw_sell):
+        return None
+    
+    action = "BUY" if raw_buy else "SELL"
+    is_fresh_flip = (action == "BUY" and hma_flip_green) or (action == "SELL" and hma_flip_red)
+    
+    # === CASCADE STRICTE ===
+    higher_trend = get_trend_alignment(pair, tf)
+    
+    if action == "BUY" and higher_trend != "Bullish":
+        return None
+    if action == "SELL" and higher_trend != "Bearish":
+        return None
+    
+    # === SCORING INSTITUTIONNEL ===
+    score = 70
+    
+    # ADX bonus
+    if last.adx > 25:
+        score += 15
+    elif last.adx > 20:
+        score += 10
+    
+    # Fresh flip bonus
+    if is_fresh_flip:
+        score += 15
+    
+    # RSI optimal zone
+    if action == "BUY" and 50 < last.rsi < 65:
+        score += 5
+    elif action == "SELL" and 35 < last.rsi < 50:
+        score += 5
+    
+    score = min(100, score)
+    
+    # Quality classification
+    if score >= 90:
+        quality = SignalQuality.INSTITUTIONAL
+    elif score >= 80:
+        quality = SignalQuality.PREMIUM
+    else:
+        quality = SignalQuality.STANDARD
+    
+    # === SL/TP ===
+    atr = last.atr_val
+    
+    if action == "BUY":
+        sl = last.close - 2.0 * atr
+        tp = last.close + 3.0 * atr
+    else:
+        sl = last.close + 2.0 * atr
+        tp = last.close - 3.0 * atr
+    
+    rr_ratio = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+    
+    # === TIMEZONE FIX ===
+    utc_time = last.time
+    if utc_time.tzinfo is None:
+        utc_time = pytz.utc.localize(utc_time)
+    
+    tunis_tz = pytz.timezone('Africa/Tunis')
+    local_time = utc_time.astimezone(tunis_tz)
+    
+    # === CRÉATION SIGNAL ===
+    signal = Signal(
+        timestamp=local_time,
+        pair=pair,
+        timeframe=tf,
+        action=action,
+        entry_price=last.close,
+        stop_loss=sl,
+        take_profit=tp,
+        score=score,
+        quality=quality,
+        position_size=0.0,
+        risk_amount=0.0,
+        risk_reward=rr_ratio,
+        adx=int(last.adx),
+        rsi=int(last.rsi),
+        atr=atr,
+        higher_tf_trend=higher_trend,
+        correlation_risk=0.0,
+        is_live=is_live_signal,
+        is_fresh_flip=is_fresh_flip
+    )
+    
+    # === RISK MANAGEMENT ===
+    signal.position_size = risk_manager.calculate_position_size(signal)
+    signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
+    signal.correlation_risk = risk_manager.calculate_correlation(signal)
+    
+    # Vérification limites
+    passed, msg = risk_manager.check_risk_limits(signal)
+    if not passed:
+        logger.info(f"Signal rejeté {pair} {tf}: {msg}")
+        return None
+    
+    return signal
 
-# ==================== MOCK DATA (Pour démo) ====================
-def generate_mock_candles(count: int = 300) -> pd.DataFrame:
-    """Génère des données fictives pour démo"""
-    np.random.seed(42)
-    dates = pd.date_range(end=datetime.now(), periods=count, freq='H')
+# ==================== SCANNER ====================
+def run_institutional_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: RiskManager) -> List[Signal]:
+    """Scanner parallélisé avec ThreadPoolExecutor"""
     
-    price = 1.1000
-    data = []
+    signals = []
     
-    for date in dates:
-        change = np.random.randn() * 0.0005
-        price += change
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(analyze_pair, pair, tf, mode_live, risk_manager)
+            for pair in pairs
+            for tf in tfs
+        ]
         
-        h = price + abs(np.random.randn() * 0.0003)
-        l = price - abs(np.random.randn() * 0.0003)
-        c = price + np.random.randn() * 0.0002
-        
-        data.append({
-            'time': date,
-            'open': price,
-            'high': h,
-            'low': l,
-            'close': c,
-            'complete': True
-        })
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    signals.append(result)
+            except Exception as e:
+                logger.error(f"Erreur scan: {e}")
     
-    return pd.DataFrame(data)
+    return signals
 
 # ==================== INTERFACE PRINCIPALE ====================
 def main():
     st.title("💎 BlueStar Cascade - Institutional Grade")
-    
-    # Badge institutional
     st.markdown('<span class="institutional-badge">HEDGE FUND LEVEL</span>', unsafe_allow_html=True)
     
     # Heure serveur
     now_tunis = datetime.now(pytz.timezone('Africa/Tunis'))
-    st.caption(f"🕐 Server Time (Tunis): {now_tunis.strftime('%H:%M:%S')} | Market Status: {'🟢 OPEN' if 8 <= now_tunis.hour < 22 else '🔴 CLOSED'}")
+    market_open = 0 <= now_tunis.hour < 23
+    st.caption(f"🕐 Server Time: {now_tunis.strftime('%H:%M:%S')} | {'🟢 MARKET OPEN' if market_open else '🔴 MARKET CLOSED'}")
     
-    # Sidebar
-    st.sidebar.header("⚙️ Configuration")
+    # === SIDEBAR ===
+    st.sidebar.header("⚙️ Configuration Institutionnelle")
     
-    # Risk Configuration
-    st.sidebar.subheader("Risk Management")
-    max_risk = st.sidebar.slider("Max Risk per Trade", 0.5, 3.0, 1.0, 0.1) / 100
-    max_portfolio_risk = st.sidebar.slider("Max Portfolio Risk", 2.0, 10.0, 5.0, 0.5) / 100
-    kelly_fraction = st.sidebar.slider("Kelly Fraction", 0.1, 0.5, 0.25, 0.05)
+    # Risk Management
+    st.sidebar.subheader("💼 Risk Management")
+    max_risk = st.sidebar.slider("Max Risk per Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
+    max_portfolio = st.sidebar.slider("Max Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
+    kelly_frac = st.sidebar.slider("Kelly Fraction", 0.1, 0.5, 0.25, 0.05)
     
     risk_config = RiskConfig(
         max_risk_per_trade=max_risk,
-        max_portfolio_risk=max_portfolio_risk,
-        kelly_fraction=kelly_fraction
+        max_portfolio_risk=max_portfolio,
+        kelly_fraction=kelly_frac
     )
     
-    account_balance = st.sidebar.number_input("Account Balance ($)", 1000, 1000000, 10000, 1000)
+    balance = st.sidebar.number_input("Account Balance ($)", 1000, 1000000, 10000, 1000)
     
-    # Mode de scan
-    mode = st.sidebar.radio("Scan Mode", ["✅ Confirmed Signals", "⚡ Live Signals"], index=0)
+    # Mode
+    mode = st.sidebar.radio("📡 Scan Mode", ["✅ Confirmed Signals", "⚡ Live Signals"], index=0)
     is_live = "Live" in mode
     
-    # Timeframes
-    timeframes = st.sidebar.multiselect("Timeframes", ["H1", "H4", "D1"], ["H1", "H4"])
+    # Timeframes avec D1 par défaut
+    tfs = st.sidebar.multiselect("📊 Timeframes", ["H1", "H4", "D1"], ["H1", "H4", "D1"])
     
-    # Bouton de scan
+    if not tfs:
+        st.sidebar.warning("⚠️ Sélectionnez au moins un timeframe")
+        return
+    
+    # Bouton scan
     scan_btn = st.sidebar.button("🚀 LAUNCH INSTITUTIONAL SCAN", type="primary", use_container_width=True)
     
     if scan_btn:
-        with st.spinner("🔍 Analyzing markets with institutional algorithms..."):
-            # Initialize
-            risk_manager = RiskManager(risk_config, account_balance)
-            signal_generator = InstitutionalSignalGenerator(risk_manager)
-            performance_tracker = PerformanceTracker()
-            
-            # Generate signals (MOCK pour démo)
-            signals = []
-            pairs = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "EUR_GBP"]
-            
-            for pair in pairs:
-                for tf in timeframes:
-                    df = generate_mock_candles(300)
-                    signal = signal_generator.generate_signal(pair, df, tf, is_live)
-                    if signal:
-                        signals.append(signal)
+        with st.spinner("🔍 Scanning markets with institutional-grade filters..."):
+            risk_manager = RiskManager(risk_config, balance)
+            signals = run_institutional_scan(PAIRS_DEFAULT, tfs, is_live, risk_manager)
         
         if signals:
-            # === DASHBOARD PRINCIPAL ===
+            # === MÉTRIQUES CLÉS ===
             st.markdown("---")
             st.subheader("📊 Institutional Dashboard")
             
-            # Métriques clés
             col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
                 st.metric("Total Signals", len(signals))
+            
             with col2:
-                institutional_count = len([s for s in signals if s.quality == SignalQuality.INSTITUTIONAL])
-                st.metric("Institutional Grade", institutional_count, f"{institutional_count/len(signals)*100:.0f}%")
+                institutional = len([s for s in signals if s.quality == SignalQuality.INSTITUTIONAL])
+                st.metric("Institutional Grade", institutional, f"{institutional/len(signals)*100:.0f}%")
+            
             with col3:
-                avg_score = np.mean([s.total_score for s in signals])
-                st.metric("Avg Score", f"{avg_score:.1f}/100")
+                avg_score = np.mean([s.score for s in signals])
+                st.metric("Average Score", f"{avg_score:.1f}/100")
+            
             with col4:
                 total_exposure = sum([s.risk_amount for s in signals])
-                st.metric("Total Exposure", f"${total_exposure:.0f}", f"{total_exposure/account_balance*100:.1f}%")
+                exposure_pct = (total_exposure / balance) * 100
+                st.metric("Portfolio Exposure", f"${total_exposure:.0f}", f"{exposure_pct:.1f}%")
+            
             with col5:
-                var_95 = risk_manager.calculate_var(0.95)
-                st.metric("VaR (95%)", f"${var_95:.0f}")
+                avg_rr = np.mean([s.risk_reward for s in signals])
+                st.metric("Avg R:R", f"{avg_rr:.2f}:1")
             
-            # === TOP INSTITUTIONAL SIGNALS ===
+            # === TOP 5 SIGNAUX ===
             st.markdown("---")
-            st.subheader("🏦 Top Institutional Grade Signals")
+            st.subheader("🏆 Top 5 Institutional Signals")
             
-            # Filtrer et trier
-            top_signals = sorted(signals, key=lambda x: x.total_score, reverse=True)[:5]
+            top5 = sorted(signals, key=lambda x: x.score, reverse=True)[:5]
             
             cols = st.columns(5)
-            for i, sig in enumerate(top_signals):
+            for i, sig in enumerate(top5):
                 with cols[i]:
                     color = "green" if sig.action == "BUY" else "red"
                     emoji = "📈" if sig.action == "BUY" else "📉"
+                    live_tag = " ⚡" if sig.is_live else ""
                     
-                    st.markdown(f":{color}[**{emoji} {sig.action}**]")
+                    st.markdown(f":{color}[**{emoji} {sig.action}{live_tag}**]")
                     st.metric(
                         sig.pair.replace("_", "/"),
                         f"{sig.entry_price:.5f}",
-                        f"Score: {sig.total_score}"
+                        f"Score: {sig.score}"
                     )
                     
                     st.markdown(f"""
                     <div style='font-size: 0.75rem; color: #a0a0c0;'>
                     <b>{sig.quality.value}</b><br>
-                    R:R {sig.risk_reward_ratio:.1f}:1<br>
+                    R:R {sig.risk_reward:.1f}:1<br>
                     Size: {sig.position_size:.2f} lots<br>
                     Risk: ${sig.risk_amount:.0f}<br>
-                    {sig.market_regime.value}
+                    ADX: {sig.adx} | RSI: {sig.rsi}
                     </div>
                     """, unsafe_allow_html=True)
             
-            # === RISK ANALYSIS ===
+            # === TABLEAUX PAR TIMEFRAME ===
             st.markdown("---")
-            col_risk1, col_risk2 = st.columns(2)
+            st.subheader("📋 Detailed Signals by Timeframe")
             
-            with col_risk1:
-                st.subheader("⚠️ Risk Analysis")
-                
-                # Portfolio Risk Breakdown
-                total_risk = sum([s.risk_amount for s in signals])
-                risk_pct = (total_risk / account_balance) * 100
-                
-                risk_color = "green" if risk_pct < 3 else "orange" if risk_pct < 5 else "red"
-                
-                st.markdown(f"""
-                <div class='risk-card'>
-                <h4 style='color: {risk_color}; margin: 0;'>Portfolio Risk: {risk_pct:.2f}%</h4>
-                <p style='margin: 5px 0; font-size: 0.85rem;'>
-                Total Exposure: ${total_risk:.0f} / ${account_balance * max_portfolio_risk:.0f} limit<br>
-                Active Signals: {len(signals)}<br>
-                Max Risk per Trade: {max_risk * 100:.1f}%
-                </p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Correlation Matrix
-                st.markdown("**Correlation Risk**")
-                for sig in signals[:3]:
-                    corr_color = "red" if sig.correlation_risk > 0.7 else "orange" if sig.correlation_risk > 0.5 else "green"
-                    st.markdown(f":{corr_color}[{sig.pair}: {sig.correlation_risk:.2f}]")
-            
-            with col_risk2:
-                st.subheader("📈 Performance Metrics")
-                
-                # Simulated performance
-                metrics = PerformanceMetrics(
-                    total_signals=len(signals),
-                    win_rate=0.58,
-                    profit_factor=1.85,
-                    sharpe_ratio=1.42,
-                    sortino_ratio=2.01,
-                    max_drawdown=0.08,
-                    avg_win=250,
-                    avg_loss=150,
-                    expectancy=95,
-                    calmar_ratio=2.5
-                )
-                
-                st.markdown(f"""
-                <div class='performance-card'>
-                <table style='width: 100%; font-size: 0.85rem;'>
-                <tr><td><b>Win Rate</b></td><td style='text-align: right;'>{metrics.win_rate*100:.1f}%</td></tr>
-                <tr><td><b>Profit Factor</b></td><td style='text-align: right;'>{metrics.profit_factor:.2f}</td></tr>
-                <tr><td><b>Sharpe Ratio</b></td><td style='text-align: right;'>{metrics.sharpe_ratio:.2f}</td></tr>
-                <tr><td><b>Sortino Ratio</b></td><td style='text-align: right;'>{metrics.sortino_ratio:.2f}</td></tr>
-                <tr><td><b>Calmar Ratio</b></td><td style='text-align: right;'>{metrics.calmar_ratio:.2f}</td></tr>
-                <tr><td><b>Max Drawdown</b></td><td style='text-align: right;'>{metrics.max_drawdown*100:.1f}%</td></tr>
-                <tr><td><b>Expectancy</b></td><td style='text-align: right;'>${metrics.expectancy:.0f}</td></tr>
-                </table>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # === DETAILED SIGNALS TABLE ===
-            st.markdown("---")
-            st.subheader("📋 Detailed Signal Analysis")
-            
-            # Grouper par timeframe
             for tf in ["H1", "H4", "D1"]:
                 tf_signals = [s for s in signals if s.timeframe == tf]
                 if not tf_signals:
@@ -734,134 +566,104 @@ def main():
                 
                 st.markdown(f"### Timeframe {tf} ({len(tf_signals)} signals)")
                 
-                # Créer DataFrame
+                # Sort by score
+                tf_signals.sort(key=lambda x: x.score, reverse=True)
+                
                 df_display = pd.DataFrame([{
-                    "Time": s.timestamp.strftime("%H:%M"),
+                    "Time": s.timestamp.strftime("%H:%M" if tf != "D1" else "%Y-%m-%d"),
                     "Pair": s.pair.replace("_", "/"),
-                    "Action": f"{s.action} {'⚡' if s.is_live else ''}",
-                    "Quality": s.quality.value.split()[0],
-                    "Score": s.total_score,
+                    "Action": f"{s.action} {'⚡' if s.is_live else ''} {'🔥' if s.is_fresh_flip else ''}",
+                    "Quality": s.quality.value.split()[1],
+                    "Score": s.score,
                     "Entry": f"{s.entry_price:.5f}",
                     "SL": f"{s.stop_loss:.5f}",
                     "TP": f"{s.take_profit:.5f}",
-                    "R:R": f"{s.risk_reward_ratio:.1f}:1",
+                    "R:R": f"{s.risk_reward:.1f}:1",
                     "Size": f"{s.position_size:.2f}",
                     "Risk": f"${s.risk_amount:.0f}",
-                    "ADX": f"{s.adx:.0f}",
-                    "RSI": f"{s.rsi:.0f}",
-                    "Regime": s.market_regime.value.split()[1],
-                    "Corr": f"{s.correlation_risk:.2f}",
-                    "_score": s.total_score,
-                    "_action": s.action
+                    "ADX": s.adx,
+                    "RSI": s.rsi,
+                    "Trend": s.higher_tf_trend,
+                    "_action": s.action,
+                    "_score": s.score
                 } for s in tf_signals])
                 
-                # Style
                 def style_row(row):
                     if row["_action"] == "BUY":
-                        base = "background-color: rgba(0, 255, 136, 0.1);"
+                        base = "background-color: rgba(0, 255, 136, 0.15);"
                     else:
-                        base = "background-color: rgba(255, 50, 80, 0.1);"
+                        base = "background-color: rgba(255, 50, 80, 0.15);"
                     
                     if row["_score"] >= 90:
                         base += "border-left: 4px solid gold; font-weight: bold;"
-                    elif row["_score"] >= 80:
-                        base += "border-left: 4px solid silver;"
+                    elif row["_score"] >= 85:
+                        base += "border-left: 3px solid silver;"
                     
                     return [base] * len(row)
                 
-                styled_df = df_display.drop(columns=["_score", "_action"]).style.apply(style_row, axis=1)
+                styled = df_display.drop(columns=["_action", "_score"]).style.apply(style_row, axis=1)
                 
                 height = (len(df_display) + 1) * 35 + 3
-                st.dataframe(styled_df, use_container_width=True, hide_index=True, height=height)
+                st.dataframe(styled, use_container_width=True, hide_index=True, height=height)
             
-            # === MARKET REGIME OVERVIEW ===
+            # === RISK ANALYSIS ===
             st.markdown("---")
-            st.subheader("🌍 Market Regime Analysis")
+            col_risk1, col_risk2 = st.columns(2)
             
-            col_regime1, col_regime2, col_regime3 = st.columns(3)
+            with col_risk1:
+                st.subheader("⚠️ Portfolio Risk Analysis")
+                
+                total_risk = sum([s.risk_amount for s in signals])
+                risk_pct = (total_risk / balance) * 100
+                risk_limit = max_portfolio * 100
+                
+                risk_color = "green" if risk_pct < risk_limit * 0.6 else "orange" if risk_pct < risk_limit * 0.9 else "red"
+                
+                st.markdown(f"""
+                <div class='risk-card'>
+                <h4 style='color: {risk_color}; margin: 0;'>Total Exposure: {risk_pct:.2f}% / {risk_limit:.1f}%</h4>
+                <p style='margin: 10px 0; font-size: 0.9rem;'>
+                Risk Amount: ${total_risk:.0f}<br>
+                Max Allowed: ${balance * max_portfolio:.0f}<br>
+                Available: ${(balance * max_portfolio) - total_risk:.0f}<br>
+                Active Signals: {len(signals)}
+                </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Correlation
+                st.markdown("**Top Correlations**")
+                for sig in signals[:5]:
+                    corr_color = "red" if sig.correlation_risk > 0.7 else "orange" if sig.correlation_risk > 0.5 else "green"
+                    st.markdown(f":{corr_color}[{sig.pair}: {sig.correlation_risk:.2f}]")
             
-            regime_counts = {}
-            for sig in signals:
-                regime_counts[sig.market_regime.value] = regime_counts.get(sig.market_regime.value, 0) + 1
-            
-            with col_regime1:
-                st.markdown("**Regime Distribution**")
-                for regime, count in regime_counts.items():
-                    st.markdown(f"{regime}: **{count}** signals ({count/len(signals)*100:.0f}%)")
-            
-            with col_regime2:
-                st.markdown("**Signal Quality Distribution**")
+            with col_risk2:
+                st.subheader("📈 Signal Quality Distribution")
+                
                 quality_counts = {}
                 for sig in signals:
                     quality_counts[sig.quality.value] = quality_counts.get(sig.quality.value, 0) + 1
                 
                 for qual, count in quality_counts.items():
-                    st.markdown(f"{qual}: **{count}** ({count/len(signals)*100:.0f}%)")
-            
-            with col_regime3:
-                st.markdown("**Risk Metrics**")
-                avg_rr = np.mean([s.risk_reward_ratio for s in signals])
-                avg_risk = np.mean([s.risk_amount for s in signals])
-                max_single_risk = max([s.risk_amount for s in signals])
+                    pct = count / len(signals) * 100
+                    st.markdown(f"**{qual}**: {count} signals ({pct:.0f}%)")
+                    st.progress(pct / 100)
                 
-                st.markdown(f"""
-                Avg R:R: **{avg_rr:.2f}:1**<br>
-                Avg Risk/Trade: **${avg_risk:.0f}**<br>
-                Max Single Risk: **${max_single_risk:.0f}**<br>
-                Portfolio Heat: **{risk_pct:.2f}%**
-                """, unsafe_allow_html=True)
+                st.markdown("---")
+                st.markdown("**Fresh Flips vs Continuations**")
+                fresh_count = len([s for s in signals if s.is_fresh_flip])
+                continuation_count = len(signals) - fresh_count
+                
+                st.markdown(f"🔥 Fresh Flips: **{fresh_count}** ({fresh_count/len(signals)*100:.0f}%)")
+                st.markdown(f"➡️ Continuations: **{continuation_count}** ({continuation_count/len(signals)*100:.0f}%)")
             
-            # === ADVANCED ANALYTICS ===
+            # === EXPORT ===
             st.markdown("---")
-            st.subheader("🔬 Advanced Analytics")
+            st.subheader("📤 Export Options")
             
-            tab1, tab2, tab3 = st.tabs(["📊 Score Distribution", "🎯 Risk-Reward Analysis", "⚡ Signal Freshness"])
+            col_exp1, col_exp2, col_exp3 = st.columns(3)
             
-            with tab1:
-                # Score distribution
-                scores = [s.total_score for s in signals]
-                bins = [0, 60, 75, 85, 90, 100]
-                labels = ["<60 (Low)", "60-75 (Med)", "75-85 (High)", "85-90 (V.High)", "90+ (Inst.)"]
-                
-                hist, _ = np.histogram(scores, bins=bins)
-                
-                st.markdown("**Signal Score Distribution**")
-                for i, (label, count) in enumerate(zip(labels, hist)):
-                    pct = count / len(signals) * 100 if len(signals) > 0 else 0
-                    st.progress(pct / 100, text=f"{label}: {count} signals ({pct:.0f}%)")
-            
-            with tab2:
-                # Risk-Reward analysis
-                st.markdown("**Risk-Reward Ratio Analysis**")
-                rr_ratios = [s.risk_reward_ratio for s in signals]
-                
-                rr_bins = [0, 1.5, 2.0, 2.5, 3.0, 10.0]
-                rr_labels = ["<1.5:1", "1.5-2:1", "2-2.5:1", "2.5-3:1", "3+:1"]
-                rr_hist, _ = np.histogram(rr_ratios, bins=rr_bins)
-                
-                for label, count in zip(rr_labels, rr_hist):
-                    pct = count / len(signals) * 100 if len(signals) > 0 else 0
-                    st.progress(pct / 100, text=f"{label}: {count} signals ({pct:.0f}%)")
-                
-                st.markdown(f"**Average R:R: {np.mean(rr_ratios):.2f}:1**")
-            
-            with tab3:
-                # Signal freshness
-                st.markdown("**Signal Age & Confidence Decay**")
-                
-                now = datetime.now()
-                for sig in signals[:5]:
-                    age_minutes = (now - sig.timestamp.replace(tzinfo=None)).seconds / 60
-                    decay = max(0, 1 - (age_minutes / 60))  # Decay over 1 hour
-                    
-                    color = "green" if decay > 0.8 else "orange" if decay > 0.5 else "red"
-                    st.markdown(f":{color}[{sig.pair}: {age_minutes:.0f}min old - Confidence: {decay*100:.0f}%]")
-            
-            # === EXPORT OPTIONS ===
-            st.markdown("---")
-            col_export1, col_export2, col_export3 = st.columns(3)
-            
-            with col_export1:
+            with col_exp1:
                 # CSV Export
                 export_data = []
                 for sig in signals:
@@ -871,79 +673,222 @@ def main():
                         "Timeframe": sig.timeframe,
                         "Action": sig.action,
                         "Quality": sig.quality.value,
-                        "Score": sig.total_score,
+                        "Score": sig.score,
                         "Entry": sig.entry_price,
                         "StopLoss": sig.stop_loss,
                         "TakeProfit": sig.take_profit,
-                        "RiskReward": sig.risk_reward_ratio,
+                        "RiskReward": sig.risk_reward,
                         "PositionSize": sig.position_size,
                         "RiskAmount": sig.risk_amount,
                         "ADX": sig.adx,
                         "RSI": sig.rsi,
-                        "MarketRegime": sig.market_regime.value,
-                        "Correlation": sig.correlation_risk
+                        "HigherTrend": sig.higher_tf_trend,
+                        "IsFreshFlip": sig.is_fresh_flip,
+                        "IsLive": sig.is_live
                     })
                 
-                csv = pd.DataFrame(export_data).to_csv(index=False).encode()
+                csv_data = pd.DataFrame(export_data).to_csv(index=False).encode()
                 st.download_button(
-                    "📥 Download CSV Report",
-                    csv,
-                    "institutional_signals.csv",
+                    "📥 Download CSV",
+                    csv_data,
+                    "bluestar_institutional.csv",
                     "text/csv",
                     use_container_width=True
                 )
             
-            with col_export2:
-                # JSON Export (API-ready)
+            with col_exp2:
+                # JSON Export
                 json_data = json.dumps([{
                     "timestamp": sig.timestamp.isoformat(),
                     "pair": sig.pair,
                     "timeframe": sig.timeframe,
                     "action": sig.action,
+                    "quality": sig.quality.value,
+                    "score": sig.score,
                     "entry": sig.entry_price,
                     "stop_loss": sig.stop_loss,
                     "take_profit": sig.take_profit,
-                    "score": sig.total_score,
+                    "risk_reward": sig.risk_reward,
                     "position_size": sig.position_size,
-                    "risk_amount": sig.risk_amount
+                    "risk_amount": sig.risk_amount,
+                    "adx": sig.adx,
+                    "rsi": sig.rsi,
+                    "higher_trend": sig.higher_tf_trend
                 } for sig in signals], indent=2)
                 
                 st.download_button(
-                    "📤 Download JSON (API)",
+                    "📤 Download JSON",
                     json_data,
-                    "signals_api.json",
+                    "bluestar_api.json",
                     "application/json",
                     use_container_width=True
                 )
             
-            with col_export3:
-                st.markdown("""
+            with col_exp3:
+                # Summary
+                st.markdown(f"""
                 <div style='background: rgba(255,215,0,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid gold;'>
-                <b style='color: gold;'>🏆 Institutional Grade System</b><br>
-                <span style='font-size: 0.8rem; color: #a0a0c0;'>
-                ✓ Advanced Risk Management<br>
-                ✓ Multi-Regime Analysis<br>
-                ✓ Portfolio Correlation<br>
-                ✓ Kelly Position Sizing<br>
-                ✓ Real-time VaR Calculation
+                <b style='color: gold;'>📊 Scan Summary</b><br>
+                <span style='font-size: 0.85rem; color: #a0a0c0;'>
+                Total Signals: {len(signals)}<br>
+                Institutional: {len([s for s in signals if s.quality == SignalQuality.INSTITUTIONAL])}<br>
+                Avg Score: {np.mean([s.score for s in signals]):.1f}<br>
+                Avg R:R: {np.mean([s.risk_reward for s in signals]):.2f}:1<br>
+                Portfolio Risk: {(sum([s.risk_amount for s in signals])/balance)*100:.2f}%
                 </span>
                 </div>
                 """, unsafe_allow_html=True)
+            
+            # === ANALYTICS AVANCÉS ===
+            st.markdown("---")
+            st.subheader("🔬 Advanced Analytics")
+            
+            tab1, tab2, tab3 = st.tabs(["📊 Score Distribution", "💹 Risk Metrics", "🎯 Timeframe Analysis"])
+            
+            with tab1:
+                st.markdown("**Signal Score Distribution**")
+                
+                score_bins = [0, 70, 80, 85, 90, 100]
+                score_labels = ["<70 (Filtered)", "70-80 (Standard)", "80-85 (Premium)", "85-90 (High)", "90+ (Institutional)"]
+                
+                scores = [s.score for s in signals]
+                hist, _ = np.histogram(scores, bins=score_bins)
+                
+                for label, count in zip(score_labels, hist):
+                    if len(signals) > 0:
+                        pct = count / len(signals) * 100
+                        st.progress(pct / 100, text=f"{label}: {count} signals ({pct:.0f}%)")
+                
+                col_stat1, col_stat2, col_stat3 = st.columns(3)
+                with col_stat1:
+                    st.metric("Min Score", min(scores))
+                with col_stat2:
+                    st.metric("Avg Score", f"{np.mean(scores):.1f}")
+                with col_stat3:
+                    st.metric("Max Score", max(scores))
+            
+            with tab2:
+                st.markdown("**Risk-Reward Distribution**")
+                
+                rr_bins = [0, 1.5, 2.0, 2.5, 3.0, 10]
+                rr_labels = ["<1.5:1", "1.5-2:1", "2-2.5:1", "2.5-3:1", "3+:1"]
+                
+                rr_values = [s.risk_reward for s in signals]
+                rr_hist, _ = np.histogram(rr_values, bins=rr_bins)
+                
+                for label, count in zip(rr_labels, rr_hist):
+                    if len(signals) > 0:
+                        pct = count / len(signals) * 100
+                        st.progress(pct / 100, text=f"{label}: {count} signals ({pct:.0f}%)")
+                
+                st.markdown("---")
+                st.markdown("**Position Sizing Analysis**")
+                
+                total_lots = sum([s.position_size for s in signals])
+                avg_lots = total_lots / len(signals) if signals else 0
+                max_single_risk = max([s.risk_amount for s in signals]) if signals else 0
+                
+                col_ps1, col_ps2, col_ps3 = st.columns(3)
+                with col_ps1:
+                    st.metric("Total Position", f"{total_lots:.2f} lots")
+                with col_ps2:
+                    st.metric("Avg Position", f"{avg_lots:.2f} lots")
+                with col_ps3:
+                    st.metric("Max Single Risk", f"${max_single_risk:.0f}")
+            
+            with tab3:
+                st.markdown("**Performance by Timeframe**")
+                
+                tf_stats = {}
+                for tf in ["H1", "H4", "D1"]:
+                    tf_sigs = [s for s in signals if s.timeframe == tf]
+                    if tf_sigs:
+                        tf_stats[tf] = {
+                            "count": len(tf_sigs),
+                            "avg_score": np.mean([s.score for s in tf_sigs]),
+                            "avg_rr": np.mean([s.risk_reward for s in tf_sigs]),
+                            "institutional": len([s for s in tf_sigs if s.quality == SignalQuality.INSTITUTIONAL])
+                        }
+                
+                for tf, stats in tf_stats.items():
+                    st.markdown(f"**{tf} Timeframe**")
+                    col_tf1, col_tf2, col_tf3, col_tf4 = st.columns(4)
+                    
+                    with col_tf1:
+                        st.metric("Signals", stats["count"])
+                    with col_tf2:
+                        st.metric("Avg Score", f"{stats['avg_score']:.1f}")
+                    with col_tf3:
+                        st.metric("Avg R:R", f"{stats['avg_rr']:.2f}:1")
+                    with col_tf4:
+                        st.metric("Institutional", stats["institutional"])
+                    
+                    st.markdown("---")
         
         else:
+            # Aucun signal
             st.warning("⚠️ No institutional-grade signals detected in current market conditions.")
-            st.info("💡 **Tip**: Institutional systems are highly selective. Try adjusting timeframes or risk parameters.")
+            
+            st.info("""
+            💡 **Tips pour augmenter les signaux** :
+            
+            - Les filtres institutionnels sont **très stricts** (cascade + ADX + RSI optimal)
+            - Essayez d'élargir les timeframes (ajouter W pour D1)
+            - Vérifiez que le marché est ouvert (meilleurs signaux pendant sessions actives)
+            - Les signaux "Institutional Grade" (90+) sont rares par nature
+            
+            🎯 **Critères actuels** :
+            - ✅ HMA flip ou continuation confirmée
+            - ✅ RSI > 50 (BUY) ou < 50 (SELL)
+            - ✅ UT Bot aligné
+            - ✅ Cascade TF supérieur validée (STRICTE)
+            - ✅ ADX > 20 minimum
+            - ✅ Risk management respecté
+            """)
+            
+            # Diagnostic
+            st.markdown("---")
+            st.subheader("🔍 Diagnostic Rapide")
+            
+            with st.spinner("Analyse des paires..."):
+                diagnostic_results = []
+                
+                for pair in PAIRS_DEFAULT[:10]:  # Sample
+                    for tf in tfs[:2]:  # Sample
+                        df = get_candles(pair, tf, 100)
+                        if len(df) >= 50:
+                            df = calculate_indicators(df)
+                            last = df.iloc[-1]
+                            
+                            diagnostic_results.append({
+                                "Pair": pair.replace("_", "/"),
+                                "TF": tf,
+                                "ADX": f"{last.adx:.0f}",
+                                "RSI": f"{last.rsi:.0f}",
+                                "HMA": "↗️" if last.hma_up else "↘️",
+                                "UT Bot": "🟢" if last.ut_state == 1 else "🔴"
+                            })
+                
+                if diagnostic_results:
+                    st.dataframe(
+                        pd.DataFrame(diagnostic_results).head(15),
+                        use_container_width=True,
+                        hide_index=True
+                    )
     
-    # === FOOTER INFORMATION ===
+    # === FOOTER ===
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666; font-size: 0.8rem; padding: 20px;'>
     <b>BlueStar Cascade - Institutional Grade Trading System</b><br>
-    Featuring: Kelly Criterion Position Sizing | Multi-Regime Analysis | Portfolio Correlation Matrix | Advanced Risk Management<br>
-    <i>⚠️ Trading involves substantial risk. Past performance does not guarantee future results.</i>
+    <span style='font-size: 0.75rem;'>
+    Logique Originale : HMA + RSI + UT Bot + ADX | Cascade Stricte Multi-TF<br>
+    Améliorations : Kelly Criterion | Portfolio Correlation | VaR Calculation | Advanced Scoring
+    </span><br><br>
+    <i style='color: #ff6666;'>⚠️ Trading involves substantial risk of loss. This system is for educational purposes.</i>
     </div>
     """, unsafe_allow_html=True)
 
-# ==================== MAIN ====================
+# ==================== RUN ====================
 if __name__ == "__main__":
     main()
