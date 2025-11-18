@@ -3,17 +3,15 @@ import pandas as pd
 import numpy as np
 import time
 import pytz
-from typing import Tuple, List, Dict, Optional
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-st.set_page_config(page_title="Forex Scanner PRO (Live)", layout="wide")
+# Configuration de la page (Style Code 1)
+st.set_page_config(page_title="Forex Scanner PRO", layout="wide")
 
-# ----------------------
-# Configuration
-# ----------------------
+# ==================== CONFIGURATION & API ====================
 PAIRS_DEFAULT = [
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD","EUR_GBP",
     "EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY","EUR_AUD","EUR_CAD","EUR_NZD",
@@ -21,328 +19,271 @@ PAIRS_DEFAULT = [
     "NZD_CHF","EUR_CHF","GBP_CHF","USD_SEK"
 ]
 
+# Mapping des granularités OANDA
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 
-# ----------------------
-# OANDA API & Auth
-# ----------------------
 @st.cache_resource
-def get_oanda_client() -> Tuple[API, str]:
+def get_oanda_client():
     try:
-        account_id = st.secrets.get("OANDA_ACCOUNT_ID")
-        token = st.secrets.get("OANDA_ACCESS_TOKEN")
-        if not account_id or not token:
-            st.error("⚠️ Secrets OANDA manquants (.streamlit/secrets.toml)")
-            st.stop()
-        client = API(access_token=token)
-        return client, account_id
+        token = st.secrets["OANDA_ACCESS_TOKEN"]
+        return API(access_token=token)
     except Exception as e:
-        st.error(f"Erreur critique API : {e}")
+        st.error(f"Erreur de connexion API : {e}")
         st.stop()
 
-client, ACCOUNT_ID = get_oanda_client()
+client = get_oanda_client()
 
-# ----------------------
-# Core Data Functions (MODIFIÉ POUR TEMPS RÉEL)
-# ----------------------
-@st.cache_data(ttl=10) # TTL réduit à 10s pour avoir les données fraiches
-def get_candles(pair: str, tf: str, count: int = 150) -> pd.DataFrame:
-    """
-    Récupère les bougies OANDA.
-    IMPORTANT : Inclut la dernière bougie non terminée (complete=False) pour le 0 Lag.
-    """
+# ==================== FONCTIONS DATA (Moteur Code 2) ====================
+@st.cache_data(ttl=10) # Cache court pour réactivité
+def get_candles(pair, tf, count=150):
     gran = GRANULARITY_MAP.get(tf)
-    if gran is None: return pd.DataFrame()
+    if not gran: return pd.DataFrame()
     
     try:
+        # On récupère TOUJOURS la dernière bougie (même incomplète) pour avoir le choix après
         params = {"granularity": gran, "count": count, "price": "M"}
         req = InstrumentsCandles(instrument=pair, params=params)
         client.request(req)
-        candles = req.response.get("candles", [])
         
-        records = []
-        for c in candles:
-            # ON PREND TOUT, même si c'est incomplet
-            try:
-                records.append({
-                    "time": c["time"],
-                    "open": float(c["mid"]["o"]),
-                    "high": float(c["mid"]["h"]),
-                    "low": float(c["mid"]["l"]),
-                    "close": float(c["mid"]["c"]),
-                    "complete": c.get("complete", False), # Info cruciale pour savoir si c'est LIVE
-                    "volume": int(c.get("volume", 0))
-                })
-            except (KeyError, ValueError):
-                continue
-        
-        if not records: return pd.DataFrame()
-        
-        df = pd.DataFrame(records)
-        df["time"] = pd.to_datetime(df["time"])
+        data = []
+        for c in req.response.get("candles", []):
+            data.append({
+                "time": c["time"],
+                "o": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
+                "l": float(c["mid"]["l"]), "c": float(c["mid"]["c"]),
+                "complete": c.get("complete", False)
+            })
+            
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["time"] = pd.to_datetime(df["time"])
         return df
-    except Exception:
+    except:
         return pd.DataFrame()
 
-# ----------------------
-# Indicateurs Mathématiques (Optimisés Numpy)
-# ----------------------
-def wma(series: pd.Series, length: int) -> pd.Series:
+# Indicateurs optimisés (Numpy)
+def hma(s, length=20):
     weights = np.arange(1, length + 1)
-    def weighted_mean(x):
-        return np.dot(x, weights) / weights.sum() if len(x) == length else np.nan
-    return series.rolling(length).apply(weighted_mean, raw=True)
+    def wma(x, w): return np.dot(x, w) / w.sum()
+    
+    wma1 = s.rolling(length//2).apply(lambda x: wma(x, weights[:length//2]), raw=True)
+    wma2 = s.rolling(length).apply(lambda x: wma(x, weights), raw=True)
+    diff = 2 * wma1 - wma2
+    sqrt_l = int(np.sqrt(length))
+    return diff.rolling(sqrt_l).apply(lambda x: wma(x, weights[:sqrt_l]), raw=True)
 
-def hma(series: pd.Series, length: int = 20) -> pd.Series:
-    half = max(1, int(length / 2))
-    sqrt_l = max(1, int(np.sqrt(length)))
-    return wma(2 * wma(series, half) - wma(series, length), sqrt_l)
+def rsi(s, length=7):
+    d = s.diff()
+    up, down = d.clip(lower=0), -d.clip(upper=0)
+    roll_up = up.ewm(alpha=1/length).mean()
+    roll_down = down.ewm(alpha=1/length).mean()
+    rs = roll_up / roll_down
+    return 100 - 100/(1 + rs)
 
-def rsi(series: pd.Series, length: int = 7) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+def atr(df, length=14):
+    tr = pd.concat([df.h-df.l, (df.h-df.c.shift()).abs(), (df.l-df.c.shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/length).mean()
 
-def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/length, adjust=False).mean()
+@st.cache_data(ttl=60)
+def mtf_trend(pair, tf):
+    higher = {"H1":"H4", "H4":"D1", "D1":"W"}.get(tf, "W")
+    df = get_candles(pair, higher, 100)
+    if len(df) < 40: return "neutral", 0
+    
+    # Pour la tendance de fond, on préfère travailler sur du clôturé
+    if not df.iloc[-1]["complete"]: df = df[:-1]
+    
+    ema20 = df.c.ewm(span=20).mean().iloc[-1]
+    ema50 = df.c.ewm(span=50).mean().iloc[-1]
+    price = df.c.iloc[-1]
+    
+    dist = abs(ema20-ema50)/ema50*100
+    if ema20 > ema50 and price > ema20: return "bullish", min(dist*10,100)
+    if ema20 < ema50 and price < ema20: return "bearish", min(dist*10,100)
+    return "neutral", 0
 
-@st.cache_data(ttl=60) # Tendance MTF peut être cachée un peu plus longtemps
-def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
-    higher_map = {"H1": "H4", "H4": "D1", "D1": "W"}
-    higher_tf = higher_map.get(tf)
-    
-    if not higher_tf: return {"trend": "neutral", "strength": 0}
-    
-    # Pour la tendance de fond, on veut des bougies confirmées généralement, 
-    # mais ici on garde la logique standard pour la rapidité.
-    df = get_candles(pair, higher_tf, count=100)
-    if df.empty or len(df) < 50: return {"trend": "neutral", "strength": 0}
-    
-    close = df["close"]
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-    price = close.iloc[-1]
-    
-    dist = abs((ema20 - ema50) / ema50) * 100
-    strength = min(dist * 10, 100)
-    
-    if ema20 > ema50 and price > ema20: return {"trend": "bullish", "strength": round(strength, 1)}
-    if ema20 < ema50 and price < ema20: return {"trend": "bearish", "strength": round(strength, 1)}
-    
-    return {"trend": "neutral", "strength": 0}
+# ==================== ANALYSE (Hybride) ====================
+def analyze(pair, tf, mode_live):
+    df = get_candles(pair, tf, 150)
+    if len(df) < 50: return None
 
-# ----------------------
-# Analyseur "0 Lag"
-# ----------------------
-def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
-    # On charge les bougies (y compris l'incomplète)
-    df = get_candles(pair, tf, count=candles_count)
-    if df.empty or len(df) < 30: return None
-    
-    df = df.sort_values("time").reset_index(drop=True)
-    
-    # Calculs
-    df["hma20"] = hma(df["close"], 20)
-    df["rsi7"] = rsi(df["close"], 7)
-    df["atr14"] = atr(df, 14)
-    df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
-    
-    # --- ANALYSE SUR LA DERNIERE BOUGIE (LIVE) ---
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # Statut LIVE
-    is_live = not last["complete"]
-    live_tag = "⚡" if is_live else "⭐" # Eclair = En cours, Etoile = Clôturé récent
-    
-    # Logique HMA (Changement de couleur ou continuité)
-    hma_bull = last["hma_up"]
-    hma_bear = not last["hma_up"]
-    
-    hma_flip_bull = hma_bull and not prev["hma_up"]
-    hma_flip_bear = hma_bear and prev["hma_up"]
-    
-    # Logique RSI
-    rsi_val = last["rsi7"]
-    rsi_buy = rsi_val > 50
-    rsi_sell = rsi_val < 50
-    
-    # Tendance MTF
-    mtf = check_mtf_trend(pair, tf)
-    
-    # Condition d'Entrée
-    # Signal valide si : (HMA vient de changer OU HMA est déjà dans le sens) ET RSI confirme ET MTF confirme
-    signal_buy = (hma_flip_bull or hma_bull) and rsi_buy and mtf["trend"] == "bullish"
-    signal_sell = (hma_flip_bear or hma_bear) and rsi_sell and mtf["trend"] == "bearish"
-    
-    final_signal = ""
-    conf = 0
-    
-    if signal_buy:
-        final_signal = f"ACHAT {live_tag}"
-        strength_rsi = (rsi_val - 50) / 50 * 100
-        conf = (strength_rsi * 0.4) + (mtf["strength"] * 0.6)
-        # Bonus si c'est un retournement frais
-        if hma_flip_bull: conf *= 1.1 
+    # Calculs sur tout l'historique
+    df["hma"] = hma(df.c)
+    df["rsi"] = rsi(df.c)
+    df["atr"] = atr(df)
+    df["up"] = df.hma > df.hma.shift(1)
 
-    elif signal_sell:
-        final_signal = f"VENTE {live_tag}"
-        strength_rsi = (50 - rsi_val) / 50 * 100
-        conf = (strength_rsi * 0.4) + (mtf["strength"] * 0.6)
-        # Bonus si c'est un retournement frais
-        if hma_flip_bear: conf *= 1.1
-        
-    if not final_signal: return None
-    
-    # Niveaux
-    price = last["close"]
-    atr_val = last["atr14"]
-    
-    if "ACHAT" in final_signal:
-        sl = price - (2.0 * atr_val)
-        tp = price + (3.0 * atr_val)
+    # SELECTION DE LA BOUGIE SELON LE MODE
+    if mode_live:
+        # Mode 0-LAG : On prend la dernière ligne, qu'elle soit finie ou non
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        tag = "⚡" if not last.complete else "" # Petit éclair si live
     else:
-        sl = price + (2.0 * atr_val)
-        tp = price - (3.0 * atr_val)
-        
-    rr = abs(tp - price) / abs(price - sl) if abs(price-sl) > 0 else 0
+        # Mode CONFIRMÉ : Si la dernière n'est pas finie, on l'ignore et on prend celle d'avant
+        if not df.iloc[-1]["complete"]:
+            last = df.iloc[-2]
+            prev = df.iloc[-3]
+        else:
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+        tag = ""
+
+    # Logique de signal
+    trend, strength = mtf_trend(pair, tf)
     
+    hma_flip_bull = last.up and not prev.up
+    hma_flip_bear = not last.up and prev.up
+    
+    # Conditions strictes
+    buy  = (hma_flip_bull or last.up) and last.rsi > 50 and trend == "bullish"
+    sell = (hma_flip_bear or not last.up) and last.rsi < 50 and trend == "bearish"
+
+    if not (buy or sell): return None
+
+    # Gestion SL/TP
+    sl = last.c - 2*last.atr if buy else last.c + 2*last.atr
+    tp = last.c + 3*last.atr if buy else last.c - 3*last.atr
+    
+    # Calcul confiance
+    dist_rsi = abs(last.rsi - 50)
+    conf = (dist_rsi/50 * 40) + (strength * 0.6)
+    if (buy and hma_flip_bull) or (sell and hma_flip_bear): conf += 10 # Bonus si nouveau signal
+    
+    signal_txt = f"{'ACHAT' if buy else 'VENTE'} {tag}"
+    if (buy and hma_flip_bull) or (sell and hma_flip_bear):
+        signal_txt = f"NEW {signal_txt}"
+
     return {
-        "Instrument": pair,
+        "Instrument": pair.replace("_","/"),
         "TF": tf,
-        "Signal": final_signal,
-        "Confiance": min(round(conf, 1), 100),
-        "Prix": round(price, 5),
+        "Signal": signal_txt,
+        "Confiance": min(round(conf, 0), 100),
+        "Prix": round(last.c, 5),
         "SL": round(sl, 5),
         "TP": round(tp, 5),
-        "R:R": f"1:{round(rr, 1)}",
-        "RSI": round(rsi_val, 1),
-        "Heure": last["time"].strftime("%H:%M"),
-        "_sort_conf": conf,
-        "_is_live": is_live
+        "R:R": "1:1.5",
+        "RSI": round(last.rsi, 1),
+        "Heure": last.time.strftime("%H:%M"),
+        "_conf": conf,
+        "_raw_sig": "ACHAT" if buy else "VENTE"
     }
 
-def scan_parallel(pairs, tfs, max_workers=8):
+def scan(pairs, tfs, mode_live):
     results = []
-    # On fixe count=120 pour aller vite
-    tasks = [(p, tf, 120) for p in pairs for tf in tfs]
-    
-    prog = st.progress(0)
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(analyze_pair, *t): t for t in tasks}
-        for i, f in enumerate(as_completed(futures)):
-            prog.progress((i + 1) / len(tasks))
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        # On envoie le paramètre mode_live à l'analyse
+        futures = [ex.submit(analyze, p, tf, mode_live) for p in pairs for tf in tfs]
+        for f in as_completed(futures):
             try:
-                res = f.result()
-                if res: results.append(res)
+                r = f.result()
+                if r: results.append(r)
             except: pass
-    prog.empty()
     return results
 
-# ----------------------
-# Interface & Session Market
-# ----------------------
-st.title("⚡ Forex Scanner Pro • LIVE 0-LAG")
-st.markdown("**Mode Temps Réel activé :** Les signaux avec ⚡ changent tick par tick (comme TradingView).")
+# ==================== INTERFACE (Design Code 1) ====================
+st.title("Forex Multi-Timeframe Signal Scanner Pro")
+st.write("Scanner hybride : Choisissez entre sécurité (Clôture) ou vitesse (0-Lag)")
 
-# Sidebar
-st.sidebar.header("Paramètres Scan")
-sel_pairs = st.sidebar.multiselect("Paires", PAIRS_DEFAULT, PAIRS_DEFAULT)
-sel_tfs = st.sidebar.multiselect("Timeframes", ["H1","H4","D1"], ["H1","H4"])
-min_conf = st.sidebar.slider("Confiance Min (%)", 0, 100, 20)
-auto_refresh = st.sidebar.checkbox("Auto-refresh (2 min)", value=False)
+# --- SIDEBAR ---
+st.sidebar.header("Configuration")
+with st.sidebar.expander("Filtrer les paires", expanded=False):
+    selected_pairs = st.multiselect("Paires :", PAIRS_DEFAULT, default=PAIRS_DEFAULT)
 
-# Session Info
+# LE BOUTON MAGIQUE pour choisir le mode
+scan_mode = st.sidebar.radio(
+    "Mode de détection :",
+    ["Signaux Confirmés (Clôture)", "Temps Réel (0-Lag ⚡)"],
+    index=0,
+    help="Clôture = Signal validé à la fin de la bougie (Sûr).\nTemps Réel = Signal immédiat (Rapide mais peut changer)."
+)
+is_live_mode = "Temps Réel" in scan_mode
+
+selected_tfs = st.sidebar.multiselect("Timeframes :", ["H1","H4","D1"], default=["H1","H4","D1"])
+min_confidence = st.sidebar.slider("Confiance minimale (%) :", 0, 100, 20)
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5 min)")
+scan_button = st.sidebar.button("LANCER LE SCAN", type="primary", use_container_width=True)
+
+# --- SESSION MARKET (Info utile) ---
 tz = pytz.timezone('Africa/Tunis')
 now = datetime.now(tz)
-hour = now.hour
-session_name = "Calme"
-session_color = "blue"
-
-if 9 <= hour < 18: session_name, session_color = "Londres", "green"
-if 14 <= hour < 23: session_name, session_color = "New York", "green"
-if 14 <= hour < 18: session_name, session_color = "OVERLAP (Volatilité Max)", "red"
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Paires", len(sel_pairs))
-col2.metric("Mode", "⚡ LIVE (Incomplet)")
-col3.metric("Timeframes", len(sel_tfs))
-col4.markdown(f"### <span style='color:{session_color}'>{session_name}</span> ({now.strftime('%H:%M')})", unsafe_allow_html=True)
-
+sessions = {
+    "Londres": (9, 18, "green"), "New York": (14, 23, "green"), 
+    "Overlap": (14, 18, "red"), "Tokyo": (1, 10, "orange")
+}
+active_sess = [k for k,v in sessions.items() if v[0] <= now.hour < v[1]]
 st.markdown("---")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Paires", len(selected_pairs))
+c2.metric("Mode", "LIVE ⚡" if is_live_mode else "CONFIRMÉ ⭐")
+c3.metric("Heure Tunis", now.strftime("%H:%M"))
+c4.markdown(f"**Sessions :** {', '.join(active_sess) if active_sess else 'Calme'}")
 
-# Execution
-if st.sidebar.button("SCANNER MAINTENANT", type="primary") or auto_refresh:
-    
-    if auto_refresh:
-        time.sleep(1) # Petit délai pour stabilité
-        st.toast("Scan automatique lancé...", icon="🔄")
-        
-    if auto_refresh:
-        # Compte à rebours discret
-        with st.empty():
-            for i in range(120, 0, -1):
-                if i % 10 == 0: st.caption(f"Prochain scan dans {i}s")
-                time.sleep(1)
-            st.rerun()
+# --- EXECUTION DU SCAN ---
+if scan_button or auto_refresh:
+    if auto_refresh and not scan_button:
+        with st.spinner(f"Attente refresh..."):
+            time.sleep(1) 
 
-    start = time.time()
-    data = scan_parallel(sel_pairs, sel_tfs)
-    
-    # Filtrage
-    filtered = [d for d in data if d["_sort_conf"] >= min_conf]
-    filtered.sort(key=lambda x: x["_sort_conf"], reverse=True)
-    
-    st.success(f"Scan terminé en {round(time.time()-start, 2)}s • {len(filtered)} signaux trouvés")
-    
-    if filtered:
-        # TOP 5
+    with st.spinner("Analyse du marché en cours..."):
+        # On passe le mode choisi à la fonction de scan
+        results = scan(selected_pairs, selected_tfs, is_live_mode)
+        results = [r for r in results if r["_conf"] >= min_confidence]
+
+    if results:
+        # 1. TOP 5 (Comme Code 1)
+        st.subheader("🏆 Top 5 Signaux par Confiance")
+        top5 = sorted(results, key=lambda x: x["_conf"], reverse=True)[:5]
         cols = st.columns(5)
-        for i, item in enumerate(filtered[:5]):
+        for i, r in enumerate(top5):
             with cols[i]:
-                color = "green" if "ACHAT" in item["Signal"] else "red"
-                st.markdown(f":{color}[**{item['Signal']}**]")
-                st.metric(item['Instrument'], item['Prix'], f"{item['TF']} • {item['Confiance']}%")
-                st.caption(f"SL {item['SL']} | TP {item['TP']}")
-        
+                color = "green" if r["_raw_sig"] == "ACHAT" else "red"
+                st.markdown(f":{color}[**{r['Signal']}**]")
+                st.metric(f"{r['Instrument']}", f"{r['Prix']}", f"{r['TF']} • {int(r['Confiance'])}%")
+                st.caption(f"SL {r['SL']} | TP {r['TP']}")
+
+        # 2. TABLEAUX SEPARÉS PAR TIMEFRAME (Design Code 1 que tu aimais)
         st.markdown("---")
         
-        # TABLEAU DETAILLÉ
-        df_res = pd.DataFrame([{k:v for k,v in d.items() if not k.startswith("_")} for d in filtered])
-        
-        def color_df(row):
-            bg = ""
-            if "ACHAT" in row["Signal"]: bg = "background-color: #d4edda; color: black"
-            elif "VENTE" in row["Signal"]: bg = "background-color: #f8d7da; color: black"
-            
-            # Bordure jaune si c'est du LIVE (⚡)
-            if "⚡" in row["Signal"]: 
-                return [f"{bg}; border-left: 5px solid orange"] * len(row)
-            return [bg] * len(row)
+        # Fonction de style (Couleurs pastels Code 1)
+        def style_df(row):
+            if "ACHAT" in row["Signal"]: 
+                return ["background-color: #d4edda; color: black"] * len(row) # Vert pastel
+            elif "VENTE" in row["Signal"]: 
+                return ["background-color: #f8d7da; color: black"] * len(row) # Rouge pastel
+            return [""] * len(row)
 
-        st.dataframe(
-            df_res.style.apply(color_df, axis=1),
-            use_container_width=True, 
-            hide_index=True,
-            height=600
-        )
+        # On boucle sur l'ordre logique H1 -> H4 -> D1
+        for tf in ["H1", "H4", "D1"]:
+            if tf not in selected_tfs: continue
+            
+            tf_data = [r for r in results if r["TF"] == tf]
+            if tf_data:
+                st.markdown(f"### 📅 Signaux {tf} ({len(tf_data)})")
+                
+                # On prépare le dataframe propre pour l'affichage
+                df_show = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in tf_data])
+                
+                # On trie par confiance
+                df_show = df_show.sort_values("Confiance", ascending=False)
+                
+                st.dataframe(
+                    df_show.style.apply(style_df, axis=1).format({"Prix": "{:.5f}", "SL": "{:.5f}", "TP": "{:.5f}"}),
+                    use_container_width=True, 
+                    hide_index=True
+                )
+        
+        # Export CSV
+        df_all = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith("_")} for r in results])
+        csv = df_all.to_csv(index=False).encode()
+        st.download_button("📥 Télécharger CSV", csv, "signaux.csv", "text/csv")
+
     else:
-        st.info("Aucun signal détecté. Essaie de baisser la confiance min ou d'ajouter des timeframes.")
+        st.warning("Aucun signal trouvé avec ces critères. Essayez de baisser la confiance min.")
+
+    if auto_refresh:
+        time.sleep(300)
+        st.rerun()
 
 else:
-    st.info("👋 Prêt. Clique sur **SCANNER MAINTENANT**.")
-
-# Légende
-with st.expander("ℹ️ Légende des symboles"):
-    st.write("**⚡ (Éclair)** : Signal en cours de formation (Bougie LIVE). Il correspond exactement au prix actuel. Attention, il peut disparaître si le prix se retourne avant la fin de l'heure.")
-    st.write("**⭐ (Étoile)** : Signal confirmé sur une bougie clôturée.")
+    st.info("👈 Configurez vos paramètres et cliquez sur **LANCER LE SCAN**")
