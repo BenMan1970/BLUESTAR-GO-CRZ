@@ -499,7 +499,7 @@ def main():
                             "_score": s.score
                         } for s in tf_signals])
                         
-                        # Style (appliqué AVANT de supprimer les colonnes)
+                        # Style
                         def style_row(row):
                             if row["_action"] == "BUY":
                                 base = "background-color: rgba(0, 255, 136, 0.12);"
@@ -513,14 +513,15 @@ def main():
                             
                             return [base] * len(row)
                         
-                        # Appliquer le style PUIS supprimer les colonnes helper
+                        # Créer une copie sans les colonnes helper pour l'affichage
+                        df_clean = df_display.drop(columns=["_action", "_score"])
+                        
+                        # Appliquer le style sur le DataFrame original (avec les colonnes helper)
                         styled = df_display.style.apply(style_row, axis=1)
                         
-                        # Afficher sans les colonnes helper
-                        display_columns = [c for c in df_display.columns if not c.startswith('_')]
-                        
+                        # Styler seulement les colonnes visibles
                         st.dataframe(
-                            styled[display_columns], 
+                            df_clean.style.apply(lambda row: style_row(df_display.iloc[row.name]), axis=1),
                             use_container_width=True, 
                             hide_index=True, 
                             height=min(len(df_display) * 35 + 38, 600)
@@ -534,10 +535,10 @@ def main():
     # Footer
     st.markdown("""
     <div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px; margin-top: 20px;'>
-    BlueStar Cascade Institutional | HMA + RSI + UT Bot + ADX | Cascade Multi-TF | Kelly Criterion<br>
-    <i style='color: #ff6666;'>⚠️ High risk - Educational purposes only</i>
+    BlueStar Cascade Institutional | HMA + RSI + UT Bot + ADX | Cascade Multi-TF | Kelly Criterion
     </div>
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
+ 
