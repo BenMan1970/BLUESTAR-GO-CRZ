@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+oandapyV20
+fastapi
+uvicorn[standard]
