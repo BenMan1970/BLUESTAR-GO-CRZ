@@ -480,8 +480,8 @@ def main():
                         # Trier par timestamp DESC (plus récent en haut)
                         tf_signals.sort(key=lambda x: x.timestamp, reverse=True)
                         
-                        # DataFrame compact
-                        df_display = pd.DataFrame([{
+                        # DataFrame pour affichage (sans colonnes helper)
+                        df_clean = pd.DataFrame([{
                             "⏰": s.timestamp.strftime("%H:%M"),
                             "Pair": s.pair.replace("_", "/"),
                             "": s.quality.value,
@@ -494,37 +494,33 @@ def main():
                             "Size": f"{s.position_size:.2f}",
                             "Risk": f"${s.risk_amount:.0f}",
                             "ADX": s.adx,
-                            "RSI": s.rsi,
-                            "_action": s.action,
-                            "_score": s.score
+                            "RSI": s.rsi
                         } for s in tf_signals])
                         
-                        # Style
-                        def style_row(row):
-                            if row["_action"] == "BUY":
-                                base = "background-color: rgba(0, 255, 136, 0.12);"
+                        # Style simple basé sur l'action
+                        def style_action(row):
+                            action_str = row["Action"]
+                            if "BUY" in action_str or "🟢" in action_str:
+                                bg = "background-color: rgba(0, 255, 136, 0.12);"
                             else:
-                                base = "background-color: rgba(255, 50, 80, 0.12);"
+                                bg = "background-color: rgba(255, 50, 80, 0.12);"
                             
-                            if row["_score"] >= 90:
-                                base += "border-left: 3px solid gold; font-weight: bold;"
-                            elif row["_score"] >= 85:
-                                base += "border-left: 2px solid silver;"
+                            # Bordure pour high scores
+                            score = row["Score"]
+                            if score >= 90:
+                                bg += "border-left: 3px solid gold; font-weight: bold;"
+                            elif score >= 85:
+                                bg += "border-left: 2px solid silver;"
                             
-                            return [base] * len(row)
+                            return [bg] * len(row)
                         
-                        # Créer une copie sans les colonnes helper pour l'affichage
-                        df_clean = df_display.drop(columns=["_action", "_score"])
+                        styled_df = df_clean.style.apply(style_action, axis=1)
                         
-                        # Appliquer le style sur le DataFrame original (avec les colonnes helper)
-                        styled = df_display.style.apply(style_row, axis=1)
-                        
-                        # Styler seulement les colonnes visibles
                         st.dataframe(
-                            df_clean.style.apply(lambda row: style_row(df_display.iloc[row.name]), axis=1),
+                            styled_df,
                             use_container_width=True, 
                             hide_index=True, 
-                            height=min(len(df_display) * 35 + 38, 600)
+                            height=min(len(df_clean) * 35 + 38, 600)
                         )
                     else:
                         st.info(f"No {tf} signals")
@@ -541,4 +537,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
