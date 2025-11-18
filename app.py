@@ -13,13 +13,12 @@ from datetime import datetime
 # ==================== CONFIGURATION & STYLE ====================
 st.set_page_config(page_title="Hedge Fund FX Scanner", layout="wide")
 
-# CSS pour supprimer les index, gérer l'affichage et supprimer les marges inutiles
+# CSS : Cache les index, ajuste la police et force la hauteur auto (pas de scroll)
 st.markdown("""
 <style>
     thead tr th:first-child {display:none}
     tbody th {display:none}
     .stDataFrame {font-size: 0.9rem;}
-    /* On force l'affichage complet sans scroll interne bizarre */
     .stDataFrame div[data-testid="stDataFrame"] > div {
         height: auto !important; 
     }
@@ -54,7 +53,6 @@ def get_candles_quant(pair, tf, count=200):
         params = {"granularity": gran, "count": count, "price": "M"}
         req = InstrumentsCandles(instrument=pair, params=params)
         client.request(req)
-        
         data = []
         for c in req.response.get("candles", []):
             data.append({
@@ -71,12 +69,12 @@ def get_candles_quant(pair, tf, count=200):
 
 # ==================== INDICATEURS INSTITUTIONNELS ====================
 def calculate_indicators(df):
-    # HMA 20
     def wma(s, l):
         w = np.arange(1, l+1)
         return s.rolling(l).apply(lambda x: np.dot(x, w)/w.sum(), raw=True)
     
     close = df.c
+    # HMA 20
     df["hma20"] = wma(2 * wma(close, 10) - wma(close, 20), int(np.sqrt(20)))
     
     # RSI 7
@@ -99,7 +97,6 @@ def calculate_indicators(df):
 
     # EMA 200
     df["ema200"] = close.ewm(span=200).mean()
-
     return df
 
 @st.cache_data(ttl=60)
@@ -129,7 +126,7 @@ def analyze_pair(pair, tf, mode_live):
         prev = df.iloc[idx-1]
         is_live_signal = False
 
-    # Logique
+    # Logique technique
     hma_bull = last.hma20 > df.iloc[-3].hma20
     hma_bear = last.hma20 < df.iloc[-3].hma20
     rsi_buy = last.rsi > 50
@@ -140,11 +137,11 @@ def analyze_pair(pair, tf, mode_live):
     
     if not (signal_buy or signal_sell): return None
 
-    # Filtres
+    # Filtres Hedge Fund
     macro = get_macro_bias(pair, tf)
     above_ema200 = last.c > last.ema200
     
-    # Score
+    # Scoring
     score = 40
     if signal_buy and macro == "Bullish": score += 30
     elif signal_sell and macro == "Bearish": score += 30
@@ -164,8 +161,6 @@ def analyze_pair(pair, tf, mode_live):
 
     tag = "⚡" if is_live_signal else ""
     action = "ACHAT" if signal_buy else "VENTE"
-    
-    # Format Heure
     fmt = "%H:%M" if tf != "D1" else "%Y-%m-%d"
     
     return {
@@ -205,7 +200,6 @@ def create_pdf(results):
     pdf.add_page()
     pdf.set_font("Arial", size=10)
     
-    # Titres
     headers = ["Heure", "Instrument", "TF", "Action", "Score", "Prix", "SL", "TP"]
     col_widths = [25, 25, 15, 25, 15, 25, 25, 25]
     
@@ -214,21 +208,17 @@ def create_pdf(results):
         pdf.cell(col_widths[i], 10, h, 1, 0, 'C', 1)
     pdf.ln()
     
-    # Données
     for row in results:
         pdf.set_font("Arial", size=9)
         if "ACHAT" in row["_raw_action"]:
             pdf.set_text_color(0, 100, 0)
         else:
             pdf.set_text_color(150, 0, 0)
-            
         data = [str(row["Heure"]), row["Instrument"], row["TF"], row["Action"].replace("⚡",""), 
                 str(row["Score"]), str(row["Prix"]), str(row["SL"]), str(row["TP"])]
-        
         for i, datum in enumerate(data):
             pdf.cell(col_widths[i], 10, datum, 1, 0, 'C')
         pdf.ln()
-        
     return pdf.output(dest='S').encode('latin-1')
 
 # ==================== INTERFACE ====================
@@ -250,44 +240,62 @@ if scan_btn:
         results = [r for r in results if r["Score"] >= min_score]
         
     if results:
-        # --- STATS ---
+        # Stats basiques
         c1, c2, c3 = st.columns(3)
-        c1.metric("Signaux détectés", len(results))
+        c1.metric("Signaux", len(results))
         c2.metric("Meilleur Score", max(r["Score"] for r in results) if results else 0)
         c3.metric("Mode", "LIVE" if is_live else "CONFIRMÉ")
         
         st.markdown("---")
 
-        # --- FONCTION STYLISATION ---
+        # ==========================================
+        # 🏆 RETOUR DU TOP 5 (La section manquante)
+        # ==========================================
+        st.subheader("🏆 Top 5 Meilleures Opportunités")
+        
+        # Tri global par score décroissant
+        top5 = sorted(results, key=lambda x: x["Score"], reverse=True)[:5]
+        
+        cols = st.columns(5)
+        for i, row in enumerate(top5):
+            with cols[i]:
+                color = "green" if "ACHAT" in row["_raw_action"] else "red"
+                # Affichage convivial style Code 1
+                st.markdown(f":{color}[**{row['Action']}**]")
+                st.metric(
+                    label=row['Instrument'],
+                    value=row['Prix'],
+                    delta=f"{row['TF']} • Score {row['Score']}/100"
+                )
+                st.caption(f"TP: {row['TP']:.5f}")
+        
+        st.markdown("---")
+        # ==========================================
+
+        # Fonction de style
         def style_quant(row):
             base = "color: black;"
             if "ACHAT" in row["Action"]: 
                 base += "background-color: #d4edda;" # Vert pastel
             else: 
                 base += "background-color: #f8d7da;" # Rouge pastel
-                
             if row["Score"] >= 80: 
                 base += "font-weight: bold; border-left: 4px solid gold;"
-            
             return [base] * len(row)
 
-        # --- BOUCLE D'AFFICHAGE PAR TF ---
+        # Affichage par Timeframe
         tf_order = ["H1", "H4", "D1"]
-        
         for tf in tf_order:
             if tf not in selected_tfs: continue
-            
             subset = [r for r in results if r["TF"] == tf]
             if subset:
                 st.subheader(f"🕒 Timeframe {tf} ({len(subset)})")
-                
                 subset.sort(key=lambda x: x["Score"], reverse=True)
                 
                 df_show = pd.DataFrame(subset)
                 cols_to_show = ["Heure", "Instrument", "Action", "Score", "Prix", "SL", "TP", "ADX", "Bias"]
                 
-                # --- HAUTEUR DYNAMIQUE (LE FIX) ---
-                # On calcule la hauteur : (Nbre lignes + 1 header) * 35 pixels par ligne + un petit buffer
+                # Hauteur dynamique pour éviter le scroll
                 height_dynamic = (len(df_show) + 1) * 35 + 3
                 
                 st.dataframe(
@@ -296,11 +304,11 @@ if scan_btn:
                     }),
                     use_container_width=True,
                     hide_index=True,
-                    height=height_dynamic  # <-- C'EST ICI QUE LA MAGIE OPÈRE
+                    height=height_dynamic
                 )
                 st.markdown(" ")
 
-        # --- EXPORT PDF & CSV ---
+        # Export PDF & CSV
         st.markdown("---")
         col_dl1, col_dl2 = st.columns(2)
         
@@ -314,8 +322,7 @@ if scan_btn:
             href = f'<a href="data:application/octet-stream;base64,{b64}" download="quant_report.pdf" style="text-decoration:none; color:white; background-color:#FF4B4B; padding:10px 20px; border-radius:5px; display:block; text-align:center;">📄 Télécharger Rapport PDF</a>'
             col_dl2.markdown(href, unsafe_allow_html=True)
         except Exception as e:
-            col_dl2.error(f"Pour le PDF, ajoutez 'fpdf' au requirements.txt. Erreur: {e}")
+            col_dl2.error(f"Ajoutez 'fpdf' dans requirements.txt pour le PDF. Erreur: {e}")
 
     else:
-        st.warning("Aucun signal ne correspond à vos critères de risque.")
-        
+        st.warning("Aucun signal ne correspond à vos critères.")
