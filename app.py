@@ -1,6 +1,7 @@
 """
-BlueStar Cascade - Institutional Grade (Layout Optimisé)
+BlueStar Cascade - Enhanced Institutional Grade
 Vue 3 colonnes : H1 | H4 | D1
+Améliorations : Logging, Paramètres configurables, Validation des données
 """
 
 import streamlit as st
@@ -21,7 +22,12 @@ from oandapyV20.endpoints.instruments import InstrumentsCandles
 # ==================== CONFIGURATION ====================
 st.set_page_config(page_title="BlueStar Institutional", layout="wide", initial_sidebar_state="collapsed")
 
-logging.basicConfig(level=logging.INFO)
+# Logging amélioré
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # CSS Ultra-compact
@@ -81,6 +87,16 @@ st.markdown("""
     
     h1 {font-size: 1.8rem !important; margin-bottom: 0.5rem !important;}
     h2 {font-size: 1.2rem !important; margin-top: 0.5rem !important; margin-bottom: 0.5rem !important;}
+    
+    /* Alert box */
+    .alert-box {
+        background: rgba(255,200,0,0.1);
+        border-left: 3px solid #ffc800;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        font-size: 0.8rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -101,6 +117,16 @@ class SignalQuality(Enum):
     PREMIUM = "⭐"
     STANDARD = "✓"
 
+@dataclass
+class TradingParams:
+    """Paramètres de trading configurables"""
+    atr_sl_multiplier: float = 2.0  # Stop Loss = Entry ± (ATR * multiplier)
+    atr_tp_multiplier: float = 3.0  # Take Profit = Entry ± (ATR * multiplier)
+    min_adx_threshold: int = 20     # ADX minimum pour signaux de qualité
+    adx_strong_threshold: int = 25  # ADX pour bonus de score
+    min_rr_ratio: float = 1.2       # Risk:Reward minimum acceptable
+    cascade_required: bool = True   # Cascade multi-TF obligatoire?
+    
 @dataclass
 class RiskConfig:
     max_risk_per_trade: float = 0.01
@@ -127,13 +153,15 @@ class Signal:
     higher_tf_trend: str
     is_live: bool
     is_fresh_flip: bool
+    rejection_reason: Optional[str] = None
 
 # ==================== OANDA API ====================
 @st.cache_resource
 def get_oanda_client():
     try:
         return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
-    except:
+    except Exception as e:
+        logger.error(f"⚠️ OANDA Token Error: {e}")
         st.error("⚠️ OANDA Token manquant")
         st.stop()
 
@@ -143,6 +171,7 @@ client = get_oanda_client()
 def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
     gran = GRANULARITY_MAP.get(tf)
     if not gran:
+        logger.warning(f"Granularité invalide: {tf}")
         return pd.DataFrame()
     
     try:
@@ -164,11 +193,40 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
         df = pd.DataFrame(data)
         if not df.empty:
             df["time"] = pd.to_datetime(df["time"])
+            # Validation: détection de prix anormaux
+            if validate_price_data(df, pair):
+                logger.info(f"✓ {pair} {tf}: {len(df)} candles chargées")
+            else:
+                logger.warning(f"⚠️ {pair} {tf}: Données suspectes détectées")
         
         return df
     except Exception as e:
-        logger.error(f"Erreur {pair} {tf}: {e}")
+        logger.error(f"❌ Erreur API {pair} {tf}: {str(e)[:100]}")
         return pd.DataFrame()
+
+def validate_price_data(df: pd.DataFrame, pair: str) -> bool:
+    """Validation basique des données de prix"""
+    if df.empty or len(df) < 50:
+        return False
+    
+    # Vérifier les valeurs nulles
+    if df[['open', 'high', 'low', 'close']].isnull().any().any():
+        logger.warning(f"{pair}: Valeurs nulles détectées")
+        return False
+    
+    # Vérifier cohérence High/Low
+    invalid_bars = (df['high'] < df['low']).sum()
+    if invalid_bars > 0:
+        logger.warning(f"{pair}: {invalid_bars} barres invalides (high < low)")
+        return False
+    
+    # Détection de gaps extrêmes (> 5% entre closes)
+    price_changes = df['close'].pct_change().abs()
+    extreme_gaps = (price_changes > 0.05).sum()
+    if extreme_gaps > 2:
+        logger.warning(f"{pair}: {extreme_gaps} gaps extrêmes détectés")
+    
+    return True
 
 # ==================== INDICATEURS ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -193,7 +251,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = up.ewm(alpha=1/7).mean() / down.ewm(alpha=1/7).mean()
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # UT BOT
+    # UT BOT (ATR period = 1 pour réactivité)
     tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     xATR = tr.rolling(1).mean()
     nLoss = 2.0 * xATR
@@ -215,7 +273,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
     
-    # ADX
+    # ADX avec ATR 14 pour SL/TP
     atr14 = tr.ewm(alpha=1/14).mean()
     plus_dm = high.diff().clip(lower=0)
     minus_dm = -low.diff().clip(upper=0)
@@ -238,6 +296,7 @@ def get_trend_alignment(pair: str, signal_tf: str) -> str:
     
     df = get_candles(pair, higher_tf, 100)
     if len(df) < 50:
+        logger.warning(f"Cascade {pair} {higher_tf}: Données insuffisantes")
         return "Neutral"
     
     close = df['close']
@@ -272,17 +331,22 @@ class RiskManager:
         risk_amount = self.balance * self.config.max_risk_per_trade
         pip_risk = abs(signal.entry_price - signal.stop_loss)
         
-        win_rate = 0.58
+        # Kelly Criterion avec win rate réaliste
+        win_rate = 0.58  # Basé sur backtests (à valider)
         kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
         kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
         
         position_size = (self.balance * kelly) / pip_risk if pip_risk > 0 else 0
+        
+        logger.debug(f"Position size {signal.pair}: Kelly={kelly:.3f}, Size={position_size:.2f}")
         return round(position_size, 2)
 
 # ==================== SIGNAL GENERATOR ====================
-def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager) -> Optional[Signal]:
+def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, 
+                 params: TradingParams) -> Optional[Signal]:
     df = get_candles(pair, tf, 300)
     if len(df) < 100:
+        logger.debug(f"{pair} {tf}: Données insuffisantes ({len(df)} candles)")
         return None
     
     df = calculate_indicators(df)
@@ -315,19 +379,26 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager)
     action = "BUY" if raw_buy else "SELL"
     is_fresh_flip = (action == "BUY" and hma_flip_green) or (action == "SELL" and hma_flip_red)
     
-    # Cascade
+    # Cascade (optionnel selon params)
     higher_trend = get_trend_alignment(pair, tf)
-    if action == "BUY" and higher_trend != "Bullish":
-        return None
-    if action == "SELL" and higher_trend != "Bearish":
-        return None
+    if params.cascade_required:
+        if action == "BUY" and higher_trend != "Bullish":
+            logger.info(f"⚠️ Cascade reject: {pair} {tf} BUY vs {higher_trend}")
+            return None
+        if action == "SELL" and higher_trend != "Bearish":
+            logger.info(f"⚠️ Cascade reject: {pair} {tf} SELL vs {higher_trend}")
+            return None
     
     # Scoring
     score = 70
-    if last.adx > 25:
+    if last.adx > params.adx_strong_threshold:
         score += 15
-    elif last.adx > 20:
+    elif last.adx > params.min_adx_threshold:
         score += 10
+    else:
+        # Pénalité légère si ADX faible (mais pas de rejet)
+        score -= 5
+        
     if is_fresh_flip:
         score += 15
     if action == "BUY" and 50 < last.rsi < 65:
@@ -335,7 +406,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager)
     elif action == "SELL" and 35 < last.rsi < 50:
         score += 5
     
-    score = min(100, score)
+    score = max(50, min(100, score))  # Borné entre 50 et 100
     
     if score >= 90:
         quality = SignalQuality.INSTITUTIONAL
@@ -344,16 +415,21 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager)
     else:
         quality = SignalQuality.STANDARD
     
-    # SL/TP
+    # SL/TP configurables
     atr = last.atr_val
     if action == "BUY":
-        sl = last.close - 2.0 * atr
-        tp = last.close + 3.0 * atr
+        sl = last.close - params.atr_sl_multiplier * atr
+        tp = last.close + params.atr_tp_multiplier * atr
     else:
-        sl = last.close + 2.0 * atr
-        tp = last.close - 3.0 * atr
+        sl = last.close + params.atr_sl_multiplier * atr
+        tp = last.close - params.atr_tp_multiplier * atr
     
     rr_ratio = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+    
+    # Filtre R:R minimum
+    if rr_ratio < params.min_rr_ratio:
+        logger.info(f"⚠️ R:R reject: {pair} {tf} ({rr_ratio:.2f} < {params.min_rr_ratio})")
+        return None
     
     # Timezone
     utc_time = last.time
@@ -386,20 +462,30 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager)
     signal.position_size = risk_manager.calculate_position_size(signal)
     signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
     
+    logger.info(f"✓ Signal: {pair} {tf} {action} | Score={score} | ADX={int(last.adx)} | R:R={rr_ratio:.1f}")
+    
     return signal
 
 # ==================== SCANNER ====================
-def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: RiskManager) -> List[Signal]:
+def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, 
+             risk_manager: RiskManager, params: TradingParams) -> List[Signal]:
     signals = []
+    total_pairs = len(pairs) * len(tfs)
+    logger.info(f"🔍 Scan démarré: {len(pairs)} paires × {len(tfs)} TF = {total_pairs} analyses")
+    
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(analyze_pair, p, tf, mode_live, risk_manager) for p in pairs for tf in tfs]
+        futures = [executor.submit(analyze_pair, p, tf, mode_live, risk_manager, params) 
+                   for p in pairs for tf in tfs]
+        
         for future in as_completed(futures):
             try:
                 result = future.result()
                 if result:
                     signals.append(result)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"❌ Erreur analyse: {str(e)[:100]}")
+    
+    logger.info(f"✅ Scan terminé: {len(signals)} signaux détectés sur {total_pairs} analyses")
     return signals
 
 # ==================== INTERFACE ====================
@@ -408,8 +494,8 @@ def main():
     col_title, col_time, col_mode = st.columns([3, 2, 2])
     
     with col_title:
-        st.markdown("# 💎 BlueStar Institutional")
-        st.markdown('<span class="institutional-badge">HEDGE FUND LEVEL</span>', unsafe_allow_html=True)
+        st.markdown("# 💎 BlueStar Enhanced")
+        st.markdown('<span class="institutional-badge">INSTITUTIONAL GRADE</span>', unsafe_allow_html=True)
     
     with col_time:
         now_tunis = datetime.now(pytz.timezone('Africa/Tunis'))
@@ -425,22 +511,43 @@ def main():
         mode = st.radio("Mode", ["✅ Confirmed", "⚡ Live"], horizontal=True, label_visibility="collapsed")
         is_live = "Live" in mode
     
-    # Config compacte
+    # Config avec expander pour paramètres avancés
+    with st.expander("⚙️ Configuration Avancée", expanded=False):
+        col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+        with col_a1:
+            atr_sl = st.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
+        with col_a2:
+            atr_tp = st.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.0, 0.5)
+        with col_a3:
+            min_rr = st.number_input("Min R:R", 1.0, 3.0, 1.2, 0.1)
+        with col_a4:
+            cascade_req = st.checkbox("Cascade obligatoire", value=True)
+    
+    # Config de base
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
     with col_c1:
-        balance = st.number_input("Balance ($)", 1000, 1000000, 10000, 1000, label_visibility="collapsed")
+        balance = st.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
     with col_c2:
-        max_risk = st.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1, label_visibility="collapsed") / 100
+        max_risk = st.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
     with col_c3:
-        max_portfolio = st.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5, label_visibility="collapsed") / 100
+        max_portfolio = st.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
     with col_c4:
         scan_btn = st.button("🚀 SCAN", type="primary", use_container_width=True)
     
     if scan_btn:
-        with st.spinner("Scanning..."):
+        with st.spinner("🔍 Scanning markets..."):
+            # Params
+            trading_params = TradingParams(
+                atr_sl_multiplier=atr_sl,
+                atr_tp_multiplier=atr_tp,
+                min_rr_ratio=min_rr,
+                cascade_required=cascade_req
+            )
+            
             risk_config = RiskConfig(max_risk_per_trade=max_risk, max_portfolio_risk=max_portfolio)
             risk_manager = RiskManager(risk_config, balance)
-            signals = run_scan(PAIRS_DEFAULT, ["H1", "H4", "D1"], is_live, risk_manager)
+            
+            signals = run_scan(PAIRS_DEFAULT, ["H1", "H4", "D1"], is_live, risk_manager, trading_params)
         
         if signals:
             # Métriques globales
@@ -456,9 +563,19 @@ def main():
                 st.metric("Avg Score", f"{np.mean([s.score for s in signals]):.0f}")
             with col_m4:
                 exposure = sum([s.risk_amount for s in signals])
-                st.metric("Exposure", f"${exposure:.0f}")
+                pct_exposure = (exposure / balance) * 100
+                st.metric("Exposure", f"${exposure:.0f}", f"{pct_exposure:.1f}%")
             with col_m5:
                 st.metric("Avg R:R", f"{np.mean([s.risk_reward for s in signals]):.1f}:1")
+            
+            # Alerte si over-exposure
+            if pct_exposure > max_portfolio * 100:
+                st.markdown(f"""
+                <div class='alert-box'>
+                ⚠️ <b>Portfolio Risk Alert:</b> Exposition totale ({pct_exposure:.1f}%) 
+                dépasse la limite ({max_portfolio*100:.1f}%). Réduire le nombre de positions simultanées.
+                </div>
+                """, unsafe_allow_html=True)
             
             # === 3 COLONNES : H1 | H4 | D1 ===
             st.markdown("---")
@@ -477,8 +594,8 @@ def main():
                     """, unsafe_allow_html=True)
                     
                     if tf_signals:
-                        # Trier par timestamp DESC (plus récent en haut)
-                        tf_signals.sort(key=lambda x: x.timestamp, reverse=True)
+                        # Trier par score DESC puis timestamp DESC
+                        tf_signals.sort(key=lambda x: (x.score, x.timestamp), reverse=True)
                         
                         # DataFrame pour affichage
                         df_clean = pd.DataFrame([{
@@ -507,15 +624,17 @@ def main():
                         st.info(f"No {tf} signals")
         
         else:
-            st.warning("⚠️ No signals detected")
+            st.warning("⚠️ No signals detected with current parameters")
+            st.info("💡 Astuce: Essayez de désactiver 'Cascade obligatoire' ou réduire le Min R:R pour plus de signaux")
     
-    # Footer
+    # Footer avec stats
+    st.markdown("---")
     st.markdown("""
-    <div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px; margin-top: 20px;'>
-    BlueStar Cascade Institutional | HMA + RSI + UT Bot + ADX | Cascade Multi-TF | Kelly Criterion
+    <div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
+    <b>BlueStar Cascade Enhanced</b> | HMA + RSI + UT Bot + ADX | Cascade Multi-TF | Kelly Criterion<br>
+    <span style='color: #888;'>v2.0 - Logging amélioré, Paramètres configurables, Validation des données</span>
     </div>
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
-      
