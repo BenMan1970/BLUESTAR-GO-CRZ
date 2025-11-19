@@ -484,7 +484,7 @@ def main():
                         df_clean = pd.DataFrame([{
                             "⏰": s.timestamp.strftime("%H:%M"),
                             "Pair": s.pair.replace("_", "/"),
-                            "Q": s.quality.value,
+                            "": s.quality.value,
                             "Action": f"{'🟢' if s.action == 'BUY' else '🔴'} {s.action}{'⚡' if s.is_live else ''}{'🔥' if s.is_fresh_flip else ''}",
                             "Score": s.score,
                             "Entry": f"{s.entry_price:.5f}",
@@ -515,12 +515,6 @@ def main():
                             return [bg] * len(row)
                         
                         styled_df = df_clean.style.apply(style_action, axis=1)
-                        
-                        # Colorier la colonne Pair en jaune
-                        def color_pair(val):
-                            return 'color: #ffd700' if val else ''
-                        
-                        styled_df = df_clean.style.applymap(color_pair, subset=['Pair']).apply(style_action, axis=1)
                         
                         st.dataframe(
                             styled_df,
