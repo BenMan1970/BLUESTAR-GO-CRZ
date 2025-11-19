@@ -483,7 +483,7 @@ def main():
                         # DataFrame pour affichage (sans colonnes helper)
                         df_clean = pd.DataFrame([{
                             "⏰": s.timestamp.strftime("%H:%M"),
-                            "Pair": f"<span style='color: #ffd700;'>{s.pair.replace('_', '/')}</span>",
+                            "Pair": s.pair.replace("_", "/"),
                             "Q": s.quality.value,
                             "Action": f"{'🟢' if s.action == 'BUY' else '🔴'} {s.action}{'⚡' if s.is_live else ''}{'🔥' if s.is_fresh_flip else ''}",
                             "Score": s.score,
@@ -516,12 +516,17 @@ def main():
                         
                         styled_df = df_clean.style.apply(style_action, axis=1)
                         
+                        # Colorier la colonne Pair en jaune
+                        def color_pair(val):
+                            return 'color: #ffd700' if val else ''
+                        
+                        styled_df = df_clean.style.applymap(color_pair, subset=['Pair']).apply(style_action, axis=1)
+                        
                         st.dataframe(
                             styled_df,
                             use_container_width=True, 
                             hide_index=True, 
-                            height=min(len(df_clean) * 35 + 38, 600),
-                            unsafe_allow_html=True
+                            height=min(len(df_clean) * 35 + 38, 600)
                         )
                     else:
                         st.info(f"No {tf} signals")
