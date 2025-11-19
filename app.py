@@ -480,11 +480,11 @@ def main():
                         # Trier par timestamp DESC (plus récent en haut)
                         tf_signals.sort(key=lambda x: x.timestamp, reverse=True)
                         
-                        # DataFrame pour affichage (sans colonnes helper)
+                        # DataFrame pour affichage
                         df_clean = pd.DataFrame([{
                             "⏰": s.timestamp.strftime("%H:%M"),
-                            "Pair": f"<span style='color: #ffd700;'>{s.pair.replace('_', '/')}</span>",
-                            "Q": s.quality.value,
+                            "Pair": s.pair.replace('_', '/'),
+                            "💪": s.quality.value,
                             "Action": f"{'🟢' if s.action == 'BUY' else '🔴'} {s.action}{'⚡' if s.is_live else ''}{'🔥' if s.is_fresh_flip else ''}",
                             "Score": s.score,
                             "Entry": f"{s.entry_price:.5f}",
@@ -497,27 +497,8 @@ def main():
                             "RSI": s.rsi
                         } for s in tf_signals])
                         
-                        # Style simple basé sur l'action
-                        def style_action(row):
-                            action_str = row["Action"]
-                            if "BUY" in action_str or "🟢" in action_str:
-                                bg = "background-color: rgba(0, 255, 136, 0.12);"
-                            else:
-                                bg = "background-color: rgba(255, 50, 80, 0.12);"
-                            
-                            # Bordure pour high scores
-                            score = row["Score"]
-                            if score >= 90:
-                                bg += "border-left: 3px solid gold; font-weight: bold;"
-                            elif score >= 85:
-                                bg += "border-left: 2px solid silver;"
-                            
-                            return [bg] * len(row)
-                        
-                        styled_df = df_clean.style.apply(style_action, axis=1)
-                        
                         st.dataframe(
-                            styled_df,
+                            df_clean,
                             use_container_width=True, 
                             hide_index=True, 
                             height=min(len(df_clean) * 35 + 38, 600)
@@ -537,3 +518,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+      
