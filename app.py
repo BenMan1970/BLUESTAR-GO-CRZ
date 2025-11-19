@@ -100,13 +100,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Paires
+# Paires Forex + Métaux précieux
 PAIRS_DEFAULT = [
+    # Forex Majors
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
+    # Forex Crosses
     "EUR_GBP","EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY",
     "EUR_AUD","EUR_CAD","EUR_NZD","GBP_AUD","GBP_CAD","GBP_NZD",
     "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
-    "EUR_CHF","GBP_CHF","USD_SEK"
+    "EUR_CHF","GBP_CHF","USD_SEK",
+    # Métaux précieux
+    "XAU_USD",  # Or
+    "XPT_USD"   # Platine
 ]
 
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D"}
@@ -638,3 +643,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+              
