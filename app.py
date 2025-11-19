@@ -484,7 +484,7 @@ def main():
                         df_clean = pd.DataFrame([{
                             "⏰": s.timestamp.strftime("%H:%M"),
                             "Pair": s.pair.replace("_", "/"),
-                            "": s.quality.value,
+                            "Q": s.quality.value,
                             "Action": f"{'🟢' if s.action == 'BUY' else '🔴'} {s.action}{'⚡' if s.is_live else ''}{'🔥' if s.is_fresh_flip else ''}",
                             "Score": s.score,
                             "Entry": f"{s.entry_price:.5f}",
@@ -520,7 +520,8 @@ def main():
                             styled_df,
                             use_container_width=True, 
                             hide_index=True, 
-                            height=min(len(df_clean) * 35 + 38, 600)
+                            height=min(len(df_clean) * 35 + 38, 600),
+                            unsafe_allow_html=True
                         )
                     else:
                         st.info(f"No {tf} signals")
