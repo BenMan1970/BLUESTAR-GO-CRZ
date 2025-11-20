@@ -568,21 +568,50 @@ def main():
                 st.metric("Avg Score", f"{np.mean([s.score for s in signals]):.0f}")
             with col_m4:
                 exposure = sum([s.risk_amount for s in signals])
-                pct_exposure = (exposure / balance) * 100
-                st.metric("Exposure", f"${exposure:.0f}", f"{pct_exposure:.1f}%")
+                st.metric("Exposure", f"${exposure:.0f}")
             with col_m5:
                 st.metric("Avg R:R", f"{np.mean([s.risk_reward for s in signals]):.1f}:1")
             
-            # Alerte si over-exposure
-            if pct_exposure > max_portfolio * 100:
-                st.markdown(f"""
-                <div class='alert-box'>
-                ⚠️ <b>Portfolio Risk Alert:</b> Exposition totale ({pct_exposure:.1f}%) 
-                dépasse la limite ({max_portfolio*100:.1f}%). Réduire le nombre de positions simultanées.
-                </div>
-                """, unsafe_allow_html=True)
-            
             # === 3 COLONNES : H1 | H4 | D1 ===
+            st.markdown("---")
+            
+            # Bouton de téléchargement PDF
+            col_dl1, col_dl2, col_dl3 = st.columns([1, 1, 1])
+            with col_dl2:
+                # Préparer données pour export
+                export_data = []
+                for s in signals:
+                    export_data.append({
+                        "Time": s.timestamp.strftime("%Y-%m-%d %H:%M"),
+                        "Pair": s.pair.replace('_', '/'),
+                        "TF": s.timeframe,
+                        "Quality": s.quality.value,
+                        "Action": s.action,
+                        "Entry": f"{s.entry_price:.5f}",
+                        "SL": f"{s.stop_loss:.5f}",
+                        "TP": f"{s.take_profit:.5f}",
+                        "Score": s.score,
+                        "R:R": f"{s.risk_reward:.1f}",
+                        "Size": f"{s.position_size:.2f}",
+                        "Risk": f"${s.risk_amount:.0f}",
+                        "ADX": s.adx,
+                        "RSI": s.rsi,
+                        "Higher TF": s.higher_tf_trend,
+                        "Fresh Flip": "Yes" if s.is_fresh_flip else "No",
+                        "Live": "Yes" if s.is_live else "No"
+                    })
+                
+                df_export = pd.DataFrame(export_data)
+                csv = df_export.to_csv(index=False).encode('utf-8')
+                
+                st.download_button(
+                    label="📥 Télécharger Signaux (CSV)",
+                    data=csv,
+                    file_name=f"bluestar_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            
             st.markdown("---")
             col_h1, col_h4, col_d1 = st.columns(3)
             
