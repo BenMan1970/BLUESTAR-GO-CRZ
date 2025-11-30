@@ -2,6 +2,4 @@ streamlit
 pandas
 numpy
 oandapyV20
-fastapi
-uvicorn[standard]
-fpdf
+reportlab==4.2.2      ← Remplace fpdf par ça
