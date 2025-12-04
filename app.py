@@ -1,65 +1,98 @@
 """
-BLUESTAR CASCADE v4.0 – FINAL ULTRA OPTIMIZED
-Décembre 2025 – Le plus rapide du marché. Point final.
+BlueStar Cascade - VERSION CORRIGÉE
+Corrections majeures :
+- Gestion correcte des bougies complètes/incomplètes
+- Détection stricte des flips HMA
+- Validation des indicateurs
+- Logging détaillé pour debugging
+- Cache optimisé (Live vs Confirmed)
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pytz
 from datetime import datetime
 from dataclasses import dataclass
+from typing import List, Optional, Tuple, Dict
 from enum import Enum
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
-# OANDA
+# OANDA API
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
-from oandapyV20.endpoints.pricing import PricingInfo
 
-# PDF
+# PDF Export
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+from reportlab.lib.units import mm
 
-# ====================== CONFIG ======================
-st.set_page_config(page_title="BlueStar v4.0", layout="wide", initial_sidebar_state="expanded")
+# ==================== CONFIGURATION ====================
+st.set_page_config(page_title="BlueStar Institutional", layout="wide", initial_sidebar_state="collapsed")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 st.markdown("""
 <style>
-    .main {background: #0a001f; color: white;}
-    .stButton>button {background: linear-gradient(90deg, #00ff9d, #00cc7a); color: black; font-weight: bold; border-radius: 15px; height: 3.8em; font-size: 1.4em;}
-    .stButton>button:hover {background: linear-gradient(90deg, #00cc7a, #00ff9d);}
-    .signal-buy {background: linear-gradient(90deg, #00ff9d, #00cc7a); color: black; padding: 20px; border-radius: 18px; font-size: 1.4em; font-weight: bold; margin: center;}
-    .signal-sell {background: linear-gradient(90deg, #ff3366, #cc0033); color: white; padding: 20px; border-radius: 18px; font-size: 1.4em; font-weight: bold; text-align: center;}
-    h1 {background: linear-gradient(90deg, #00ff9d, #00cc7a); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 4rem !important; text-align: center;}
+    .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
+    .block-container {padding-top: 2rem !important; padding-bottom: 1rem !important; max-width: 100% !important;}
+    .stMetric {background: rgba(255,255,255,0.05); padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); margin: 0;}
+    .stMetric label {color: #a0a0c0 !important; font-size: 0.7rem !important;}
+    .stMetric [data-testid="stMetricValue"] {color: #00ff88 !important; font-size: 1.2rem !important; font-weight: 700;}
+    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 3px 10px; border-radius: 15px; font-weight: bold; font-size: 0.65rem; display: inline-block;}
+    .stDataFrame {font-size: 0.75rem !important;}
+    .stDataFrame div[data-testid="stDataFrame"] {height: auto !important;}
+    thead tr th:first-child {display:none}
+    tbody th {display:none}
+    .tf-header {background: linear-gradient(135deg, rgba(0,255,136,0.2), rgba(0,200,255,0.2)); padding: 10px; border-radius: 8px; text-align: center; margin-bottom: 10px; border: 2px solid rgba(0,255,136,0.3);}
+    .tf-header h3 {margin: 0; color: #00ff88; font-size: 1.2rem;}
+    .tf-header p {margin: 3px 0; color: #a0a0c0; font-size: 0.7rem;}
+    h1 {font-size: 1.8rem !important; margin-bottom: 0.5rem !important;}
+    h2 {font-size: 1.2rem !important; margin-top: 0.5rem !important; margin-bottom: 0.5rem !important;}
+    .alert-box {background: rgba(255,200,0,0.1); border-left: 3px solid #ffc800; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.8rem;}
+    .debug-box {background: rgba(0,200,255,0.1); border-left: 3px solid #00c8ff; padding: 8px; border-radius: 4px; margin: 5px 0; font-size: 0.7rem; font-family: monospace;}
 </style>
 """, unsafe_allow_html=True)
 
-# ====================== INSTRUMENTS ======================
-INSTRUMENT_INFO = {
-    "EUR_USD": {"pip_value": 10.0, "digits": 5}, "GBP_USD": {"pip_value": 10.0, "digits": 5},
-    "USD_JPY": {"pip_value": 10.0, "digits": 3}, "USD_CHF": {"pip_value": 10.0, "digits": 5},
-    "AUD_USD": {"pip_value": 10.0, "digits": 5}, "NZD_USD": {"pip_value": 10.0, "digits": 5},
-    "USD_CAD": {"pip_value": 10.0, "digits": 5}, "EUR_GBP": {"pip_value": 10.0, "digits": 5},
-    "EUR_JPY": {"pip_value": 10.0, "digits": 3}, "GBP_JPY": {"pip_value": 10.0, "digits": 3},
-    "AUD_JPY": {"pip_value": 10.0, "digits": 3}, "CAD_JPY": {"pip_value": 10.0, "digits": 3},
-    "NZD_JPY": {"pip_value": 10.0, "digits": 3},
-    "EUR_AUD": {"pip_value": 10.0, "digits": 5}, "EUR_CAD": {"pip_value": 10.0, "digits": 5},
-    "XAU_USD": {"pip_value": 1.0, "digits": 2}, "US30_USD": {"pip_value": 1.0, "digits": 2},
-    "NAS100_USD": {"pip_value": 1.0, "digits": 2}, "SPX500_USD": {"pip_value": 0.1, "digits": 2},
-    # Tu peux en rajouter, ça marchera quand même
-}
-PAIRS = list(INSTRUMENT_INFO.keys())
+PAIRS_DEFAULT = [
+    "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
+    "EUR_GBP","EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY",
+    "EUR_AUD","EUR_CAD","EUR_NZD","GBP_AUD","GBP_CAD","GBP_NZD",
+    "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
+    "EUR_CHF","GBP_CHF","USD_SEK",
+    "XAU_USD", "XPT_USD"
+]
+GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D"}
 
-OANDA_GRAN = {"H1": "H1", "H4": "H4", "D1": "D"}
-
+# ==================== DATACLASSES ====================
 class SignalQuality(Enum):
     INSTITUTIONAL = "Institutional"
     PREMIUM = "Premium"
+    STANDARD = "Standard"
+
+@dataclass
+class TradingParams:
+    atr_sl_multiplier: float = 2.0
+    atr_tp_multiplier: float = 3.0
+    min_adx_threshold: int = 20
+    adx_strong_threshold: int = 25
+    min_rr_ratio: float = 1.2
+    cascade_required: bool = True
+    strict_flip_only: bool = False  # NOUVEAU : mode flip strict
+
+@dataclass
+class RiskConfig:
+    max_risk_per_trade: float = 0.01
+    max_portfolio_risk: float = 0.05
+    kelly_fraction: float = 0.25
 
 @dataclass
 class Signal:
@@ -73,251 +106,650 @@ class Signal:
     score: int
     quality: SignalQuality
     position_size: float
+    risk_amount: float
+    risk_reward: float
+    adx: float
+    rsi: float
+    atr: float
+    higher_tf_trend: str
+    is_live: bool
+    is_fresh_flip: bool
+    candle_index: int  # NOUVEAU : pour tracking
+    is_strict_flip: bool  # NOUVEAU : flip strict vs étendu
 
-# ====================== OANDA CLIENT ======================
+# ==================== OANDA API ====================
 @st.cache_resource
-def get_client():
-    return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"], environment="practice")
-
-client = get_client()
-
-def fetch_candles(pair: str, granularity: str, count: int = 380) -> pd.DataFrame:
-    time.sleep(0.07)  # Respect parfait du rate-limit OANDA
+def get_oanda_client():
     try:
-        params = {"granularity": granularity, "count": count, "price": "M"}
+        return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
+    except Exception as e:
+        logger.error(f"OANDA Token Error: {e}")
+        st.error("⚠️ OANDA Token manquant ou invalide dans les secrets Streamlit")
+        st.stop()
+
+client = get_oanda_client()
+
+# ------------------- NO CACHE (LIVE) / CACHED (CONFIRMED) CANDLES -------------------
+def get_candles_raw(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
+    """Récupération directe (no-cache) — à utiliser en Live pour éviter retards."""
+    gran = GRANULARITY_MAP.get(tf)
+    if not gran:
+        logger.warning(f"Timeframe invalide: {tf}")
+        return pd.DataFrame()
+    try:
+        params = {"granularity": gran, "count": count, "price": "M"}
         req = InstrumentsCandles(instrument=pair, params=params)
         client.request(req)
         data = []
         for c in req.response.get("candles", []):
-            if c.get("complete"):
-                data.append({
-                    "time": pd.to_datetime(c["time"]),
-                    "open": float(c["mid"]["o"]),
-                    "high": float(c["mid"]["h"]),
-                    "low": float(c["mid"]["l"]),
-                    "close": float(c["mid"]["c"])
-                })
-        df = pd.DataFrame(data).sort_values("time").reset_index(drop=True)
+            data.append({
+                "time": c["time"],
+                "open": float(c["mid"]["o"]),
+                "high": float(c["mid"]["h"]),
+                "low": float(c["mid"]["l"]),
+                "close": float(c["mid"]["c"]),
+                "complete": c.get("complete", False)
+            })
+        df = pd.DataFrame(data)
+        if not df.empty:
+            # Garantir tz-aware en UTC (préserver info temporelle pour astimezone ensuite)
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+        logger.debug(f"RAW ✓ {pair} {tf}: {len(df)} bougies | Last complete: {df.iloc[-1]['complete'] if not df.empty else 'N/A'}")
         return df
-    except:
+    except Exception as e:
+        logger.error(f"❌ Erreur API RAW {pair} {tf}: {e}")
         return pd.DataFrame()
 
-# ====================== SPREAD CACHÉ (LE FIX ULTIME) ======================
-@st.cache_data(ttl=300, show_spinner=False)  # 5 minutes de cache = 1 seul appel toutes les 5 min
-def get_spread_cached(_client, pair: str) -> float:
-    try:
-        req = PricingInfo(accountID=st.secrets["OANDA_ACCOUNT_ID"], params={"instruments": pair})
-        _client.request(req)
-        ask = float(req.response["prices"][0]["asks"][0]["price"])
-        bid = float(req.response["prices"][0]["bids"][0]["price"])
-        pip = 0.0001 if INSTRUMENT_INFO[pair]["digits"] == 5 else 0.01
-        return round((ask - bid) / pip, 1)
-    except:
-        return 999.0
+@st.cache_data(ttl=5)  # cache court utile en mode Confirmed
+def get_candles_cached(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
+    """Version mise en cache utilisée en mode Confirmed (petit TTL)."""
+    return get_candles_raw(pair, tf, count)
 
-# ====================== INDICATORS ======================
+# ==================== INDICATEURS CORRIGÉS ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if len(df) < 60: return df
-    c, h, l = df['close'], df['high'], df['low']
+    """Calcul des indicateurs avec validation renforcée"""
+    if len(df) < 50:
+        logger.warning("Pas assez de données pour calculer les indicateurs")
+        return df.copy()
+    
+    df = df.copy().reset_index(drop=True)
+    close = df['close']
+    high = df['high']
+    low = df['low']
 
-    # HMA 20
-    def wma(s, n): return s.rolling(n).apply(lambda x: np.dot(x, np.arange(1,n+1))/np.arange(1,n+1).sum(), raw=True)
-    wma10 = wma(c, 10); wma20 = wma(c, 20)
-    df['hma'] = wma(2*wma10 - wma20, int(np.sqrt(20)))
-    df['hma_up'] = df['hma'] > df['hma'].shift(1)
+    # WMA avec validation
+    def wma(series, length):
+        if len(series) < length:
+            return pd.Series([np.nan] * len(series), index=series.index)
+        weights = np.arange(1, length + 1)
+        return series.rolling(length, min_periods=length).apply(
+            lambda x: np.dot(x, weights) / weights.sum() if len(x) == length else np.nan,
+            raw=True
+        )
 
-    # RSI 7
-    delta = c.diff()
-    up = delta.clip(lower=0); down = -delta.clip(upper=0)
-    df['rsi'] = 100 - (100 / (1 + up.ewm(alpha=1/7).mean() / down.ewm(alpha=1/7).mean()))
+    # HMA (Hull Moving Average) - CORRIGÉ
+    wma_half = wma(close, 10)
+    wma_full = wma(close, 20)
+    hma_length = max(1, int(np.sqrt(20)))
+    
+    if wma_half.isna().all() or wma_full.isna().all():
+        df['hma'] = np.nan
+        df['hma_up'] = False
+        logger.warning("HMA: Impossible de calculer (WMA invalides)")
+    else:
+        df['hma'] = wma(2 * wma_half - wma_full, hma_length)
+        df['hma_up'] = df['hma'] > df['hma'].shift(1)
+        df['hma_up'].fillna(False, inplace=True)
 
-    # ATR 10
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    df['atr'] = tr.ewm(alpha=1/10, adjust=False).mean()
+    # RSI (7 périodes)
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    rs = up.ewm(alpha=1/7, min_periods=7).mean() / down.ewm(alpha=1/7, min_periods=7).mean()
+    df['rsi'] = 100 - (100 / (1 + rs))
 
-    # UT Bot (x3 loss)
-    loss = 3.0 * df['atr']
-    trail = [0.0] * len(df)
+    # UT Bot (ATR Trailing Stop)
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    
+    xATR = tr.rolling(1).mean()
+    nLoss = 2.0 * xATR
+    xATRTrailingStop = [0.0] * len(df)
+    
     for i in range(1, len(df)):
-        prev = trail[i-1]
-        if c.iloc[i] > prev and c.iloc[i-1] > prev:
-            trail[i] = max(prev, c.iloc[i] - loss.iloc[i])
-        elif c.iloc[i] < prev and c.iloc[i-1] < prev:
-            trail[i] = min(prev, c.iloc[i] + loss.iloc[i])
-        elif c.iloc[i] > prev:
-            trail[i] = c.iloc[i] - loss.iloc[i]
+        prev_stop = xATRTrailingStop[i-1]
+        curr_src = close.iloc[i]
+        loss = nLoss.iloc[i] if not np.isnan(nLoss.iloc[i]) else 0.0
+        
+        if (curr_src > prev_stop) and (close.iloc[i-1] > prev_stop):
+            xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
+        elif (curr_src < prev_stop) and (close.iloc[i-1] < prev_stop):
+            xATRTrailingStop[i] = min(prev_stop, curr_src + loss)
+        elif curr_src > prev_stop:
+            xATRTrailingStop[i] = curr_src - loss
         else:
-            trail[i] = c.iloc[i] + loss.iloc[i]
-    df['ut_state'] = np.where(c > trail, 1, -1)
+            xATRTrailingStop[i] = curr_src + loss
+    
+    df['ut_state'] = np.where(close > pd.Series(xATRTrailingStop, index=df.index), 1, -1)
 
-    # ADX
-    plus_dm = h.diff().clip(lower=0); minus_dm = (-l.diff()).clip(lower=0)
-    tr14 = tr.ewm(alpha=1/14, adjust=False).mean()
-    plus_di = 100 * plus_dm.ewm(alpha=1/14).mean() / tr14
-    minus_di = 100 * minus_dm.ewm(alpha=1/14).mean() / tr14
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
-    df['adx'] = dx.ewm(alpha=1/14).mean()
-
+    # ADX (14 périodes)
+    atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = -low.diff().clip(upper=0)
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14.replace(0, np.nan))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean().fillna(0)
+    df['atr_val'] = atr14.fillna(0)
+    
     return df
 
-# ====================== MEGA CACHE UNIQUE (LE COEUR DU MONSTRE) ======================
-@st.cache_data(ttl=180, show_spinner=False)
-def load_all_data(pairs: tuple, timeframes: tuple):
-    all_data = {}
-    needed = ["D"] + list(timeframes)  # D1 toujours chargé pour le trend
-    for pair in pairs:
-        all_data[pair] = {}
-        for tf in needed:
-            gran = "D" if tf == "D1" else OANDA_GRAN.get(tf, tf)
-            df = fetch_candles(pair, gran)
-            if len(df) >= 60:
-                all_data[pair][tf] = calculate_indicators(df)
-    return all_data
-
-# ====================== ANALYSE ULTRA-RAPIDE ======================
-def analyze_pair(args):
-    pair, tf, live_mode, data = args
+# ==================== CASCADE ====================
+@st.cache_data(ttl=60)
+def get_trend_alignment(pair: str, signal_tf: str) -> str:
+    """Analyse de la tendance sur le timeframe supérieur (utilise cached)"""
+    map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
+    higher_tf = map_higher.get(signal_tf)
+    if not higher_tf:
+        return "Neutral"
+    
+    df = get_candles_cached(pair, higher_tf, 100)
+    if len(df) < 50:
+        return "Neutral"
+    
+    df = calculate_indicators(df)
+    
+    # Vérifier validité des indicateurs
     try:
-        if tf not in data.get(pair, {}): return None
-        df = data[pair][tf]
-        if len(df) < 100: return None
+        if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['hma'].iloc[-2]):
+            return "Neutral"
+    except Exception:
+        return "Neutral"
+    
+    close = df['close']
+    ema50 = close.ewm(span=50, min_periods=50).mean().iloc[-1]
+    hma_current = df['hma'].iloc[-1]
+    hma_prev = df['hma'].iloc[-2]
+    
+    if close.iloc[-1] > ema50 and hma_current > hma_prev:
+        return "Bullish"
+    elif close.iloc[-1] < ema50 and hma_current < hma_prev:
+        return "Bearish"
+    
+    return "Neutral"
 
-        # HTF Trend (Daily)
-        htf_df = data[pair].get("D")
-        higher_trend = "Neutral"
-        if htf_df is not None and len(htf_df) > 10:
-            htf_last = htf_df.iloc[-1]; htf_prev = htf_df.iloc[-2]
-            higher_trend = "Bullish" if htf_last.hma > htf_prev.hma else "Bearish"
+# ==================== RISK MANAGER ====================
+class RiskManager:
+    def __init__(self, config: RiskConfig, balance: float):
+        self.config = config
+        self.balance = balance
+    
+    def calculate_position_size(self, signal: Signal) -> float:
+        """Calcul de la taille de position avec Kelly Criterion"""
+        win_rate = 0.58
+        if signal.risk_reward == 0:
+            return 0.0
+        kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
+        kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
+        
+        pip_risk = abs(signal.entry_price - signal.stop_loss)
+        if pip_risk <= 0:
+            return 0.0
+        
+        size = (self.balance * kelly) / pip_risk
+        return round(size, 2)
 
-        idx = -1 if live_mode else -2
-        last = df.iloc[idx]; prev = df.iloc[idx-1]
+# ==================== ANALYSE CORRIGÉE ====================
+def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, params: TradingParams, df_input: Optional[pd.DataFrame] = None) -> Optional[Signal]:
+    """Analyse d'une paire — si df_input fourni, on l'utilise (évite re-request)."""
+    
+    # Utiliser df_input si fourni, sinon récupérer selon le mode
+    if df_input is None:
+        df = get_candles_raw(pair, tf, 300) if mode_live else get_candles_cached(pair, tf, 300)
+    else:
+        df = df_input
 
-        if pd.isna(last.hma) or pd.isna(last.rsi): return None
-
-        # Spread ultra-caché
-        spread = get_spread_cached(client, pair)
-        if spread > 2.5: return None
-
-        flip_up = last.hma_up and not prev.hma_up
-        flip_down = not last.hma_up and prev.hma_up
-        if not (flip_up or flip_down): return None
-
-        action = "BUY" if flip_up else "SELL"
-        if action == "BUY" and (last.rsi < 50 or last.ut_state != 1): return None
-        if action == "SELL" and (last.rsi > 50 or last.ut_state != -1): return None
-        if higher_trend == "Bearish" and action == "BUY": return None
-        if higher_trend == "Bullish" and action == "SELL": return None
-
-        score = 80
-        if last.adx > 25: score += 15
-        elif last.adx > 20: score += 8
-        if higher_trend != "Neutral": score += 7
-        score = min(100, score)
-        if score < 85: return None
-
-        quality = SignalQuality.INSTITUTIONAL if score >= 95 else SignalQuality.PREMIUM
-
-        info = INSTRUMENT_INFO[pair]
-        atr = last.atr
-        sl = round(last.close - 2*atr if action == "BUY" else last.close + 2*atr, info["digits"])
-        tp = round(last.close + 3*atr if action == "BUY" else last.close - 3*atr, info["digits"])
-        risk_pips = abs(last.close - sl) / (0.0001 if info["digits"] == 5 else 0.01)
-        size = round(max(0.01, (10000 * 0.01) / (risk_pips * info["pip_value"])), 4 if "JPY" not in pair else 2)
-
-        ts = pytz.utc.localize(df.iloc[idx]["time"]).astimezone(pytz.timezone('Africa/Tunis'))
-
-        return Signal(ts, pair, tf, action, round(last.close, info["digits"]), sl, tp, score, quality, size)
-    except:
+    if df is None or len(df) < 100:
+        logger.debug(f"⚠️ {pair} {tf}: Pas assez de données ({0 if df is None else len(df)} bougies)")
         return None
+    
+    df = calculate_indicators(df)
+    
+    # ========== CORRECTION CRITIQUE : GESTION DES BOUGIES ==========
+    if mode_live:
+        # Mode LIVE : analyser la bougie en cours (risqué mais temps réel)
+        idx = -1
+        logger.debug(f"🔴 LIVE MODE: {pair} {tf} - Analyse bougie en cours (idx=-1)")
+    else:
+        # Mode CONFIRMED : TOUJOURS prendre la dernière bougie COMPLÈTE
+        if not df.iloc[-1]['complete']:
+            idx = -2  # Avant-dernière bougie (complète)
+            logger.debug(f"🟢 CONFIRMED MODE: {pair} {tf} - Dernière bougie incomplète, analyse idx=-2")
+        else:
+            idx = -1  # Dernière bougie (vient de se fermer)
+            logger.debug(f"🟢 CONFIRMED MODE: {pair} {tf} - Dernière bougie complète, analyse idx=-1")
+    
+    # Vérification de sécurité
+    if abs(idx) > len(df) - 2:
+        logger.warning(f"⚠️ {pair} {tf}: Index {idx} hors limites (len={len(df)})")
+        return None
+    
+    last = df.iloc[idx]
+    prev = df.iloc[idx-1]
+    prev2 = df.iloc[idx-2]
+    
+    # Validation des indicateurs
+    if pd.isna(last.get('hma')) or pd.isna(last.get('rsi')) or pd.isna(last.get('adx')) or pd.isna(last.get('atr_val')):
+        logger.warning(f"⚠️ {pair} {tf}: Indicateurs invalides à idx={idx}")
+        return None
+    
+    # ========== DÉTECTION DES FLIPS (STRICTE) ==========
+    hma_flip_green = bool(last.hma_up) and not bool(prev.hma_up)
+    hma_flip_red = not bool(last.hma_up) and bool(prev.hma_up)
+    
+    # Détection étendue (optionnelle)
+    hma_extended_green = bool(last.hma_up) and not bool(prev2.hma_up) and not hma_flip_green
+    hma_extended_red = not bool(last.hma_up) and bool(prev2.hma_up) and not hma_flip_red
+    
+    # Conditions BUY/SELL
+    if params.strict_flip_only:
+        # Mode strict : SEULEMENT les flips directs
+        raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
+        raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
+        is_strict = True
+    else:
+        # Mode standard : flips directs OU étendus
+        raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
+        raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
+        is_strict = hma_flip_green or hma_flip_red
+    
+    if not (raw_buy or raw_sell):
+        return None
+    
+    action = "BUY" if raw_buy else "SELL"
+    
+    # ========== LOGGING DÉTAILLÉ ==========
+    logger.info(f"""
+    🎯 SIGNAL DÉTECTÉ : {pair} {tf}
+    ├─ Mode: {'🔴 LIVE' if mode_live else '🟢 CONFIRMED'}
+    ├─ Bougie analysée: idx={idx} | complete={df.iloc[-1]['complete']}
+    ├─ Timestamp: {last.time}
+    ├─ HMA: {getattr(last,'hma',float('nan')):.5f} (up={getattr(last,'hma_up',False)})
+    ├─ HMA prev: {getattr(prev,'hma',float('nan')):.5f} (up={getattr(prev,'hma_up',False)})
+    ├─ Flip: Strict={hma_flip_green or hma_flip_red} | Extended={hma_extended_green or hma_extended_red}
+    ├─ RSI: {last.rsi:.1f} | ADX: {last.adx:.1f} | UT: {last.ut_state}
+    └─ Action: {action}
+    """)
+    
+    # Cascade (vérification timeframe supérieur)
+    higher_trend = get_trend_alignment(pair, tf)
+    if params.cascade_required:
+        if action == "BUY" and higher_trend != "Bullish":
+            logger.debug(f"❌ {pair} {tf}: BUY rejeté (cascade {higher_trend})")
+            return None
+        if action == "SELL" and higher_trend != "Bearish":
+            logger.debug(f"❌ {pair} {tf}: SELL rejeté (cascade {higher_trend})")
+            return None
+    
+    # Scoring
+    score = 70
+    
+    # ADX
+    try:
+        if last.adx > params.adx_strong_threshold:
+            score += 15
+        elif last.adx > params.min_adx_threshold:
+            score += 10
+        else:
+            score -= 5
+    except Exception:
+        score -= 5
+    
+    # Type de flip
+    if hma_flip_green or hma_flip_red:
+        score += 15  # Flip strict = meilleur score
+    elif hma_extended_green or hma_extended_red:
+        score += 5  # Flip étendu = score moindre
+    
+    # RSI optimal
+    if (action == "BUY" and 50 < last.rsi < 65) or (action == "SELL" and 35 < last.rsi < 50):
+        score += 5
+    
+    # Cascade alignée
+    if (action == "BUY" and higher_trend == "Bullish") or (action == "SELL" and higher_trend == "Bearish"):
+        score += 10
+    
+    score = max(50, min(100, score))
+    quality = SignalQuality.INSTITUTIONAL if score >= 90 else SignalQuality.PREMIUM if score >= 80 else SignalQuality.STANDARD
+    
+    # Calcul SL/TP
+    atr = last.atr_val
+    sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
+    tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
+    
+    rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+    if rr < params.min_rr_ratio:
+        logger.debug(f"❌ {pair} {tf}: R:R insuffisant ({rr:.2f})")
+        return None
+    
+    # Timestamp (Tunis)
+    tunis_tz = pytz.timezone('Africa/Tunis')
+    # last.time may be tz-aware (from raw) or naive; handle both
+    try:
+        if hasattr(last.time, 'tzinfo') and last.time.tzinfo is not None:
+            local_time = last.time.astimezone(tunis_tz)
+        else:
+            local_time = pytz.utc.localize(pd.to_datetime(last.time)).astimezone(tunis_tz)
+    except Exception:
+        # fallback to now
+        local_time = datetime.now(tunis_tz)
+    
+    signal = Signal(
+        timestamp=local_time,
+        pair=pair,
+        timeframe=tf,
+        action=action,
+        entry_price=last.close,
+        stop_loss=sl,
+        take_profit=tp,
+        score=score,
+        quality=quality,
+        position_size=0.0,
+        risk_amount=0.0,
+        risk_reward=rr,
+        adx=int(last.adx) if not np.isnan(last.adx) else 0,
+        rsi=int(last.rsi) if not np.isnan(last.rsi) else 0,
+        atr=atr,
+        higher_tf_trend=higher_trend,
+        is_live=mode_live and not bool(df.iloc[-1]['complete']),
+        is_fresh_flip=(hma_flip_green if action == "BUY" else hma_flip_red),
+        candle_index=idx,
+        is_strict_flip=is_strict
+    )
+    
+    signal.position_size = risk_manager.calculate_position_size(signal)
+    signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
+    
+    logger.info(f"✅ Signal validé: {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score} | R:R: {rr:.1f}")
+    
+    return signal
 
-# ====================== SCAN ======================
-def run_scan(pairs, tfs, live_mode_str):
-    live_mode = "LIVE" in live_mode_str
-    with st.spinner("Chargement unique des données (3-4 secondes max)..."):
-        data = load_all_data(tuple(pairs), tuple(tfs))
+# ==================== SCAN ====================
+def run_scan(pairs, tfs, mode_live, risk_manager, params) -> Tuple[List[Signal], List[str]]:
+    """Scan multi-threadé : on pré-récupère les bougies (raw en Live, cached en Confirmed)
+       et on passe les dfs à analyze_pair pour réduire les appels API redondants."""
+    signals: List[Signal] = []
+    errors: List[str] = []
+    fetch: Dict[Tuple[str,str], pd.DataFrame] = {}
+    
+    # Pré-fetch : construire un dict (pair,tf) -> df
+    for p in pairs:
+        for tf in tfs:
+            try:
+                if mode_live:
+                    df = get_candles_raw(p, tf, 300)
+                else:
+                    df = get_candles_cached(p, tf, 300)
+                fetch[(p, tf)] = df
+            except Exception as e:
+                errors.append(f"{p} {tf}: fetch error {e}")
+                logger.error(f"❌ Fetch error {p} {tf}: {e}")
 
-    tasks = [(p, tf, live_mode, data) for p in pairs for tf in tfs]
-    signals = []
+    # Lancer l'analyse en threads mais sans refaire d'appels API
+    total_tasks = max(1, len(pairs) * len(tfs))
+    max_workers = min(6, total_tasks)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(analyze_pair, p, tf, mode_live, risk_manager, params, fetch.get((p, tf))): (p, tf)
+            for p in pairs for tf in tfs
+        }
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        for future in as_completed(executor.submit(analyze_pair, task) for task in tasks):
-            result = future.result()
-            if result:
-                signals.append(result)
+        for future in as_completed(futures):
+            pair, tf = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    signals.append(result)
+            except Exception as e:
+                error_msg = f"{pair} {tf}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(f"❌ Erreur: {error_msg}")
 
-    return sorted(signals, key=lambda x: x.score, reverse=True)[:12]
+    if errors:
+        logger.warning(f"⚠️ {len(errors)} erreurs pendant le scan")
+    
+    return signals, errors
 
-# ====================== PDF ======================
-def generate_pdf(signals: list):
+# ==================== PDF GENERATOR ====================
+def generate_pdf(signals: List[Signal]) -> bytes:
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm, leftMargin=10*mm, rightMargin=10*mm)
     elements = []
     styles = getSampleStyleSheet()
-    elements.append(Paragraph("BlueStar v4.0 – Rapport Institutionnel", styles["Title"]))
-    elements.append(Paragraph(datetime.now(pytz.timezone('Africa/Tunis')).strftime('%d/%m/%Y %H:%M Tunis'), styles["Normal"]))
-    elements.append(Spacer(1, 20))
-
-    table_data = [["Heure", "Pair", "TF", "Action", "Entry", "SL", "TP", "Score", "Qualité", "Size"]]
-    for s in signals:
-        table_data.append([
+    
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar Cascade - Signaux Institutionnels</b></font>", styles["Title"]))
+    elements.append(Spacer(1, 8*mm))
+    
+    now = datetime.now(pytz.timezone('Africa/Tunis')).strftime('%d/%m/%Y %H:%M:%S')
+    elements.append(Paragraph(f"<font size=10 color=#a0a0c0>Généré le {now} (Tunis)</font>", styles["Normal"]))
+    elements.append(Spacer(1, 10*mm))
+    
+    data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", "R:R", "Taille", "Risque $", "ADX", "RSI", "Tendance Sup.", "Flip Type", "Live"]]
+    
+    for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
+        flip_type = "Strict" if s.is_strict_flip else "Extended"
+        data.append([
             s.timestamp.strftime("%H:%M"),
             s.pair.replace("_", "/"),
             s.timeframe,
-            s.action,
-            s.entry_price,
-            s.stop_loss,
-            s.take_profit,
-            s.score,
             s.quality.value,
-            s.position_size
+            s.action,
+            f"{s.entry_price:.5f}",
+            f"{s.stop_loss:.5f}",
+            f"{s.take_profit:.5f}",
+            str(s.score),
+            f"{s.risk_reward:.1f}",
+            f"{s.position_size:.2f}",
+            f"{s.risk_amount:.0f}",
+            str(s.adx),
+            str(s.rsi),
+            s.higher_tf_trend,
+            flip_type,
+            "Oui" if s.is_live else "Non"
         ])
-    table = Table(table_data)
+    
+    table = Table(data, colWidths=[14*mm,18*mm,10*mm,20*mm,14*mm,18*mm,18*mm,18*mm,10*mm,10*mm,14*mm,14*mm,10*mm,10*mm,20*mm,16*mm,12*mm])
     table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), '#00ff9d'),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#00ff88")),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
+        ('FONTSIZE', (0,0), (-1,0), 8),
+        ('BOTTOMPADDING', (0,0), (-1,0), 12),
+        ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#0f1429")),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333")),
+        ('FONTSIZE', (0,1), (-1,-1), 7),
     ]))
+    
     elements.append(table)
     doc.build(elements)
     return buffer.getvalue()
 
-# ====================== UI ======================
+# ==================== INTERFACE ====================
 def main():
-    st.markdown("<h1>BLUESTAR v4.0</h1>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align:center; color:#00ff9d;'>Le scanner institutionnel le plus rapide du monde</h3>", unsafe_allow_html=True)
+    col_title, col_time, col_mode = st.columns([3, 2, 2])
+    
+    with col_title:
+        st.markdown("# BlueStar Enhanced v2.2")
+        st.markdown('<span class="institutional-badge">CORRECTED VERSION</span>', unsafe_allow_html=True)
+    
+    with col_time:
+        now_tunis = datetime.now(pytz.timezone('Africa/Tunis'))
+        st.markdown(f"<div style='text-align: right; padding-top: 10px;'><span style='color: #a0a0c0; font-size: 0.8rem;'>🕐 {now_tunis.strftime('%H:%M:%S')}</span><br><span style='color: {'#00ff88' if now_tunis.hour in range(0,23) else '#ff6666'};'>{'OPEN' if now_tunis.hour in range(0,23) else 'CLOSED'}</span></div>", unsafe_allow_html=True)
+    
+    with col_mode:
+        mode = st.radio("Mode", ["🟢 Confirmed", "🔴 Live"], horizontal=True, label_visibility="collapsed")
+        is_live = "Live" in mode
 
-    col1, col2 = st.columns([3,1])
-    with col2:
-        st.markdown(f"<div style='background:#00000033; padding:20px; border-radius:20px; text-align:center;'><h2>{datetime.now(pytz.timezone('Africa/Tunis')).strftime('%H:%M:%S')}</h2><small>Tunis Time</small></div>", unsafe_allow_html=True)
+    # Configuration
+    with st.expander("⚙️ Configuration Avancée", expanded=False):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
+        atr_tp = c2.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.0, 0.5)
+        min_rr = c3.number_input("Min R:R", 1.0, 3.0, 1.2, 0.1)
+        cascade_req = c4.checkbox("Cascade obligatoire", True)
+        strict_flip = c5.checkbox("Flip strict uniquement", False)
 
-    with st.sidebar:
-        st.header("BlueStar Control")
-        mode = st.radio("Mode", ["LIVE (Temps réel)", "CONFIRMÉ (Clôture)"], index=0)
-        tfs = st.multiselect("Timeframes", ["H1", "H4", "D1"], default=["H1", "H4"])
-        all_pairs = st.checkbox("Toutes les paires (32)", value=True)
-        pairs = PAIRS if all_pairs else st.multiselect("Sélection manuelle", PAIRS, default=["EUR_USD", "XAU_USD", "GBP_JPY"])
+    # Risk Management
+    c1, c2, c3, c4 = st.columns(4)
+    balance = c1.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
+    max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
+    max_portfolio = c3.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
+    scan_btn = c4.button("🔍 SCAN MARKETS", type="primary", use_container_width=True)
 
-        if st.button("LANCER LE SCAN v4.0", type="primary", use_container_width=True):
-            with st.spinner("Scan en cours..."):
-                signals = run_scan(pairs, tfs, mode)
+    # Scan
+    if scan_btn:
+        with st.spinner("🔄 Scanning markets..."):
+            params = TradingParams(
+                atr_sl_multiplier=atr_sl,
+                atr_tp_multiplier=atr_tp,
+                min_rr_ratio=min_rr,
+                cascade_required=cascade_req,
+                strict_flip_only=strict_flip
+            )
+            risk_manager = RiskManager(
+                RiskConfig(max_risk_per_trade=max_risk, max_portfolio_risk=max_portfolio),
+                balance
+            )
+            signals, errors = run_scan(PAIRS_DEFAULT, ["H1", "H4", "D1"], is_live, risk_manager, params)
 
-            if not signals:
-                st.balloons()
-                st.success("Aucun signal institutionnel détecté pour le moment.")
-            else:
-                st.success(f"**{len(signals)} SIGNAL(S) DÉTECTÉ(S) !**")
-                for s in signals:
-                    cls = "signal-buy" if s.action == "BUY" else "signal-sell"
-                    st.markdown(f"<div class='{cls}'>{s.action} <b>{s.pair.replace('_','/')}</b> • {s.timeframe} • Score {s.score}/100 • {s.quality.value} • Size {s.position_size}</div>", unsafe_allow_html=True)
+        # Affichage des erreurs
+        if errors:
+            with st.expander(f"⚠️ {len(errors)} erreur(s) détectée(s)", expanded=False):
+                for err in errors[:10]:  # Max 10 erreurs affichées
+                    st.markdown(f'<div class="debug-box">❌ {err}</div>', unsafe_allow_html=True)
 
+        if signals:
+            st.markdown("---")
+            
+            # Métriques
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Signaux", len(signals))
+            m2.metric("Institutional", len([s for s in signals if s.quality == SignalQuality.INSTITUTIONAL]))
+            m3.metric("Flip Strict", len([s for s in signals if s.is_strict_flip]))
+            m4.metric("Score Moyen", f"{np.mean([s.score for s in signals]):.0f}")
+            m5.metric("Exposition", f"${sum(s.risk_amount for s in signals):.0f}")
+            m6.metric("R:R Moyen", f"{np.mean([s.risk_reward for s in signals]):.1f}:1")
+
+            st.markdown("---")
+            
+            # Export
+            dl1, dl2, dl3 = st.columns([1,1,1])
+            
+            # CSV
+            with dl1:
+                df_csv = pd.DataFrame([{
+                    "Time": s.timestamp.strftime("%Y-%m-%d %H:%M"),
+                    "Pair": s.pair.replace("_","/"),
+                    "TF": s.timeframe,
+                    "Quality": s.quality.value,
+                    "Action": s.action,
+                    "Entry": s.entry_price,
+                    "SL": s.stop_loss,
+                    "TP": s.take_profit,
+                    "Score": s.score,
+                    "R:R": s.risk_reward,
+                    "Size": s.position_size,
+                    "Risk $": s.risk_amount,
+                    "ADX": s.adx,
+                    "RSI": s.rsi,
+                    "Higher TF": s.higher_tf_trend,
+                    "Flip Type": "Strict" if s.is_strict_flip else "Extended",
+                    "Live": s.is_live,
+                    "Candle Index": s.candle_index
+                } for s in signals])
                 st.download_button(
-                    label="Télécharger le Rapport PDF",
-                    data=generate_pdf(signals),
-                    file_name=f"BlueStar_Signals_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                    mime="application/pdf"
+                    "📥 Télécharger CSV",
+                    df_csv.to_csv(index=False).encode(),
+                    f"bluestar_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    "text/csv",
+                    use_container_width=True
                 )
+            
+            # PDF
+            with dl3:
+                pdf = generate_pdf(signals)
+                st.download_button(
+                    "📄 Télécharger PDF",
+                    pdf,
+                    f"bluestar_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                    "application/pdf",
+                    use_container_width=True
+                )
+
+            st.markdown("---")
+            
+            # Affichage par timeframe
+            col_h1, col_h4, col_d1 = st.columns(3)
+            
+            for col, tf in zip([col_h1, col_h4, col_d1], ["H1", "H4", "D1"]):
+                with col:
+                    tf_sig = [s for s in signals if s.timeframe == tf]
+                    st.markdown(f"<div class='tf-header'><h3>{tf}</h3><p>{len(tf_sig)} signal{'s' if len(tf_sig)>1 else ''}</p></div>", unsafe_allow_html=True)
+                    
+                    if tf_sig:
+                        tf_sig.sort(key=lambda x: (x.score, x.timestamp), reverse=True)
+                        
+                        df_disp = pd.DataFrame([{
+                            "Heure": s.timestamp.strftime("%H:%M"),
+                            "Paire": s.pair.replace("_","/"),
+                            "Qualité": s.quality.value,
+                            "Action": s.action,
+                            "Type": "🎯" if s.is_strict_flip else "📊",
+                            "Score": s.score,
+                            "Entry": f"{s.entry_price:.5f}",
+                            "SL": f"{s.stop_loss:.5f}",
+                            "TP": f"{s.take_profit:.5f}",
+                            "R:R": f"{s.risk_reward:.1f}",
+                            "Taille": f"{s.position_size:.2f}",
+                            "Risque": f"${s.risk_amount:.0f}",
+                            "ADX": s.adx,
+                            "RSI": s.rsi,
+                            "Cascade": s.higher_tf_trend
+                        } for s in tf_sig])
+                        
+                        st.dataframe(df_disp, use_container_width=True, hide_index=True)
+                        
+                        # Debug info (optionnel)
+                        if st.checkbox(f"Debug {tf}", key=f"debug_{tf}"):
+                            for s in tf_sig[:3]:  # Max 3 signaux
+                                st.markdown(f"""
+                                <div class='debug-box'>
+                                <b>{s.pair} {s.action}</b><br>
+                                Timestamp: {s.timestamp}<br>
+                                Candle Index: {s.candle_index}<br>
+                                Flip Type: {'Strict' if s.is_strict_flip else 'Extended'}<br>
+                                Live: {s.is_live}
+                                </div>
+                                """, unsafe_allow_html=True)
+                    else:
+                        st.info("Aucun signal")
+
+        else:
+            st.warning("🔍 Aucun signal détecté avec les paramètres actuels")
+            st.info("💡 Essayez de désactiver le mode 'Flip strict uniquement' ou la cascade obligatoire")
+
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
+        <b>BlueStar Cascade Enhanced v2.2</b> - Version Corrigée<br>
+        ✅ Gestion correcte des bougies | ✅ Détection stricte des flips | ✅ Logging détaillé
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
