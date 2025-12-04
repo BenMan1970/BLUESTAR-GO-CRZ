@@ -77,7 +77,7 @@ PAIRS_DEFAULT = [
     "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
     "EUR_CHF","GBP_CHF","USD_SEK","XAU_USD","XPT_USD"
 ]
-GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D"}
+GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}  # ✅ Ajouté W
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
 
 # ==================== RATE LIMITER ROBUSTE ====================
@@ -664,7 +664,7 @@ def main():
     balance = c1.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
     max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
     max_portfolio = c3.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
-    scan_btn = c4.button("🚀 SCAN", type="primary", use_container_width=True)
+    scan_btn = c4.button("🚀 SCAN", type="primary", width="stretch")
 
     if scan_btn:
         with st.spinner("🔍 Scanning markets..."):
@@ -737,14 +737,14 @@ def main():
                 st.download_button("📥 Télécharger CSV", 
                                  df_csv.to_csv(index=False).encode(), 
                                  f"bluestar_v24_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
-                                 "text/csv", use_container_width=True)
+                                 "text/csv", width="stretch")
             
             with dl3:
                 pdf = generate_pdf(signals)
                 st.download_button("📄 Télécharger PDF", 
                                  pdf, 
                                  f"bluestar_v24_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
-                                 "application/pdf", use_container_width=True)
+                                 "application/pdf", width="stretch")
 
             st.markdown("---")
             col_h1, col_h4, col_d1 = st.columns(3)
@@ -775,7 +775,7 @@ def main():
                             "RSI": s.rsi,
                             "Trend": s.higher_tf_trend[:4]
                         } for s in tf_sig])
-                        st.dataframe(df_disp, use_container_width=True, hide_index=True, height=400)
+                        st.dataframe(df_disp, width="stretch", hide_index=True, height=400)
                     else:
                         st.info("Aucun signal")
 
@@ -790,4 +790,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
