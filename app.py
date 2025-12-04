@@ -1,11 +1,11 @@
 """
-BlueStar Cascade - VERSION 2.6 FINALE (CLEAN)
+BlueStar Cascade - VERSION 2.7 (ALL ASSETS DEFAULT)
 ------------------------------------------------------------
-État : FONCTIONNEL
-Corrections :
-1. Suppression de l'avertissement 'use_container_width'
-2. Scan Séquentiel (Fiabilité 100%)
-3. Affichage automatique des résultats
+État : FONCTIONNEL & COMPLET
+Changements v2.7 :
+- Ajout Indices : US30, NAS100, SPX500
+- Ajout Métaux : XAU, XPT
+- Sélection par défaut : TOUT coché
 """
 
 import streamlit as st
@@ -52,13 +52,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Listes
+# ==================== LISTE DES ACTIFS ÉTENDUE ====================
 PAIRS_DEFAULT = [
+    # FOREX MAJEURS & MINEURS
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
     "EUR_GBP","EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY",
     "EUR_AUD","EUR_CAD","EUR_NZD","GBP_AUD","GBP_CAD","GBP_NZD",
-    "XAU_USD"
+    "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
+    "EUR_CHF","GBP_CHF","USD_SEK",
+    
+    # MÉTAUX
+    "XAU_USD", "XPT_USD",
+    
+    # INDICES (Symboles OANDA standards)
+    "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
+
 GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D"}
 
 LAST_REQUEST_TIME = {"time": 0}
@@ -397,8 +406,8 @@ def generate_pdf(signals: List[Signal]) -> bytes:
 def main():
     col_title, col_time = st.columns([3, 1])
     with col_title:
-        st.markdown("# BlueStar Enhanced v2.6")
-        st.markdown('<span class="institutional-badge">INSTITUTIONAL GRADE • STABLE</span>', unsafe_allow_html=True)
+        st.markdown("# BlueStar Enhanced v2.7")
+        st.markdown('<span class="institutional-badge">INSTITUTIONAL GRADE • ALL ASSETS</span>', unsafe_allow_html=True)
     
     with col_time:
         now_tunis = datetime.now(pytz.timezone('Africa/Tunis'))
@@ -419,11 +428,14 @@ def main():
         with st.expander("Scan Settings", expanded=True):
             scan_mode = st.radio("Mode", ["CONFIRMED (Clôture)", "LIVE (Temps réel)"], index=0)
             selected_tfs = st.multiselect("Timeframes", ["H1", "H4", "D1"], default=["H1", "H4"])
-            all_pairs = st.checkbox("Toutes les paires majeures", value=False)
+            
+            # Sélection par défaut : TRUE
+            all_pairs = st.checkbox("Toutes les paires/actifs", value=True)
             if all_pairs:
                 selected_pairs = PAIRS_DEFAULT
+                st.caption(f"✅ {len(PAIRS_DEFAULT)} actifs sélectionnés (Indices inclus)")
             else:
-                selected_pairs = st.multiselect("Paires", PAIRS_DEFAULT, default=["EUR_USD", "GBP_USD", "XAU_USD", "EUR_AUD", "EUR_NZD"])
+                selected_pairs = st.multiselect("Paires", PAIRS_DEFAULT, default=["EUR_USD", "XAU_USD", "US30_USD"])
         
         with st.expander("Risk Manager", expanded=False):
             balance = st.number_input("Capital", value=10000)
@@ -475,7 +487,6 @@ def main():
                     color = '#00ff88' if val == 'BUY' else '#ff4b4b'
                     return f'color: {color}; font-weight: bold'
 
-                # Correction pour le warning deprecated
                 st.dataframe(df_view.style.map(color_action, subset=['Action']), hide_index=True)
                 
                 pdf = generate_pdf(signals)
