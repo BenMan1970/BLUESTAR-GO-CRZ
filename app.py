@@ -7,23 +7,27 @@ import logging
 import warnings
 import os
 
-# --- 1. CORRECTIONS & CONFIGURATION (CRITIQUE) ---
+# --- 1. CONFIGURATION & CORRECTIFS (CRITIQUE) ---
 
-# Correction des SyntaxWarnings (Oanda)
+# Ignorer les avertissements de syntaxe de la librairie Oanda (pour nettoyer les logs)
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="oandapyV20")
 
-# Correction des FutureWarnings (Pandas) - Pour éviter l'erreur de la ligne 211
+# Ignorer les avertissements futurs de Pandas (pour stabiliser l'app)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Configuration du logging pour suivre l'activité dans la console
+# Configuration du logging (pour voir ce qui se passe dans la console noire)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
-# --- 2. CONFIGURATION DE L'APPLICATION ---
+st.set_page_config(page_title="BlueStar - Institutional Signals", layout="wide")
 
-st.set_page_config(page_title="BlueStar Algo", layout="wide")
+# --- 2. PARAMÈTRES ---
 
-# Liste des instruments basée sur vos logs
-PAIRS = [
+# Récupération des identifiants (Secrets Streamlit ou Variables d'environnement)
+ACCESS_TOKEN = os.environ.get("OANDA_TOKEN") or st.secrets.get("OANDA_TOKEN")
+ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID") or st.secrets.get("OANDA_ACCOUNT_ID")
+
+# Liste des instruments extraite de vos logs
+INSTRUMENTS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "NZD_USD", "USD_CAD",
     "EUR_GBP", "EUR_JPY", "GBP_JPY", "AUD_JPY", "CAD_JPY", "NZD_JPY",
     "EUR_AUD", "EUR_CAD", "EUR_NZD", "GBP_AUD", "GBP_CAD", "GBP_NZD",
@@ -32,26 +36,30 @@ PAIRS = [
     "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
 
-# Récupération des secrets (Token Oanda)
-TOKEN = os.environ.get("OANDA_TOKEN") or st.secrets.get("OANDA_TOKEN")
-ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID") or st.secrets.get("OANDA_ACCOUNT_ID")
-
-# --- 3. FONCTIONS TECHNIQUES ---
+# --- 3. FONCTIONS ---
 
 def get_oanda_data(instrument, granularity="H1", count=200):
-    """Récupère les bougies depuis Oanda."""
-    if not TOKEN:
-        st.error("Token OANDA manquant dans les secrets ou variables d'environnement.")
+    """Connexion à Oanda et récupération des bougies."""
+    if not ACCESS_TOKEN:
+        st.error("⚠️ Token OANDA manquant. Vérifiez vos secrets Streamlit.")
         return None
 
-    client = oandapyV20.API(access_token=TOKEN, environment="practice")
-    params = {"count": count, "granularity": granularity}
-    
     try:
+        # Initialisation du client (Practice)
+        client = oandapyV20.API(access_token=ACCESS_TOKEN, environment="practice")
+        
+        params = {
+            "count": count,
+            "granularity": granularity
+        }
+        
+        # Log pour le suivi (comme dans vos fichiers logs)
         logging.info(f"performing request https://api-fxpractice.oanda.com/v3/instruments/{instrument}/candles")
+        
         r = instruments.InstrumentsCandles(instrument=instrument, params=params)
         client.request(r)
         
+        # Transformation en DataFrame
         data = []
         for candle in r.response['candles']:
             if candle['complete']:
@@ -68,102 +76,127 @@ def get_oanda_data(instrument, granularity="H1", count=200):
         df['Time'] = pd.to_datetime(df['Time'])
         df.set_index('Time', inplace=True)
         return df
-        
+
     except Exception as e:
-        logging.error(f"Erreur sur {instrument}: {str(e)}")
+        logging.error(f"Erreur lors de la requête pour {instrument}: {e}")
         return None
 
-def calculate_indicators(df):
+def process_data(df):
     """
-    Calcule les indicateurs techniques (ATR, SuperTrend, etc.).
-    C'est ici que le correctif Pandas est appliqué.
+    Traitement des données et calculs techniques.
+    C'est ici que le correctif 'bfill' est appliqué.
     """
-    # Calcul ATR 14
+    # Calcul de l'ATR (Average True Range)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
+    
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
     
-    # ATR lissé
+    # ATR sur 14 périodes
     atr14 = true_range.rolling(14).mean()
     
-    # --- CORRECTIF APPLIQUÉ ICI (Ligne 211 originale) ---
-    # Ancien code : atr_loss = (2.0 * atr14).fillna(method="bfill").to_numpy()
-    # Nouveau code :
+    # --- CORRECTIF MAJEUR (Ligne 211 originale) ---
+    # Nous utilisons .bfill() au lieu de .fillna(method='bfill')
     atr_loss = (2.0 * atr14).bfill().to_numpy()
-    # ----------------------------------------------------
+    # ----------------------------------------------
     
-    # Exemple de logique simple pour déterminer la tendance (EMA + ATR)
-    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
     df['ATR'] = atr14
+    df['ATR_Loss'] = atr_loss
     
-    # Logique signal basique (à adapter selon votre stratégie exacte)
+    # Indicateurs de tendance (EMA)
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    # Logique de signal simple (Tendance + Volatilité)
     last_close = df['Close'].iloc[-1]
-    last_ema = df['EMA_50'].iloc[-1]
+    last_ema50 = df['EMA_50'].iloc[-1]
+    last_ema200 = df['EMA_200'].iloc[-1]
     
     signal = "NEUTRE"
-    if last_close > last_ema:
-        signal = "HAUSSIER 🟢"
-    elif last_close < last_ema:
-        signal = "BAISSIER 🔴"
+    color = "grey"
+    
+    # Exemple de logique institutionnelle : Tendance (EMA200) + Momentum (EMA50)
+    if last_close > last_ema200 and last_close > last_ema50:
+        signal = "ACHAT FORT 🟢"
+        color = "green"
+    elif last_close < last_ema200 and last_close < last_ema50:
+        signal = "VENTE FORTE 🔴"
+        color = "red"
         
-    return df, signal
+    return last_close, signal, color, df['ATR'].iloc[-1]
 
-# --- 4. INTERFACE PRINCIPALE (MAIN) ---
+# --- 4. INTERFACE UTILISATEUR (MAIN) ---
 
 def main():
-    st.title("📊 BlueStar - Scanner de Marché")
-    st.write("Systeme de détection de signaux institutionnels.")
-    
-    if st.button("Lancer l'analyse"):
-        st.write("Traitement des dépendances effectué. Démarrage de l'analyse...")
+    st.title("🏦 BlueStar - Signaux Institutionnels")
+    st.markdown("""
+    <style>
+    div.stButton > button:first-child {
+        background-color: #0068c9;
+        color: white;
+        font-size: 20px;
+        width: 100%;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    if st.button("🔄 SCANNER LE MARCHÉ (H1)"):
+        st.write("Démarrage de l'analyse des flux...")
         
-        results = []
+        # Conteneur pour les résultats
+        results_container = st.container()
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, pair in enumerate(PAIRS):
-            status_text.text(f"Analyse de {pair}...")
+        data_results = []
+
+        # Boucle sur les instruments
+        for i, instrument in enumerate(INSTRUMENTS):
+            status_text.text(f"Analyse en cours : {instrument}...")
             
-            # 1. Récupération des données
-            df = get_oanda_data(pair)
+            # 1. Récupération
+            df = get_oanda_data(instrument)
             
             if df is not None and not df.empty:
-                # 2. Calcul (avec le correctif inclus)
-                df_calc, signal = calculate_indicators(df)
+                # 2. Calcul (avec correctif)
+                price, signal, color, atr = process_data(df)
                 
-                # 3. Stockage du résultat
-                last_price = df_calc['Close'].iloc[-1]
-                atr_val = df_calc['ATR'].iloc[-1]
-                
-                results.append({
-                    "Instrument": pair,
-                    "Prix": last_price,
-                    "Tendance": signal,
-                    "Volatilité (ATR)": round(atr_val, 5)
+                data_results.append({
+                    "Paire": instrument,
+                    "Prix": price,
+                    "Signal": signal,
+                    "Volatilité (ATR)": round(atr, 5)
                 })
             
-            # Mise à jour barre de progression
-            progress_bar.progress((i + 1) / len(PAIRS))
-        
-        status_text.text("Analyse terminée !")
+            # Mise à jour progression
+            progress_bar.progress((i + 1) / len(INSTRUMENTS))
+
         progress_bar.empty()
-        
-        # Affichage du tableau final
-        if results:
-            df_results = pd.DataFrame(results)
-            st.dataframe(df_results, use_container_width=True)
+        status_text.success("✅ Analyse terminée avec succès !")
+
+        # Affichage des résultats
+        if data_results:
+            df_res = pd.DataFrame(data_results)
             
-            # Résumé rapide
-            st.subheader("Résumé des signaux")
-            col1, col2 = st.columns(2)
-            with col1:
-                bullish = len(df_results[df_results['Tendance'].str.contains("HAUSSIER")])
-                st.metric("Signaux Haussiers", bullish)
-            with col2:
-                bearish = len(df_results[df_results['Tendance'].str.contains("BAISSIER")])
-                st.metric("Signaux Baissiers", bearish)
+            # Affichage en tableau stylisé
+            st.subheader("Tableau de Bord")
+            st.dataframe(
+                df_res.style.applymap(lambda x: 'color: green' if 'ACHAT' in str(x) else ('color: red' if 'VENTE' in str(x) else ''), subset=['Signal']),
+                use_container_width=True,
+                height=800
+            )
+            
+            # Statistiques rapides
+            col1, col2, col3 = st.columns(3)
+            nb_buy = len(df_res[df_res['Signal'].str.contains("ACHAT")])
+            nb_sell = len(df_res[df_res['Signal'].str.contains("VENTE")])
+            
+            col1.metric("Opportunités d'Achat", nb_buy)
+            col2.metric("Opportunités de Vente", nb_sell)
+            col3.metric("Total Analysé", len(INSTRUMENTS))
 
 if __name__ == "__main__":
     main()
+   
