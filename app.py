@@ -760,20 +760,20 @@ def main():
                     if tf_sig:
                         tf_sig.sort(key=lambda x: (x.score, x.timestamp), reverse=True)
                         df_disp = pd.DataFrame([{
-                            "⏰": s.timestamp.strftime("%H:%M"), 
-                            "📊": s.pair.replace("_","/"),
-                            "⭐": s.quality.value[:4],
-                            "🎯": f"{'🟢' if s.action=='BUY' else '🔴'}{s.action}",
-                            "💯": s.score, 
-                            "📍": f"{s.entry_price:.5f}", 
-                            "🛑": f"{s.stop_loss:.5f}", 
-                            "🎁": f"{s.take_profit:.5f}",
-                            "📈": f"{s.risk_reward:.1f}:1", 
-                            "💰": f"{s.position_size:.2f}", 
-                            "⚠️": f"${s.risk_amount:.0f}",
+                            "Heure": s.timestamp.strftime("%H:%M"), 
+                            "Paire": s.pair.replace("_","/"),
+                            "Qualité": s.quality.value[:4],
+                            "Action": f"{'🟢' if s.action=='BUY' else '🔴'}{s.action}",
+                            "Score": s.score, 
+                            "Entry": f"{s.entry_price:.5f}", 
+                            "Stop Loss": f"{s.stop_loss:.5f}", 
+                            "Take Profit": f"{s.take_profit:.5f}",
+                            "R:R": f"{s.risk_reward:.1f}:1", 
+                            "Taille": f"{s.position_size:.2f}", 
+                            "Risque": f"${s.risk_amount:.0f}",
                             "ADX": s.adx, 
                             "RSI": s.rsi,
-                            "🔄": s.higher_tf_trend[:4]
+                            "Trend": s.higher_tf_trend[:4]
                         } for s in tf_sig])
                         st.dataframe(df_disp, use_container_width=True, hide_index=True, height=400)
                     else:
@@ -790,3 +790,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
