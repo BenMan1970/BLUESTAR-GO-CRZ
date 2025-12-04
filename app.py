@@ -84,32 +84,27 @@ TUNIS_TZ = pytz.timezone('Africa/Tunis')
 @dataclass
 class RateLimiter:
     """Rate limiter avec backoff exponentiel"""
-    min_interval: float = 0.12  # 120ms minimum entre requêtes
+    min_interval: float = 0.12
     max_retries: int = 3
     backoff_factor: float = 2.0
-    _last_request: float = field(default=0.0, init=False)
-    _request_count: int = field(default=0, init=False)
-    _error_count: int = field(default=0, init=False)
+    _last_request: float = field(default=0.0, init=False, repr=False)
+    _request_count: int = field(default=0, init=False, repr=False)
+    _error_count: int = field(default=0, init=False, repr=False)
     
     def wait(self) -> None:
-        """Attend le délai nécessaire avant la prochaine requête"""
         elapsed = time.time() - self._last_request
         if elapsed < self.min_interval:
-            sleep_time = self.min_interval - elapsed
-            time.sleep(sleep_time)
+            time.sleep(self.min_interval - elapsed)
         self._last_request = time.time()
         self._request_count += 1
     
     def backoff(self, attempt: int) -> float:
-        """Calcule le délai de backoff exponentiel"""
         return self.min_interval * (self.backoff_factor ** attempt)
     
     def record_error(self) -> None:
-        """Enregistre une erreur"""
         self._error_count += 1
     
-    def get_stats(self) -> Dict[str, int]:
-        """Retourne les statistiques"""
+    def get_stats(self) -> Dict[str, float]:
         return {
             "total_requests": self._request_count,
             "total_errors": self._error_count,
@@ -133,15 +128,15 @@ class TradingParams:
     min_rr_ratio: float = 1.2
     cascade_required: bool = True
     strict_flip_only: bool = True
-    min_score_threshold: int = 50  # ✅ Nouveau: score minimum
+    min_score_threshold: int = 50
 
 @dataclass
 class RiskConfig:
     max_risk_per_trade: float = 0.01
     max_portfolio_risk: float = 0.05
     kelly_fraction: float = 0.25
-    min_win_rate: float = 0.45  # ✅ Nouveau: win rate minimum
-    max_win_rate: float = 0.75  # ✅ Nouveau: win rate maximum
+    min_win_rate: float = 0.45
+    max_win_rate: float = 0.75
 
 @dataclass
 class Signal:
@@ -168,7 +163,6 @@ class Signal:
 
 @dataclass
 class ScanStats:
-    """Statistiques de scan"""
     total_pairs: int = 0
     successful_scans: int = 0
     failed_scans: int = 0
@@ -180,55 +174,400 @@ class ScanStats:
 @st.cache_resource
 def get_oanda_client():
     try:
-        token = st.secrets.get("OANDA_ACCESS_TOKEN")
-        if not token:
-            raise ValueError("OANDA_ACCESS_TOKEN manquant dans secrets")
+        token = st.secrets["OANDA_ACCESS_TOKEN"]
         return API(access_token=token)
     except Exception as e:
-        logger.error(f"❌ Erreur analyse {pair} {tf}: {e}")
+        logger.error(f"❌ OANDA Token Error: {e}")
+        st.error("⚠️ OANDA Token manquant dans secrets Streamlit")
+        st.stop()
+
+client = get_oanda_client()
+
+def retry_on_failure(max_attempts: int = 3):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except V20Error as e:
+                    logger.warning(f"⚠️ API Error (attempt {attempt + 1}/{max_attempts}): {e}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(rate_limiter.backoff(attempt))
+                    else:
+                        rate_limiter.record_error()
+                        raise
+                except Exception as e:
+                    logger.error(f"❌ Error in {func.__name__}: {e}")
+                    rate_limiter.record_error()
+                    raise
+            return None
+        return wrapper
+    return decorator
+
+def get_cache_key(pair: str, tf: str, count: int) -> str:
+    return hashlib.md5(f"{pair}_{tf}_{count}".encode()).hexdigest()
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cache_wrapper(cache_key: str, pair: str, tf: str, count: int):
+    return fetch_candles_raw(pair, tf, count)
+
+@retry_on_failure(max_attempts=3)
+def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
+    gran = GRANULARITY_MAP.get(tf)
+    if not gran:
+        logger.warning(f"⚠️ Timeframe invalide: {tf}")
+        return pd.DataFrame()
+    
+    rate_limiter.wait()
+    
+    try:
+        params = {"granularity": gran, "count": count, "price": "M"}
+        req = InstrumentsCandles(instrument=pair, params=params)
+        client.request(req)
+        
+        data = []
+        for c in req.response.get("candles", []):
+            data.append({
+                "time": c["time"],
+                "open": float(c["mid"]["o"]),
+                "high": float(c["mid"]["h"]),
+                "low": float(c["mid"]["l"]),
+                "close": float(c["mid"]["c"]),
+                "complete": c.get("complete", False)
+            })
+        
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            df["time"] = df["time"].dt.tz_localize(None)
+        
+        logger.debug(f"✅ {pair} {tf}: {len(df)} candles")
+        return df
+        
+    except Exception as e:
+        logger.error(f"❌ API Error {pair} {tf}: {e}")
+        raise
+
+def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
+    cache_key = get_cache_key(pair, tf, count)
+    return _cache_wrapper(cache_key, pair, tf, count)
+
+# ==================== INDICATEURS ====================
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    if len(df) < 50:
+        logger.warning("⚠️ Pas assez de données")
+        return df
+    
+    close = df['close']
+    high = df['high']
+    low = df['low']
+
+    def wma(series, length):
+        if len(series) < length:
+            return pd.Series([np.nan] * len(series), index=series.index)
+        weights = np.arange(1, length + 1)
+        return series.rolling(length, min_periods=length).apply(
+            lambda x: np.dot(x, weights) / weights.sum() if len(x) == length else np.nan,
+            raw=True
+        )
+
+    try:
+        wma_half = wma(close, 10)
+        wma_full = wma(close, 20)
+        hma_length = int(np.sqrt(20))
+        
+        if wma_half.isna().all() or wma_full.isna().all():
+            df['hma'] = np.nan
+            df['hma_up'] = np.nan
+        else:
+            df['hma'] = wma(2 * wma_half - wma_full, hma_length)
+            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
+            df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
+    except Exception as e:
+        logger.error(f"❌ HMA Error: {e}")
+        df['hma'] = np.nan
+        df['hma_up'] = np.nan
+
+    try:
+        delta = close.diff()
+        up = delta.clip(lower=0)
+        down = -delta.clip(upper=0)
+        rs = up.ewm(alpha=1/7, min_periods=7).mean() / down.ewm(alpha=1/7, min_periods=7).mean()
+        df['rsi'] = 100 - (100 / (1 + rs))
+    except Exception as e:
+        logger.error(f"❌ RSI Error: {e}")
+        df['rsi'] = np.nan
+
+    try:
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        
+        xATR = tr.rolling(1).mean()
+        nLoss = 2.0 * xATR
+        xATRTrailingStop = [0.0] * len(df)
+        
+        for i in range(1, len(df)):
+            prev_stop = xATRTrailingStop[i-1]
+            curr_src = close.iloc[i]
+            loss = nLoss.iloc[i]
+            
+            if pd.isna(loss):
+                xATRTrailingStop[i] = prev_stop
+                continue
+            
+            if (curr_src > prev_stop) and (close.iloc[i-1] > prev_stop):
+                xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
+            elif (curr_src < prev_stop) and (close.iloc[i-1] < prev_stop):
+                xATRTrailingStop[i] = min(prev_stop, curr_src + loss)
+            elif curr_src > prev_stop:
+                xATRTrailingStop[i] = curr_src - loss
+            else:
+                xATRTrailingStop[i] = curr_src + loss
+        
+        df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
+        
+        atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
+        plus_dm = high.diff().clip(lower=0)
+        minus_dm = -low.diff().clip(upper=0)
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
+        df['atr_val'] = atr14
+    except Exception as e:
+        logger.error(f"❌ ADX/UT Error: {e}")
+        df['ut_state'] = 0
+        df['adx'] = np.nan
+        df['atr_val'] = np.nan
+    
+    return df
+
+# ==================== CASCADE ====================
+@st.cache_data(ttl=180, show_spinner=False)
+def get_trend_alignment(pair: str, signal_tf: str) -> str:
+    map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
+    higher_tf = map_higher.get(signal_tf)
+    if not higher_tf:
+        return "Neutral"
+    
+    try:
+        df = get_candles(pair, higher_tf, 100)
+        if len(df) < 50:
+            return "Neutral"
+        
+        df = calculate_indicators(df)
+        
+        if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['hma'].iloc[-2]):
+            return "Neutral"
+        
+        close = df['close']
+        ema50 = close.ewm(span=50, min_periods=50).mean().iloc[-1]
+        hma_current = df['hma'].iloc[-1]
+        hma_prev = df['hma'].iloc[-2]
+        
+        if close.iloc[-1] > ema50 and hma_current > hma_prev:
+            return "Bullish"
+        elif close.iloc[-1] < ema50 and hma_current < hma_prev:
+            return "Bearish"
+        
+        return "Neutral"
+    except Exception as e:
+        logger.error(f"❌ Cascade Error {pair}: {e}")
+        return "Neutral"
+
+# ==================== RISK MANAGER ====================
+class RiskManager:
+    def __init__(self, config: RiskConfig, balance: float):
+        self.config = config
+        self.balance = balance
+    
+    def calculate_position_size(self, signal: Signal, win_rate: float = 0.58) -> float:
+        win_rate = max(self.config.min_win_rate, min(win_rate, self.config.max_win_rate))
+        kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
+        kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
+        
+        if kelly <= 0:
+            return 0.0
+        
+        pip_risk = abs(signal.entry_price - signal.stop_loss)
+        if pip_risk <= 0:
+            return 0.0
+        
+        size = (self.balance * kelly) / pip_risk
+        return round(size, 2)
+
+# ==================== ANALYSE ====================
+def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, params: TradingParams) -> Optional[Signal]:
+    try:
+        df = get_candles(pair, tf, 300)
+        if len(df) < 100:
+            return None
+        
+        df = calculate_indicators(df)
+        
+        if mode_live:
+            idx = -1
+        else:
+            idx = -2 if not df.iloc[-1]['complete'] else -1
+        
+        if abs(idx) > len(df):
+            return None
+        
+        last = df.iloc[idx]
+        prev = df.iloc[idx-1]
+        prev2 = df.iloc[idx-2] if abs(idx-2) <= len(df) else None
+        
+        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state']
+        for field in required_fields:
+            if pd.isna(last[field]):
+                return None
+        
+        if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
+            return None
+        
+        hma_flip_green = bool(last.hma_up) and not bool(prev.hma_up)
+        hma_flip_red = not bool(last.hma_up) and bool(prev.hma_up)
+        
+        hma_extended_green = False
+        hma_extended_red = False
+        if prev2 is not None:
+            hma_extended_green = bool(last.hma_up) and bool(prev.hma_up) and not bool(prev2.hma_up) and not hma_flip_green
+            hma_extended_red = not bool(last.hma_up) and not bool(prev.hma_up) and bool(prev2.hma_up) and not hma_flip_red
+        
+        if params.strict_flip_only:
+            raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
+            raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
+            is_strict = True
+        else:
+            raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
+            raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
+            is_strict = hma_flip_green or hma_flip_red
+        
+        if not (raw_buy or raw_sell):
+            return None
+        
+        action = "BUY" if raw_buy else "SELL"
+        
+        higher_trend = get_trend_alignment(pair, tf)
+        if params.cascade_required:
+            if action == "BUY" and higher_trend != "Bullish":
+                return None
+            if action == "SELL" and higher_trend != "Bearish":
+                return None
+        
+        score = 70
+        
+        if last.adx > params.adx_strong_threshold:
+            score += 15
+        elif last.adx > params.min_adx_threshold:
+            score += 10
+        else:
+            score -= 5
+        
+        if hma_flip_green or hma_flip_red:
+            score += 15
+        elif hma_extended_green or hma_extended_red:
+            score += 5
+        
+        if (action == "BUY" and 50 < last.rsi < 65) or (action == "SELL" and 35 < last.rsi < 50):
+            score += 5
+        
+        if (action == "BUY" and higher_trend == "Bullish") or (action == "SELL" and higher_trend == "Bearish"):
+            score += 10
+        
+        score = max(params.min_score_threshold, min(100, score))
+        
+        if score < params.min_score_threshold:
+            return None
+        
+        quality = (SignalQuality.INSTITUTIONAL if score >= 90 
+                  else SignalQuality.PREMIUM if score >= 80 
+                  else SignalQuality.STANDARD)
+        
+        atr = last.atr_val
+        sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
+        tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
+        
+        rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+        if rr < params.min_rr_ratio:
+            return None
+        
+        if last.time.tzinfo is None:
+            local_time = pytz.utc.localize(last.time).astimezone(TUNIS_TZ)
+        else:
+            local_time = last.time.astimezone(TUNIS_TZ)
+        
+        signal = Signal(
+            timestamp=local_time,
+            pair=pair,
+            timeframe=tf,
+            action=action,
+            entry_price=last.close,
+            stop_loss=sl,
+            take_profit=tp,
+            score=score,
+            quality=quality,
+            position_size=0.0,
+            risk_amount=0.0,
+            risk_reward=rr,
+            adx=int(last.adx),
+            rsi=int(last.rsi),
+            atr=atr,
+            higher_tf_trend=higher_trend,
+            is_live=mode_live and not df.iloc[-1]['complete'],
+            is_fresh_flip=hma_flip_green if action == "BUY" else hma_flip_red,
+            candle_index=idx,
+            is_strict_flip=is_strict
+        )
+        
+        signal.position_size = risk_manager.calculate_position_size(signal)
+        signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
+        
+        logger.info(f"✅ {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score}")
+        return signal
+    
+    except Exception as e:
+        logger.error(f"❌ Error {pair} {tf}: {e}")
         return None
 
-# ==================== SCAN AVEC TIMEOUT ====================
+# ==================== SCAN ====================
 def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, 
              risk_manager: RiskManager, params: TradingParams) -> Tuple[List[Signal], ScanStats]:
-    """Scan multi-threadé avec timeout et stats"""
-    
     start_time = time.time()
     signals = []
     stats = ScanStats(total_pairs=len(pairs) * len(tfs))
     
-    # ✅ FIX: ThreadPool avec timeout
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
             executor.submit(analyze_pair, p, tf, mode_live, risk_manager, params): (p, tf)
             for p in pairs for tf in tfs
         }
         
-        for future in as_completed(futures, timeout=60):  # 60s timeout global
+        for future in as_completed(futures, timeout=60):
             pair, tf = futures[future]
             try:
-                result = future.result(timeout=10)  # 10s timeout par paire
+                result = future.result(timeout=10)
                 if result:
                     signals.append(result)
                     stats.signals_found += 1
                 stats.successful_scans += 1
             except TimeoutError:
-                error_msg = f"{pair} {tf}: Timeout (>10s)"
+                error_msg = f"{pair} {tf}: Timeout"
                 stats.errors.append(error_msg)
                 stats.failed_scans += 1
-                logger.warning(f"⏱️ {error_msg}")
             except Exception as e:
                 error_msg = f"{pair} {tf}: {str(e)}"
                 stats.errors.append(error_msg)
                 stats.failed_scans += 1
-                logger.error(f"❌ {error_msg}")
     
     stats.scan_duration = time.time() - start_time
-    logger.info(f"✅ Scan terminé: {stats.signals_found} signaux en {stats.scan_duration:.1f}s")
-    
     return signals, stats
 
-# ==================== PDF GENERATOR ====================
+# ==================== PDF ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm, 
@@ -236,17 +575,15 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     elements = []
     styles = getSampleStyleSheet()
     
-    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.4 - Signaux Institutionnels</b></font>", 
-                             styles["Title"]))
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.4</b></font>", styles["Title"]))
     elements.append(Spacer(1, 8*mm))
     
     now = datetime.now(TUNIS_TZ).strftime('%d/%m/%Y %H:%M:%S')
-    elements.append(Paragraph(f"<font size=10 color=#a0a0c0>Généré le {now} (Tunis)</font>", 
-                             styles["Normal"]))
+    elements.append(Paragraph(f"<font size=10>Généré le {now}</font>", styles["Normal"]))
     elements.append(Spacer(1, 10*mm))
     
     data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", 
-             "R:R", "Taille", "Risque $", "ADX", "RSI", "Tendance", "Flip", "Live"]]
+             "R:R", "Size", "Risk", "ADX", "RSI", "Trend", "Flip", "Live"]]
     
     for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
         flip_type = "Strict" if s.is_strict_flip else "Ext"
@@ -254,7 +591,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
             s.timestamp.strftime("%H:%M"),
             s.pair.replace("_", "/"),
             s.timeframe,
-            s.quality.value[:4],  # Truncate
+            s.quality.value[:4],
             s.action,
             f"{s.entry_price:.5f}",
             f"{s.stop_loss:.5f}",
@@ -262,12 +599,12 @@ def generate_pdf(signals: List[Signal]) -> bytes:
             str(s.score),
             f"{s.risk_reward:.1f}",
             f"{s.position_size:.2f}",
-            f"{s.risk_amount:.0f}",
+            f"${s.risk_amount:.0f}",
             str(s.adx),
             str(s.rsi),
-            s.higher_tf_trend[:4],  # Truncate
+            s.higher_tf_trend[:4],
             flip_type,
-            "Oui" if s.is_live else "Non"
+            "Y" if s.is_live else "N"
         ])
     
     table = Table(data, colWidths=[14*mm,18*mm,10*mm,16*mm,14*mm,18*mm,18*mm,18*mm,
@@ -278,7 +615,6 @@ def generate_pdf(signals: List[Signal]) -> bytes:
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 8),
-        ('BOTTOMPADDING', (0,0), (-1,0), 12),
         ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#0f1429")),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333")),
         ('FONTSIZE', (0,1), (-1,-1), 7),
@@ -290,7 +626,6 @@ def generate_pdf(signals: List[Signal]) -> bytes:
 
 # ==================== INTERFACE ====================
 def main():
-    # Header
     col_title, col_time, col_mode = st.columns([3, 2, 2])
     
     with col_title:
@@ -312,7 +647,6 @@ def main():
         mode = st.radio("Mode", ["Confirmed", "Live"], horizontal=True, label_visibility="collapsed")
         is_live = "Live" in mode
 
-    # Configuration
     with st.expander("⚙️ Configuration Avancée", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
@@ -326,7 +660,6 @@ def main():
         min_adx = c7.number_input("ADX minimum", 15, 30, 20, 5)
         adx_strong = c8.number_input("ADX fort", 20, 40, 25, 5)
 
-    # Risk Management
     c1, c2, c3, c4 = st.columns(4)
     balance = c1.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
     max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
@@ -354,7 +687,6 @@ def main():
             signals, stats = run_scan(PAIRS_DEFAULT, ["H1", "H4", "D1"], is_live, 
                                      risk_manager, params)
         
-        # Stats globales
         st.markdown("---")
         st.markdown("### 📊 Résultats du Scan")
         
@@ -366,7 +698,6 @@ def main():
         m5.metric("Avg R:R", f"{np.mean([s.risk_reward for s in signals]):.1f}:1" if signals else "0:1")
         m6.metric("Durée", f"{stats.scan_duration:.1f}s")
         
-        # Stats API
         api_stats = rate_limiter.get_stats()
         st.markdown(f"""<div class='success-box'>
             ✅ <b>Performance API:</b> {api_stats['total_requests']} requêtes | 
@@ -374,14 +705,12 @@ def main():
             Success rate: {api_stats['success_rate']}%
         </div>""", unsafe_allow_html=True)
         
-        # Erreurs
         if stats.errors:
             with st.expander(f"⚠️ Erreurs ({len(stats.errors)})", expanded=False):
-                for error in stats.errors[:10]:  # Limiter à 10
+                for error in stats.errors[:10]:
                     st.markdown(f"<div class='error-box'>❌ {error}</div>", unsafe_allow_html=True)
 
         if signals:
-            # Exports
             st.markdown("---")
             dl1, dl2, dl3 = st.columns([1,1,1])
             
@@ -396,7 +725,7 @@ def main():
                     "SL": s.stop_loss, 
                     "TP": s.take_profit,
                     "Score": s.score, 
-                    "R:R": s.risk_reward, 
+                    "RR": s.risk_reward, 
                     "Size": s.position_size, 
                     "Risk_USD": s.risk_amount,
                     "ADX": s.adx, 
@@ -417,7 +746,6 @@ def main():
                                  f"bluestar_v24_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
                                  "application/pdf", use_container_width=True)
 
-            # Affichage par timeframe
             st.markdown("---")
             col_h1, col_h4, col_d1 = st.columns(3)
             
@@ -454,429 +782,11 @@ def main():
         else:
             st.warning("⚠️ Aucun signal détecté avec les paramètres actuels")
 
-    # Footer
     st.markdown("---")
     st.markdown("""<div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
         <b>BlueStar Cascade Enhanced v2.4</b> | Institutional Grade | 
-        Optimizations: Rate Limiter ✅ | Retry Logic ✅ | Timeout Handling ✅ | 
-        HMA Strict Validation ✅ | Score >= 50 ✅
+        Rate Limiter ✅ | Retry Logic ✅ | Timeout ✅ | HMA Validation ✅ | Score >= 50 ✅
     </div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    main()error(f"❌ OANDA Client Error: {e}")
-        st.error("⚠️ OANDA Token manquant ou invalide dans les secrets Streamlit")
-        st.stop()
-
-client = get_oanda_client()
-
-def retry_on_failure(max_attempts: int = 3):
-    """Décorateur pour retry avec backoff"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except V20Error as e:
-                    logger.warning(f"⚠️ OANDA API Error (attempt {attempt + 1}/{max_attempts}): {e}")
-                    if attempt < max_attempts - 1:
-                        sleep_time = rate_limiter.backoff(attempt)
-                        time.sleep(sleep_time)
-                    else:
-                        rate_limiter.record_error()
-                        raise
-                except Exception as e:
-                    logger.error(f"❌ Unexpected error in {func.__name__}: {e}")
-                    rate_limiter.record_error()
-                    raise
-            return None
-        return wrapper
-    return decorator
-
-def get_cache_key(pair: str, tf: str, count: int) -> str:
-    """Génère une clé de cache unique"""
-    return hashlib.md5(f"{pair}_{tf}_{count}".encode()).hexdigest()
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _cache_wrapper(cache_key: str, fetch_func, *args, **kwargs):
-    """Wrapper de cache pour contourner les limitations de st.cache_data"""
-    return fetch_func(*args, **kwargs)
-
-@retry_on_failure(max_attempts=3)
-def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
-    """Récupération brute des bougies sans cache"""
-    gran = GRANULARITY_MAP.get(tf)
-    if not gran:
-        logger.warning(f"⚠️ Timeframe invalide: {tf}")
-        return pd.DataFrame()
-    
-    # Rate limiting
-    rate_limiter.wait()
-    
-    try:
-        params = {"granularity": gran, "count": count, "price": "M"}
-        req = InstrumentsCandles(instrument=pair, params=params)
-        client.request(req)
-        
-        data = []
-        for c in req.response.get("candles", []):
-            data.append({
-                "time": c["time"],
-                "open": float(c["mid"]["o"]),
-                "high": float(c["mid"]["h"]),
-                "low": float(c["mid"]["l"]),
-                "close": float(c["mid"]["c"]),
-                "complete": c.get("complete", False)
-            })
-        
-        df = pd.DataFrame(data)
-        if not df.empty:
-            df["time"] = pd.to_datetime(df["time"], utc=True)
-            df["time"] = df["time"].dt.tz_localize(None)
-        
-        logger.debug(f"✅ {pair} {tf}: {len(df)} candles | Last complete: {df.iloc[-1]['complete'] if not df.empty else 'N/A'}")
-        return df
-        
-    except Exception as e:
-        logger.error(f"❌ API Error {pair} {tf}: {e}")
-        raise
-
-def get_candles(pair: str, tf: str, count: int = 300, use_cache: bool = True) -> pd.DataFrame:
-    """Récupération des bougies avec cache intelligent"""
-    if not use_cache:
-        return fetch_candles_raw(pair, tf, count)
-    
-    cache_key = get_cache_key(pair, tf, count)
-    
-    # TTL adaptatif selon timeframe
-    ttl_map = {"H1": 30, "H4": 120, "D1": 300}
-    ttl = ttl_map.get(tf, 30)
-    
-    return _cache_wrapper(cache_key, fetch_candles_raw, pair, tf, count)
-
-# ==================== INDICATEURS OPTIMISÉS ====================
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcul des indicateurs avec validation stricte"""
-    if len(df) < 50:
-        logger.warning("⚠️ Pas assez de données pour calculer les indicateurs")
-        return df
-    
-    close = df['close']
-    high = df['high']
-    low = df['low']
-
-    # WMA avec validation stricte
-    def wma(series, length):
-        if len(series) < length:
-            return pd.Series([np.nan] * len(series), index=series.index)
-        weights = np.arange(1, length + 1)
-        result = series.rolling(length, min_periods=length).apply(
-            lambda x: np.dot(x, weights) / weights.sum() if len(x) == length else np.nan,
-            raw=True
-        )
-        return result
-
-    # HMA (Hull Moving Average) - STRICTE
-    try:
-        wma_half = wma(close, 10)
-        wma_full = wma(close, 20)
-        hma_length = int(np.sqrt(20))
-        
-        if wma_half.isna().all() or wma_full.isna().all():
-            df['hma'] = np.nan
-            df['hma_up'] = np.nan
-            logger.warning("⚠️ HMA: Impossible de calculer (WMA invalides)")
-        else:
-            df['hma'] = wma(2 * wma_half - wma_full, hma_length)
-            # ✅ FIX: hma_up avec validation stricte
-            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
-            df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
-            # Ne pas remplir les NaN - ils seront filtrés
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul HMA: {e}")
-        df['hma'] = np.nan
-        df['hma_up'] = np.nan
-
-    # RSI (7 périodes)
-    try:
-        delta = close.diff()
-        up = delta.clip(lower=0)
-        down = -delta.clip(upper=0)
-        rs = up.ewm(alpha=1/7, min_periods=7).mean() / down.ewm(alpha=1/7, min_periods=7).mean()
-        df['rsi'] = 100 - (100 / (1 + rs))
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul RSI: {e}")
-        df['rsi'] = np.nan
-
-    # UT Bot (ATR Trailing Stop)
-    try:
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
-        
-        xATR = tr.rolling(1).mean()
-        nLoss = 2.0 * xATR
-        xATRTrailingStop = [0.0] * len(df)
-        
-        for i in range(1, len(df)):
-            prev_stop = xATRTrailingStop[i-1]
-            curr_src = close.iloc[i]
-            loss = nLoss.iloc[i]
-            
-            if pd.isna(loss):
-                xATRTrailingStop[i] = prev_stop
-                continue
-            
-            if (curr_src > prev_stop) and (close.iloc[i-1] > prev_stop):
-                xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
-            elif (curr_src < prev_stop) and (close.iloc[i-1] < prev_stop):
-                xATRTrailingStop[i] = min(prev_stop, curr_src + loss)
-            elif curr_src > prev_stop:
-                xATRTrailingStop[i] = curr_src - loss
-            else:
-                xATRTrailingStop[i] = curr_src + loss
-        
-        df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul UT Bot: {e}")
-        df['ut_state'] = 0
-
-    # ADX (14 périodes)
-    try:
-        atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
-        plus_dm = high.diff().clip(lower=0)
-        minus_dm = -low.diff().clip(upper=0)
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
-        df['atr_val'] = atr14
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul ADX: {e}")
-        df['adx'] = np.nan
-        df['atr_val'] = np.nan
-    
-    return df
-
-# ==================== CASCADE ====================
-@st.cache_data(ttl=180, show_spinner=False)
-def get_trend_alignment(pair: str, signal_tf: str) -> str:
-    """Analyse de la tendance sur le timeframe supérieur"""
-    map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
-    higher_tf = map_higher.get(signal_tf)
-    if not higher_tf:
-        return "Neutral"
-    
-    try:
-        df = get_candles(pair, higher_tf, 100)
-        if len(df) < 50:
-            return "Neutral"
-        
-        df = calculate_indicators(df)
-        
-        # Vérifier validité des indicateurs
-        if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['hma'].iloc[-2]):
-            return "Neutral"
-        
-        close = df['close']
-        ema50 = close.ewm(span=50, min_periods=50).mean().iloc[-1]
-        hma_current = df['hma'].iloc[-1]
-        hma_prev = df['hma'].iloc[-2]
-        
-        if close.iloc[-1] > ema50 and hma_current > hma_prev:
-            return "Bullish"
-        elif close.iloc[-1] < ema50 and hma_current < hma_prev:
-            return "Bearish"
-        
-        return "Neutral"
-    except Exception as e:
-        logger.error(f"❌ Erreur cascade {pair} {signal_tf}: {e}")
-        return "Neutral"
-
-# ==================== RISK MANAGER ====================
-class RiskManager:
-    def __init__(self, config: RiskConfig, balance: float):
-        self.config = config
-        self.balance = balance
-    
-    def calculate_position_size(self, signal: Signal, win_rate: float = 0.58) -> float:
-        """Calcul de la taille de position avec Kelly Criterion validé"""
-        # ✅ FIX: Validation du win_rate
-        win_rate = max(self.config.min_win_rate, min(win_rate, self.config.max_win_rate))
-        
-        # Kelly Criterion
-        kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
-        kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
-        
-        if kelly <= 0:
-            logger.warning(f"⚠️ Kelly négatif ou nul pour {signal.pair}: {kelly}")
-            return 0.0
-        
-        pip_risk = abs(signal.entry_price - signal.stop_loss)
-        if pip_risk <= 0:
-            logger.warning(f"⚠️ Pip risk invalide pour {signal.pair}: {pip_risk}")
-            return 0.0
-        
-        size = (self.balance * kelly) / pip_risk
-        return round(size, 2)
-
-# ==================== ANALYSE OPTIMISÉE ====================
-def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, params: TradingParams) -> Optional[Signal]:
-    """Analyse d'une paire avec gestion optimisée"""
-    
-    try:
-        df = get_candles(pair, tf, 300, use_cache=True)
-        if len(df) < 100:
-            logger.debug(f"⚠️ {pair} {tf}: Pas assez de données ({len(df)} bougies)")
-            return None
-        
-        df = calculate_indicators(df)
-        
-        # ========== GESTION DES BOUGIES ==========
-        if mode_live:
-            idx = -1
-        else:
-            idx = -2 if not df.iloc[-1]['complete'] else -1
-        
-        # ✅ FIX: Vérification bounds
-        if abs(idx) > len(df):
-            logger.warning(f"⚠️ {pair} {tf}: Index {idx} hors limites (len={len(df)})")
-            return None
-        
-        last = df.iloc[idx]
-        prev = df.iloc[idx-1]
-        prev2 = df.iloc[idx-2] if abs(idx-2) <= len(df) else None
-        
-        # ✅ FIX: Validation stricte des indicateurs
-        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state']
-        for field in required_fields:
-            if pd.isna(last[field]):
-                logger.debug(f"⚠️ {pair} {tf}: Indicateur {field} invalide à idx={idx}")
-                return None
-        
-        if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
-            logger.debug(f"⚠️ {pair} {tf}: HMA historique invalide")
-            return None
-        
-        # ========== DÉTECTION DES FLIPS ==========
-        hma_flip_green = bool(last.hma_up) and not bool(prev.hma_up)
-        hma_flip_red = not bool(last.hma_up) and bool(prev.hma_up)
-        
-        hma_extended_green = False
-        hma_extended_red = False
-        if prev2 is not None:
-            hma_extended_green = bool(last.hma_up) and bool(prev.hma_up) and not bool(prev2.hma_up) and not hma_flip_green
-            hma_extended_red = not bool(last.hma_up) and not bool(prev.hma_up) and bool(prev2.hma_up) and not hma_flip_red
-        
-        # Conditions BUY/SELL
-        if params.strict_flip_only:
-            raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
-            raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
-            is_strict = True
-        else:
-            raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
-            raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
-            is_strict = hma_flip_green or hma_flip_red
-        
-        if not (raw_buy or raw_sell):
-            return None
-        
-        action = "BUY" if raw_buy else "SELL"
-        
-        # Cascade
-        higher_trend = get_trend_alignment(pair, tf)
-        if params.cascade_required:
-            if action == "BUY" and higher_trend != "Bullish":
-                logger.debug(f"❌ {pair} {tf}: BUY rejeté (cascade {higher_trend})")
-                return None
-            if action == "SELL" and higher_trend != "Bearish":
-                logger.debug(f"❌ {pair} {tf}: SELL rejeté (cascade {higher_trend})")
-                return None
-        
-        # ========== SCORING ==========
-        score = 70
-        
-        # ADX
-        if last.adx > params.adx_strong_threshold:
-            score += 15
-        elif last.adx > params.min_adx_threshold:
-            score += 10
-        else:
-            score -= 5
-        
-        # Type de flip
-        if hma_flip_green or hma_flip_red:
-            score += 15
-        elif hma_extended_green or hma_extended_red:
-            score += 5
-        
-        # RSI optimal
-        if (action == "BUY" and 50 < last.rsi < 65) or (action == "SELL" and 35 < last.rsi < 50):
-            score += 5
-        
-        # Cascade alignée
-        if (action == "BUY" and higher_trend == "Bullish") or (action == "SELL" and higher_trend == "Bearish"):
-            score += 10
-        
-        # ✅ FIX: Score minimum à 50
-        score = max(params.min_score_threshold, min(100, score))
-        
-        if score < params.min_score_threshold:
-            logger.debug(f"❌ {pair} {tf}: Score insuffisant ({score})")
-            return None
-        
-        quality = (SignalQuality.INSTITUTIONAL if score >= 90 
-                  else SignalQuality.PREMIUM if score >= 80 
-                  else SignalQuality.STANDARD)
-        
-        # Calcul SL/TP
-        atr = last.atr_val
-        sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
-        tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
-        
-        rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
-        if rr < params.min_rr_ratio:
-            logger.debug(f"❌ {pair} {tf}: R:R insuffisant ({rr:.2f})")
-            return None
-        
-        # ✅ FIX: Timezone unifié
-        if last.time.tzinfo is None:
-            local_time = pytz.utc.localize(last.time).astimezone(TUNIS_TZ)
-        else:
-            local_time = last.time.astimezone(TUNIS_TZ)
-        
-        signal = Signal(
-            timestamp=local_time,
-            pair=pair,
-            timeframe=tf,
-            action=action,
-            entry_price=last.close,
-            stop_loss=sl,
-            take_profit=tp,
-            score=score,
-            quality=quality,
-            position_size=0.0,
-            risk_amount=0.0,
-            risk_reward=rr,
-            adx=int(last.adx),
-            rsi=int(last.rsi),
-            atr=atr,
-            higher_tf_trend=higher_trend,
-            is_live=mode_live and not df.iloc[-1]['complete'],
-            is_fresh_flip=hma_flip_green if action == "BUY" else hma_flip_red,
-            candle_index=idx,
-            is_strict_flip=is_strict
-        )
-        
-        signal.position_size = risk_manager.calculate_position_size(signal)
-        signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
-        
-        logger.info(f"✅ Signal validé: {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score} | R:R: {rr:.1f}")
-        
-        return signal
-    
-    except Exception as e:
-        logger.
-   
+    main()
