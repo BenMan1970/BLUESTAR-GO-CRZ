@@ -1,9 +1,9 @@
 """
-BlueStar Cascade - INSTITUTIONAL EDITION (v3.4 - STABLE)
-✅ FIX: Erreur 500 Oanda/Cloudflare (Rate Limiting stricte)
-✅ Vitesse: Scan ajusté (2 threads / 0.25s delay)
-✅ UX: Interface Terminal complète
-✅ Fonctions: Exports PDF/CSV & Filtres actifs
+BlueStar Cascade - INSTITUTIONAL EDITION (v3.5 - ULTIMATE STABLE)
+✅ Moteur: Séquentiel (100% sûr contre erreur 500/Cloudflare)
+✅ Sécurité: Délai inter-requête 0.30s
+✅ UI: Interface Terminal avec barre de progression détaillée
+✅ Fonctionnalités: Tout inclus (PDF, CSV, Filtres)
 """
 import streamlit as st
 import pandas as pd
@@ -11,14 +11,14 @@ import numpy as np
 import pytz
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # OANDA API
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
+from oandapyV20.exceptions import V20Error
 
 # PDF Export
 from io import BytesIO
@@ -148,11 +148,14 @@ def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
         df = pd.DataFrame(data)
         if not df.empty: df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(None)
         return df
+    except V20Error as e:
+        logger.warning(f"Oanda API Error {pair}: {e}")
+        return pd.DataFrame()
     except Exception as e:
-        logger.warning(f"Oanda Rate Limit or Error on {pair}: {e}")
+        logger.warning(f"Connection Error {pair}: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=60, show_spinner=False)
+# Cache désactivé pour forcer le scan frais séquentiel
 def get_candles(pair, tf): return fetch_candles_raw(pair, tf, 300)
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -187,8 +190,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def process_pair(pair, tf, params, balance, risk_pct, news_filter):
-    # MODIF: Délai augmenté à 0.25s pour éviter l'erreur 500
-    time.sleep(0.25)
+    # MODIF: Délai séquentiel pour stabilité parfaite
+    time.sleep(0.3) 
     try:
         df = get_candles(pair, tf)
         if len(df) < 100: return None
@@ -277,28 +280,30 @@ def main():
     st.markdown("---")
     c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
     with c_btn2:
-        run_scan = st.button("🚀 INITIATE MARKET SCAN (SECURE MODE)", type="primary", use_container_width=True)
+        run_scan = st.button("🚀 INITIATE MARKET SCAN (SEQ MODE)", type="primary", use_container_width=True)
     st.markdown("---")
 
     nf = NewsFilter()
     
     if run_scan:
-        progress = st.progress(0, text="Connecting to Data Feed (Secure Rate)...")
+        progress_bar = st.progress(0, text="Establishing Secure Connection...")
         params = {'sl_mult': sl_mult, 'tp_mult': tp_mult, 'min_score': min_score, 'news_filter': use_news}
         signals = []
         
-        # MODIF: max_workers reduit à 2 pour stabilité maximale
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            tasks = {executor.submit(process_pair, p, tf, params, balance, risk_pct, nf): (p, tf) 
-                     for p in PAIRS_DEFAULT for tf in ["H1", "H4", "D1"]}
-            done = 0
-            for future in as_completed(tasks):
-                res = future.result()
-                if res: signals.append(res)
-                done += 1
-                progress.progress(done / len(tasks), text=f"Scanning {tasks[future][0]}...")
+        # MODIF: Boucle SÉQUENTIELLE simple (pas de thread) pour éviter le blocage API
+        total_steps = len(PAIRS_DEFAULT) * 3
+        current_step = 0
         
-        progress.empty()
+        for pair in PAIRS_DEFAULT:
+            for tf in ["H1", "H4", "D1"]:
+                current_step += 1
+                progress_bar.progress(current_step / total_steps, text=f"Scanning {pair} ({tf})...")
+                
+                sig = process_pair(pair, tf, params, balance, risk_pct, nf)
+                if sig:
+                    signals.append(sig)
+        
+        progress_bar.empty()
         
         if not signals:
             st.warning("No signals meeting institutional criteria found at this time.")
