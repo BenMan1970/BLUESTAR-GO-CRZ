@@ -543,8 +543,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         else:
             hma_series = 2 * wma_half - wma_full
             df['hma'] = wma(hma_series.ffill().bfill(), hma_length)
-            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
-            df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
+            # CORRECTION: Éviter le FutureWarning de replace avec downcasting
+            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(bool)
     except Exception as e:
         logger.error(f"❌ HMA Error: {e}")
         df['hma'] = np.nan
