@@ -1,9 +1,9 @@
 """
-BlueStar Cascade - INSTITUTIONAL EDITION (v3.3)
-✅ UX Fix: Bouton SCAN déplacé sur l'écran principal
-✅ UX Fix: Barre latérale ouverte par défaut
-✅ Dépendances: oandapyV20 (corrigé)
-✅ Moteur: Threading optimisé (4 workers)
+BlueStar Cascade - INSTITUTIONAL EDITION (v3.4 - STABLE)
+✅ FIX: Erreur 500 Oanda/Cloudflare (Rate Limiting stricte)
+✅ Vitesse: Scan ajusté (2 threads / 0.25s delay)
+✅ UX: Interface Terminal complète
+✅ Fonctions: Exports PDF/CSV & Filtres actifs
 """
 import streamlit as st
 import pandas as pd
@@ -32,7 +32,7 @@ from reportlab.lib.units import mm
 st.set_page_config(
     page_title="BlueStar Terminal", 
     layout="wide", 
-    initial_sidebar_state="expanded",  # MODIF: Menu ouvert par défaut
+    initial_sidebar_state="expanded",
     page_icon="💠"
 )
 
@@ -47,27 +47,14 @@ st.markdown("""
 <style>
     .main {background-color: #0b0e11; color: #e0e0e0;}
     .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 98% !important;}
-    
-    /* Metrics et KPI */
     div[data-testid="stMetric"] {background-color: #161b22; border: 1px solid #30363d; padding: 10px; border-radius: 4px;}
     div[data-testid="stMetricLabel"] {font-size: 0.75rem; color: #8b949e;}
     div[data-testid="stMetricValue"] {font-size: 1.4rem; font-family: 'Roboto Mono', monospace; color: #ffffff;}
-    
-    /* Boutons */
     div.stButton > button:first-child {
-        background-color: #238636;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font-weight: bold;
-        letter-spacing: 0.5px;
+        background-color: #238636; color: white; border: none; border-radius: 4px; font-weight: bold; letter-spacing: 0.5px;
     }
     div.stButton > button:first-child:hover {background-color: #2ea043;}
-    
-    /* Tables */
     .stDataFrame {border: 1px solid #30363d; border-radius: 4px;}
-    
-    /* Header */
     h1 {font-family: 'Helvetica Neue', sans-serif; font-weight: 300; letter-spacing: -1px; color: #fff;}
     .status-bar {font-family: 'Roboto Mono', monospace; font-size: 0.8em; color: #8b949e; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 20px;}
     .ready-indicator {color: #00ff88; font-weight: bold; font-family: 'Roboto Mono', monospace;}
@@ -161,7 +148,9 @@ def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
         df = pd.DataFrame(data)
         if not df.empty: df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(None)
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        logger.warning(f"Oanda Rate Limit or Error on {pair}: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_candles(pair, tf): return fetch_candles_raw(pair, tf, 300)
@@ -198,7 +187,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def process_pair(pair, tf, params, balance, risk_pct, news_filter):
-    time.sleep(0.05)
+    # MODIF: Délai augmenté à 0.25s pour éviter l'erreur 500
+    time.sleep(0.25)
     try:
         df = get_candles(pair, tf)
         if len(df) < 100: return None
@@ -284,21 +274,21 @@ def main():
         st.markdown("# BLUESTAR <span style='color:#00ff88'>TERMINAL</span>", unsafe_allow_html=True)
         st.markdown(f"<div class='status-bar'>SYSTEM ONLINE | TUNIS: {datetime.now(TUNIS_TZ).strftime('%H:%M:%S')} | <span class='ready-indicator'>● READY</span></div>", unsafe_allow_html=True)
     
-    # Bouton principal au centre
     st.markdown("---")
     c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
     with c_btn2:
-        run_scan = st.button("🚀 INITIATE MARKET SCAN", type="primary", use_container_width=True)
+        run_scan = st.button("🚀 INITIATE MARKET SCAN (SECURE MODE)", type="primary", use_container_width=True)
     st.markdown("---")
 
     nf = NewsFilter()
     
     if run_scan:
-        progress = st.progress(0, text="Initializing...")
+        progress = st.progress(0, text="Connecting to Data Feed (Secure Rate)...")
         params = {'sl_mult': sl_mult, 'tp_mult': tp_mult, 'min_score': min_score, 'news_filter': use_news}
         signals = []
         
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # MODIF: max_workers reduit à 2 pour stabilité maximale
+        with ThreadPoolExecutor(max_workers=2) as executor:
             tasks = {executor.submit(process_pair, p, tf, params, balance, risk_pct, nf): (p, tf) 
                      for p in PAIRS_DEFAULT for tf in ["H1", "H4", "D1"]}
             done = 0
