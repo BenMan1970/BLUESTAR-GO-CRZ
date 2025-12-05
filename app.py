@@ -1,14 +1,9 @@
+# bluestar_v2_5.py
 """
-BlueStar Cascade - VERSION 2.4 INSTITUTIONAL GRADE
-Corrections critiques v2.4 :
-✅ FIX 1: Rate limiting robuste avec backoff exponentiel
-✅ FIX 2: Validation HMA stricte (NaN handling)
-✅ FIX 3: Cache intelligent par timeframe
-✅ FIX 4: Score minimum à 50 (pas de signaux <50)
-✅ FIX 5: Timezone handling unifié
-✅ FIX 6: Error tracking + retry logic
-✅ FIX 7: Kelly Criterion avec win_rate validation
-✅ FIX 8: ThreadPool avec timeout
+BlueStar Cascade - VERSION 2.5 INSTITUTIONAL OPTIMIZED
+Changements logiques (HMA flip robust, RSI dynamique, cascade momentum,
+scoring pondéré, R:R dynamique, filtre bougie, double validation).
+Aucun changement visuel.
 """
 import streamlit as st
 import pandas as pd
@@ -38,7 +33,7 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar Institutional v2.4", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar Institutional v2.5", layout="wide", initial_sidebar_state="collapsed")
 
 # Logging amélioré
 logging.basicConfig(
@@ -77,13 +72,12 @@ PAIRS_DEFAULT = [
     "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
     "EUR_CHF","GBP_CHF","USD_SEK","XAU_USD","XPT_USD"
 ]
-GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}  # ✅ Ajouté W
+GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
 
 # ==================== RATE LIMITER ROBUSTE ====================
 @dataclass
 class RateLimiter:
-    """Rate limiter avec backoff exponentiel"""
     min_interval: float = 0.12
     max_retries: int = 3
     backoff_factor: float = 2.0
@@ -177,8 +171,8 @@ def get_oanda_client():
         token = st.secrets["OANDA_ACCESS_TOKEN"]
         return API(access_token=token)
     except Exception as e:
-        logger.error(f"❌ OANDA Token Error: {e}")
-        st.error("⚠️ OANDA Token manquant dans secrets Streamlit")
+        logger.error(f"OANDA Token Error: {e}")
+        st.error("OANDA Token manquant dans secrets Streamlit")
         st.stop()
 
 client = get_oanda_client()
@@ -191,14 +185,14 @@ def retry_on_failure(max_attempts: int = 3):
                 try:
                     return func(*args, **kwargs)
                 except V20Error as e:
-                    logger.warning(f"⚠️ API Error (attempt {attempt + 1}/{max_attempts}): {e}")
+                    logger.warning(f"API Error (attempt {attempt + 1}/{max_attempts}): {e}")
                     if attempt < max_attempts - 1:
                         time.sleep(rate_limiter.backoff(attempt))
                     else:
                         rate_limiter.record_error()
                         raise
                 except Exception as e:
-                    logger.error(f"❌ Error in {func.__name__}: {e}")
+                    logger.error(f"Error in {func.__name__}: {e}")
                     rate_limiter.record_error()
                     raise
             return None
@@ -216,7 +210,7 @@ def _cache_wrapper(cache_key: str, pair: str, tf: str, count: int):
 def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
     gran = GRANULARITY_MAP.get(tf)
     if not gran:
-        logger.warning(f"⚠️ Timeframe invalide: {tf}")
+        logger.warning(f"Timeframe invalide: {tf}")
         return pd.DataFrame()
     
     rate_limiter.wait()
@@ -242,11 +236,11 @@ def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
             df["time"] = pd.to_datetime(df["time"], utc=True)
             df["time"] = df["time"].dt.tz_localize(None)
         
-        logger.debug(f"✅ {pair} {tf}: {len(df)} candles")
+        logger.debug(f"{pair} {tf}: {len(df)} candles")
         return df
         
     except Exception as e:
-        logger.error(f"❌ API Error {pair} {tf}: {e}")
+        logger.error(f"API Error {pair} {tf}: {e}")
         raise
 
 def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
@@ -256,7 +250,7 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
 # ==================== INDICATEURS ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < 50:
-        logger.warning("⚠️ Pas assez de données")
+        logger.warning("Pas assez de données")
         return df
     
     close = df['close']
@@ -285,7 +279,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
             df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
     except Exception as e:
-        logger.error(f"❌ HMA Error: {e}")
+        logger.error(f"HMA Error: {e}")
         df['hma'] = np.nan
         df['hma_up'] = np.nan
 
@@ -296,7 +290,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         rs = up.ewm(alpha=1/7, min_periods=7).mean() / down.ewm(alpha=1/7, min_periods=7).mean()
         df['rsi'] = 100 - (100 / (1 + rs))
     except Exception as e:
-        logger.error(f"❌ RSI Error: {e}")
+        logger.error(f"RSI Error: {e}")
         df['rsi'] = np.nan
 
     try:
@@ -339,14 +333,14 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
         df['atr_val'] = atr14
     except Exception as e:
-        logger.error(f"❌ ADX/UT Error: {e}")
+        logger.error(f"ADX/UT Error: {e}")
         df['ut_state'] = 0
         df['adx'] = np.nan
         df['atr_val'] = np.nan
     
     return df
 
-# ==================== CASCADE ====================
+# ==================== CASCADE (v2.5) ====================
 @st.cache_data(ttl=180, show_spinner=False)
 def get_trend_alignment(pair: str, signal_tf: str) -> str:
     map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
@@ -355,28 +349,30 @@ def get_trend_alignment(pair: str, signal_tf: str) -> str:
         return "Neutral"
     
     try:
-        df = get_candles(pair, higher_tf, 100)
-        if len(df) < 50:
+        df = get_candles(pair, higher_tf, 150)
+        if len(df) < 60:
             return "Neutral"
         
         df = calculate_indicators(df)
         
-        if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['hma'].iloc[-2]):
+        if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]):
             return "Neutral"
         
         close = df['close']
         ema50 = close.ewm(span=50, min_periods=50).mean().iloc[-1]
         hma_current = df['hma'].iloc[-1]
         hma_prev = df['hma'].iloc[-2]
+        hma_up = hma_current > hma_prev
+        adx_momentum = df['adx'].iloc[-1] > 18  # require momentum on higher TF
         
-        if close.iloc[-1] > ema50 and hma_current > hma_prev:
+        if close.iloc[-1] > ema50 and hma_up and adx_momentum:
             return "Bullish"
-        elif close.iloc[-1] < ema50 and hma_current < hma_prev:
+        elif close.iloc[-1] < ema50 and not hma_up and adx_momentum:
             return "Bearish"
         
         return "Neutral"
     except Exception as e:
-        logger.error(f"❌ Cascade Error {pair}: {e}")
+        logger.error(f"Cascade Error {pair}: {e}")
         return "Neutral"
 
 # ==================== RISK MANAGER ====================
@@ -387,6 +383,8 @@ class RiskManager:
     
     def calculate_position_size(self, signal: Signal, win_rate: float = 0.58) -> float:
         win_rate = max(self.config.min_win_rate, min(win_rate, self.config.max_win_rate))
+        if signal.risk_reward <= 0:
+            return 0.0
         kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
         kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
         
@@ -400,7 +398,7 @@ class RiskManager:
         size = (self.balance * kelly) / pip_risk
         return round(size, 2)
 
-# ==================== ANALYSE ====================
+# ==================== ANALYSE (v2.5) ====================
 def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, params: TradingParams) -> Optional[Signal]:
     try:
         df = get_candles(pair, tf, 300)
@@ -429,15 +427,39 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
             return None
         
-        hma_flip_green = bool(last.hma_up) and not bool(prev.hma_up)
-        hma_flip_red = not bool(last.hma_up) and bool(prev.hma_up)
-        
-        hma_extended_green = False
-        hma_extended_red = False
-        if prev2 is not None:
-            hma_extended_green = bool(last.hma_up) and bool(prev.hma_up) and not bool(prev2.hma_up) and not hma_flip_green
-            hma_extended_red = not bool(last.hma_up) and not bool(prev.hma_up) and bool(prev2.hma_up) and not hma_flip_red
-        
+        # === v2.5 HMA Flip Logic (Robuste) ===
+        hma_slope = last.hma - prev.hma
+        hma_slope_prev = prev.hma - (prev2.hma if prev2 is not None else prev.hma)
+        MIN_HMA_SLOPE = 0.15 * last.atr_val if last.atr_val and last.atr_val > 0 else 0.0001
+
+        hma_flip_green = (
+            bool(last.hma_up)
+            and not bool(prev.hma_up)
+            and hma_slope > MIN_HMA_SLOPE
+            and hma_slope_prev < MIN_HMA_SLOPE
+        )
+
+        hma_flip_red = (
+            not bool(last.hma_up)
+            and bool(prev.hma_up)
+            and hma_slope < -MIN_HMA_SLOPE
+            and hma_slope_prev > -MIN_HMA_SLOPE
+        )
+
+        hma_extended_green = (
+            bool(last.hma_up)
+            and bool(prev.hma_up)
+            and (prev2 is not None and not bool(prev2.hma_up))
+            and hma_slope > MIN_HMA_SLOPE
+        )
+
+        hma_extended_red = (
+            not bool(last.hma_up)
+            and not bool(prev.hma_up)
+            and (prev2 is not None and bool(prev2.hma_up))
+            and hma_slope < -MIN_HMA_SLOPE
+        )
+
         if params.strict_flip_only:
             raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
             raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
@@ -446,61 +468,101 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
             raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
             is_strict = hma_flip_green or hma_flip_red
-        
+
         if not (raw_buy or raw_sell):
             return None
-        
+
         action = "BUY" if raw_buy else "SELL"
-        
+
+        # === v2.5 Cascade requirement (with momentum on higher TF) ===
         higher_trend = get_trend_alignment(pair, tf)
         if params.cascade_required:
             if action == "BUY" and higher_trend != "Bullish":
                 return None
             if action == "SELL" and higher_trend != "Bearish":
                 return None
-        
-        score = 70
-        
+
+        # === v2.5 Candle Quality Filter ===
+        candle_range = last.high - last.low
+        if candle_range == 0:
+            return None
+        body_ratio = abs(last.close - last.open) / candle_range
+        if body_ratio < 0.35:
+            return None
+
+        # === v2.5 Scoring ===
+        score = 50
+
+        # ADX momentum
         if last.adx > params.adx_strong_threshold:
-            score += 15
+            score += 20
         elif last.adx > params.min_adx_threshold:
             score += 10
         else:
             score -= 5
-        
+
+        # Flip quality
         if hma_flip_green or hma_flip_red:
-            score += 15
+            score += 20
         elif hma_extended_green or hma_extended_red:
-            score += 5
-        
-        if (action == "BUY" and 50 < last.rsi < 65) or (action == "SELL" and 35 < last.rsi < 50):
-            score += 5
-        
-        if (action == "BUY" and higher_trend == "Bullish") or (action == "SELL" and higher_trend == "Bearish"):
+            score += 8
+
+        # RSI optimal bands (stricter)
+        if action == "BUY" and 55 < last.rsi < 62:
             score += 10
-        
-        score = max(params.min_score_threshold, min(100, score))
-        
+        elif action == "BUY" and 52 < last.rsi <= 55:
+            score += 5
+
+        if action == "SELL" and 38 < last.rsi < 45:
+            score += 10
+        elif action == "SELL" and 45 <= last.rsi < 48:
+            score += 5
+
+        # Cascade confirmed
+        if higher_trend in ["Bullish", "Bearish"]:
+            score += 10
+
+        score = int(min(100, max(score, params.min_score_threshold)))
+
         if score < params.min_score_threshold:
             return None
-        
+
         quality = (SignalQuality.INSTITUTIONAL if score >= 90 
                   else SignalQuality.PREMIUM if score >= 80 
                   else SignalQuality.STANDARD)
-        
+
         atr = last.atr_val
         sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
         tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
-        
+
         rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
-        if rr < params.min_rr_ratio:
+
+        # === v2.5 Dynamic R:R filter ===
+        volatility_factor = 1 + (last.atr_val / last.close) * 200 if last.atr_val and last.close else 1.0
+        dynamic_rr = params.min_rr_ratio * volatility_factor
+
+        if rr < dynamic_rr:
             return None
-        
+
+        # === v2.5 RSI band stricter check (post-score) ===
+        if action == "BUY" and not (52 < last.rsi < 68):
+            return None
+        if action == "SELL" and not (32 < last.rsi < 48):
+            return None
+
+        # === v2.5 Directional double validation (UT_State + HMA) ===
+        if action == "BUY":
+            if not (last.ut_state == 1 and last.hma > prev.hma):
+                return None
+        if action == "SELL":
+            if not (last.ut_state == -1 and last.hma < prev.hma):
+                return None
+
         if last.time.tzinfo is None:
             local_time = pytz.utc.localize(last.time).astimezone(TUNIS_TZ)
         else:
             local_time = last.time.astimezone(TUNIS_TZ)
-        
+
         signal = Signal(
             timestamp=local_time,
             pair=pair,
@@ -523,15 +585,15 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             candle_index=idx,
             is_strict_flip=is_strict
         )
-        
+
         signal.position_size = risk_manager.calculate_position_size(signal)
         signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
-        
-        logger.info(f"✅ {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score}")
+
+        logger.info(f"{pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score}")
         return signal
-    
+
     except Exception as e:
-        logger.error(f"❌ Error {pair} {tf}: {e}")
+        logger.error(f"Error {pair} {tf}: {e}")
         return None
 
 # ==================== SCAN ====================
@@ -575,7 +637,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     elements = []
     styles = getSampleStyleSheet()
     
-    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.4</b></font>", styles["Title"]))
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.5</b></font>", styles["Title"]))
     elements.append(Spacer(1, 8*mm))
     
     now = datetime.now(TUNIS_TZ).strftime('%d/%m/%Y %H:%M:%S')
@@ -624,12 +686,12 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     doc.build(elements)
     return buffer.getvalue()
 
-# ==================== INTERFACE ====================
+# ==================== INTERFACE (UNCHANGED VISUALLY) ====================
 def main():
     col_title, col_time, col_mode = st.columns([3, 2, 2])
     
     with col_title:
-        st.markdown("# BlueStar Enhanced v2.4")
+        st.markdown("# BlueStar Enhanced v2.5")
         st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v24-badge">OPTIMIZED</span>', 
                    unsafe_allow_html=True)
     
@@ -736,14 +798,14 @@ def main():
                 } for s in signals])
                 st.download_button("📥 Télécharger CSV", 
                                  df_csv.to_csv(index=False).encode(), 
-                                 f"bluestar_v24_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
+                                 f"bluestar_v25_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
                                  "text/csv", width="stretch")
             
             with dl3:
                 pdf = generate_pdf(signals)
                 st.download_button("📄 Télécharger PDF", 
                                  pdf, 
-                                 f"bluestar_v24_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
+                                 f"bluestar_v25_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
                                  "application/pdf", width="stretch")
 
             st.markdown("---")
@@ -784,10 +846,9 @@ def main():
 
     st.markdown("---")
     st.markdown("""<div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
-        <b>BlueStar Cascade Enhanced v2.4</b> | Institutional Grade | 
+        <b>BlueStar Cascade Enhanced v2.5</b> | Institutional Grade | 
         Rate Limiter ✅ | Retry Logic ✅ | Timeout ✅ | HMA Validation ✅ | Score >= 50 ✅
     </div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
-        
