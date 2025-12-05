@@ -1,6 +1,6 @@
 streamlit
 pandas
 numpy
-oandapy-v20
+oandapyV20
 reportlab
 requests
