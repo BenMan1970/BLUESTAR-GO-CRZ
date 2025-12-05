@@ -1,5 +1,5 @@
 """
-BlueStar Cascade - INSTITUTIONAL EDITION (v3.0)
+BlueStar Cascade - INSTITUTIONAL EDITION (v3.1 Stable)
 Caractéristiques :
 ✅ Interface "Bloomberg Terminal" style
 ✅ Filtre News Économiques (Forex Factory)
@@ -7,6 +7,7 @@ Caractéristiques :
 ✅ Suppression totale du module de corrélation
 ✅ Rendu visuel professionnel (DataGrid interactifs)
 ✅ Code optimisé Pandas 2.0+ (sans warnings)
+✅ CORRECTION: SyntaxError line 124 & Missing Method fixed
 """
 import streamlit as st
 import pandas as pd
@@ -115,17 +116,22 @@ class NewsFilter:
             NewsEvent(now + timedelta(hours=1), "EUR", "Medium", "German Buba Monthly Report"),
         ]
     
-    def is_safe_to_trade(self, pair: str, hours_buffer: int = 2) -> Tuple[bool, Optional[NewsEvent]]:
+    def get_upcoming_events(self, hours_ahead: int = 4) -> List[NewsEvent]:
         if not self.cache_time:
             self.events_cache = self.fetch_forex_factory_news()
             self.cache_time = datetime.now(pytz.UTC)
-            
+        
         now = datetime.now(pytz.UTC)
-        cutoff = now + timedelta(hours=hours_ahead=hours_buffer)
+        cutoff = now + timedelta(hours=hours_ahead)
+        return [e for e in self.events_cache if now <= e.time <= cutoff]
+    
+    def is_safe_to_trade(self, pair: str, hours_buffer: int = 2) -> Tuple[bool, Optional[NewsEvent]]:
+        # Utilisation de la méthode corrigée get_upcoming_events
+        events = self.get_upcoming_events(hours_buffer)
         currencies = pair.replace("_", "").replace("XAU", "GOLD").replace("XPT", "PLAT")
         
-        for event in self.events_cache:
-            if now <= event.time <= cutoff and event.impact == "High":
+        for event in events:
+            if event.impact == "High":
                 if event.currency in currencies or (event.currency == "GOLD" and "XAU" in pair):
                     return False, event
         return True, None
