@@ -1,9 +1,8 @@
 """
-BlueStar Cascade - INSTITUTIONAL EDITION (v3.5 - ULTIMATE STABLE)
-✅ Moteur: Séquentiel (100% sûr contre erreur 500/Cloudflare)
-✅ Sécurité: Délai inter-requête 0.30s
-✅ UI: Interface Terminal avec barre de progression détaillée
-✅ Fonctionnalités: Tout inclus (PDF, CSV, Filtres)
+BlueStar Cascade - INSTITUTIONAL EDITION (v3.6 - FIX)
+✅ FIX: Erreur 'NameError: name Tuple is not defined' corrigée
+✅ Moteur: Séquentiel (Anti-Erreur 500 Cloudflare)
+✅ UI: Interface Terminal Complète
 """
 import streamlit as st
 import pandas as pd
@@ -11,7 +10,7 @@ import numpy as np
 import pytz
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple  # <--- CORRECTION ICI
 import logging
 import time
 
@@ -155,7 +154,6 @@ def fetch_candles_raw(pair: str, tf: str, count: int) -> pd.DataFrame:
         logger.warning(f"Connection Error {pair}: {e}")
         return pd.DataFrame()
 
-# Cache désactivé pour forcer le scan frais séquentiel
 def get_candles(pair, tf): return fetch_candles_raw(pair, tf, 300)
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -190,8 +188,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def process_pair(pair, tf, params, balance, risk_pct, news_filter):
-    # MODIF: Délai séquentiel pour stabilité parfaite
-    time.sleep(0.3) 
+    time.sleep(0.3)  # Sécurité anti-spam API
     try:
         df = get_candles(pair, tf)
         if len(df) < 100: return None
@@ -290,7 +287,7 @@ def main():
         params = {'sl_mult': sl_mult, 'tp_mult': tp_mult, 'min_score': min_score, 'news_filter': use_news}
         signals = []
         
-        # MODIF: Boucle SÉQUENTIELLE simple (pas de thread) pour éviter le blocage API
+        # BOUCLE SÉQUENTIELLE (Pas de Thread)
         total_steps = len(PAIRS_DEFAULT) * 3
         current_step = 0
         
