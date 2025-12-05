@@ -1,5 +1,6 @@
 streamlit
 pandas
 numpy
-oandapyV20
-reportlab==4.2.2   
+oandapy-v20
+reportlab
+requests
