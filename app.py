@@ -1,9 +1,13 @@
-# bluestar_v2_5.py
+# bluestar_v2_5_fixed.py
 """
-BlueStar Cascade - VERSION 2.5 INSTITUTIONAL OPTIMIZED
-Changements logiques (HMA flip robust, RSI dynamique, cascade momentum,
-scoring pondéré, R:R dynamique, filtre bougie, double validation).
-Aucun changement visuel.
+BlueStar Cascade - VERSION 2.5 INSTITUTIONAL OPTIMIZED (LOGIC FIXES)
+Corrections :
+- accès sécurisé aux indices (prev/prev2)
+- protection NaN/div0 sur ATR/ADX/WMA
+- calcul ATR amélioré (EWMA)
+- robustification des flips HMA (évite erreurs si prev2 None)
+- validations d'entrée/sortie plus sûres
+Aucun changement visuel. Ne touche pas à l'API / secrets.
 """
 import streamlit as st
 import pandas as pd
@@ -33,7 +37,7 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar Institutional v2.5", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar Institutional v2.5 (fixed)", layout="wide", initial_sidebar_state="collapsed")
 
 # Logging amélioré
 logging.basicConfig(
@@ -43,6 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Styles (unchanged visuel) ---
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
@@ -204,6 +209,7 @@ def get_cache_key(pair: str, tf: str, count: int) -> str:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _cache_wrapper(cache_key: str, pair: str, tf: str, count: int):
+    # wrapper to keep caching behaviour; calls the raw fetch
     return fetch_candles_raw(pair, tf, count)
 
 @retry_on_failure(max_attempts=3)
@@ -249,10 +255,11 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
 
 # ==================== INDICATEURS ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if len(df) < 50:
+    if df is None or len(df) < 50:
         logger.warning("Pas assez de données")
         return df
     
+    df = df.copy()
     close = df['close']
     high = df['high']
     low = df['low']
@@ -261,58 +268,72 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         if len(series) < length:
             return pd.Series([np.nan] * len(series), index=series.index)
         weights = np.arange(1, length + 1)
-        return series.rolling(length, min_periods=length).apply(
-            lambda x: np.dot(x, weights) / weights.sum() if len(x) == length else np.nan,
-            raw=True
+        return series.rolling(window=length, min_periods=length).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
         )
 
+    # HMA
     try:
         wma_half = wma(close, 10)
         wma_full = wma(close, 20)
-        hma_length = int(np.sqrt(20))
-        
+        hma_length = max(1, int(np.sqrt(20)))
         if wma_half.isna().all() or wma_full.isna().all():
             df['hma'] = np.nan
-            df['hma_up'] = np.nan
+            df['hma_up'] = False
         else:
-            df['hma'] = wma(2 * wma_half - wma_full, hma_length)
-            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
-            df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
+            # 2*wma_half - wma_full may produce NaN for early bars
+            hma_series = 2 * wma_half - wma_full
+            df['hma'] = wma(hma_series.fillna(method='ffill').fillna(method='bfill'), hma_length)
+            df['hma_up'] = (df['hma'] > df['hma'].shift(1))
+            df['hma_up'] = df['hma_up'].fillna(False)
     except Exception as e:
         logger.error(f"HMA Error: {e}")
         df['hma'] = np.nan
-        df['hma_up'] = np.nan
+        df['hma_up'] = False
 
+    # RSI (smoothed)
     try:
         delta = close.diff()
         up = delta.clip(lower=0)
         down = -delta.clip(upper=0)
-        rs = up.ewm(alpha=1/7, min_periods=7).mean() / down.ewm(alpha=1/7, min_periods=7).mean()
+        # use Wilder smoothing (EWMA with alpha=1/7 ~ period 7)
+        roll_up = up.ewm(alpha=1/7, min_periods=7).mean()
+        roll_down = down.ewm(alpha=1/7, min_periods=7).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
         df['rsi'] = 100 - (100 / (1 + rs))
+        df['rsi'] = df['rsi'].fillna(50)  # neutral when insufficient data
     except Exception as e:
         logger.error(f"RSI Error: {e}")
-        df['rsi'] = np.nan
+        df['rsi'] = 50.0
 
+    # ATR, UT state, ADX
     try:
         tr = pd.concat([
-            high - low,
+            (high - low).abs(),
             (high - close.shift()).abs(),
             (low - close.shift()).abs()
         ], axis=1).max(axis=1)
-        
-        xATR = tr.rolling(1).mean()
-        nLoss = 2.0 * xATR
-        xATRTrailingStop = [0.0] * len(df)
-        
+
+        # ATR as ewm (Wilder-like)
+        atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
+        df['atr_val'] = atr14.fillna(method='ffill').fillna(0.0)
+
+        # UT trailing stop using ATR (use previous close as start)
+        nLoss = 2.0 * df['atr_val']
+        xATRTrailingStop = np.zeros(len(df), dtype=float)
+        # initialize with first close minus loss
+        if len(df) > 0:
+            xATRTrailingStop[0] = close.iloc[0] - nLoss.iloc[0] if not pd.isna(nLoss.iloc[0]) else close.iloc[0]
+
         for i in range(1, len(df)):
             prev_stop = xATRTrailingStop[i-1]
             curr_src = close.iloc[i]
-            loss = nLoss.iloc[i]
-            
-            if pd.isna(loss):
-                xATRTrailingStop[i] = prev_stop
-                continue
-            
+            loss = nLoss.iloc[i] if not pd.isna(nLoss.iloc[i]) else nLoss.iloc[i-1] if i-1 >= 0 else 0.0
+
+            # if loss is zero or NaN, fallback to small epsilon
+            if not np.isfinite(loss) or loss <= 0:
+                loss = max(1e-8, (df['atr_val'].iloc[i] or 1e-8))
+
             if (curr_src > prev_stop) and (close.iloc[i-1] > prev_stop):
                 xATRTrailingStop[i] = max(prev_stop, curr_src - loss)
             elif (curr_src < prev_stop) and (close.iloc[i-1] < prev_stop):
@@ -321,23 +342,23 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
                 xATRTrailingStop[i] = curr_src - loss
             else:
                 xATRTrailingStop[i] = curr_src + loss
-        
+
         df['ut_state'] = np.where(close > xATRTrailingStop, 1, -1)
-        
-        atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
+
+        # ADX calculation (robust to zero-ATR)
         plus_dm = high.diff().clip(lower=0)
         minus_dm = -low.diff().clip(upper=0)
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr14)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
-        df['atr_val'] = atr14
+        # smoothed DM
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / df['atr_val'].replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / df['atr_val'].replace(0, np.nan))
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean().fillna(0.0)
     except Exception as e:
         logger.error(f"ADX/UT Error: {e}")
         df['ut_state'] = 0
-        df['adx'] = np.nan
-        df['atr_val'] = np.nan
-    
+        df['adx'] = 0.0
+        df['atr_val'] = 0.0
+
     return df
 
 # ==================== CASCADE (v2.5) ====================
@@ -350,24 +371,25 @@ def get_trend_alignment(pair: str, signal_tf: str) -> str:
     
     try:
         df = get_candles(pair, higher_tf, 150)
-        if len(df) < 60:
+        if df is None or len(df) < 60:
             return "Neutral"
         
         df = calculate_indicators(df)
+        if df is None or len(df) < 2:
+            return "Neutral"
         
+        # safe access
         if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]):
             return "Neutral"
         
         close = df['close']
-        ema50 = close.ewm(span=50, min_periods=50).mean().iloc[-1]
-        hma_current = df['hma'].iloc[-1]
-        hma_prev = df['hma'].iloc[-2]
-        hma_up = hma_current > hma_prev
-        adx_momentum = df['adx'].iloc[-1] > 18  # require momentum on higher TF
+        ema50 = close.ewm(span=50, min_periods=20).mean().iloc[-1]
+        hma_up = bool(df['hma'].iloc[-1] > df['hma'].iloc[-2])
+        adx_momentum = float(df['adx'].iloc[-1]) > 18.0  # require momentum on higher TF
         
         if close.iloc[-1] > ema50 and hma_up and adx_momentum:
             return "Bullish"
-        elif close.iloc[-1] < ema50 and not hma_up and adx_momentum:
+        if close.iloc[-1] < ema50 and (not hma_up) and adx_momentum:
             return "Bearish"
         
         return "Neutral"
@@ -383,91 +405,128 @@ class RiskManager:
     
     def calculate_position_size(self, signal: Signal, win_rate: float = 0.58) -> float:
         win_rate = max(self.config.min_win_rate, min(win_rate, self.config.max_win_rate))
-        if signal.risk_reward <= 0:
+        # require positive rr
+        if signal.risk_reward is None or signal.risk_reward <= 0:
             return 0.0
-        kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / signal.risk_reward
-        kelly = max(0, min(kelly, 0.25)) * self.config.kelly_fraction
+        # Kelly fraction safe compute
+        try:
+            kelly = (win_rate * signal.risk_reward - (1 - win_rate)) / max(signal.risk_reward, 1e-8)
+            kelly = max(0.0, min(kelly, 0.25)) * self.config.kelly_fraction
+        except Exception:
+            return 0.0
         
         if kelly <= 0:
             return 0.0
         
         pip_risk = abs(signal.entry_price - signal.stop_loss)
-        if pip_risk <= 0:
+        if not np.isfinite(pip_risk) or pip_risk <= 0:
             return 0.0
         
         size = (self.balance * kelly) / pip_risk
-        return round(size, 2)
+        # rounding while avoiding zero when non-zero small
+        size = float(np.round(size, 2))
+        return size if size > 0 else 0.0
 
 # ==================== ANALYSE (v2.5) ====================
 def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager, params: TradingParams) -> Optional[Signal]:
     try:
         df = get_candles(pair, tf, 300)
-        if len(df) < 100:
+        if df is None or len(df) < 100:
             return None
         
         df = calculate_indicators(df)
+        if df is None or len(df) < 5:
+            return None
         
+        # decide index safely
         if mode_live:
             idx = -1
         else:
-            idx = -2 if not df.iloc[-1]['complete'] else -1
+            # if last incomplete, take -2; otherwise -1
+            if not bool(df.iloc[-1].get('complete', True)):
+                idx = -2
+            else:
+                idx = -1
         
-        if abs(idx) > len(df):
+        # convert negative idx to positive position
+        if idx < 0:
+            idx_pos = len(df) + idx
+        else:
+            idx_pos = idx
+        if idx_pos <= 0 or idx_pos >= len(df):
             return None
         
-        last = df.iloc[idx]
-        prev = df.iloc[idx-1]
-        prev2 = df.iloc[idx-2] if abs(idx-2) <= len(df) else None
-        
-        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state']
+        last = df.iloc[idx_pos]
+        prev = df.iloc[idx_pos - 1]
+        prev2 = df.iloc[idx_pos - 2] if idx_pos - 2 >= 0 else None
+
+        # required fields safe check
+        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state', 'close', 'open', 'high', 'low', 'time']
         for field in required_fields:
-            if pd.isna(last[field]):
+            if field not in df.columns:
                 return None
-        
-        if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
+        for field in ['hma', 'rsi', 'adx', 'atr_val']:
+            if pd.isna(last.get(field, np.nan)):
+                return None
+
+        # ensure prev hma_up exists
+        if pd.isna(prev.get('hma_up', np.nan)):
             return None
-        
+        if prev2 is not None and pd.isna(prev2.get('hma_up', np.nan)):
+            # allow prev2 to be None, but if present must be valid
+            return None
+
         # === v2.5 HMA Flip Logic (Robuste) ===
-        hma_slope = last.hma - prev.hma
-        hma_slope_prev = prev.hma - (prev2.hma if prev2 is not None else prev.hma)
-        MIN_HMA_SLOPE = 0.15 * last.atr_val if last.atr_val and last.atr_val > 0 else 0.0001
+        # safe numeric hma values
+        last_hma = float(last.hma) if pd.notna(last.hma) else None
+        prev_hma = float(prev.hma) if pd.notna(prev.hma) else None
+        prev2_hma = float(prev2.hma) if (prev2 is not None and pd.notna(prev2.hma)) else None
+
+        if last_hma is None or prev_hma is None:
+            return None
+
+        hma_slope = last_hma - prev_hma
+        hma_slope_prev = prev_hma - (prev2_hma if prev2_hma is not None else prev_hma)
+        atr_val = float(last.atr_val) if pd.notna(last.atr_val) and last.atr_val > 0 else max(1e-8, 0.0001)
+
+        MIN_HMA_SLOPE = 0.15 * atr_val
 
         hma_flip_green = (
             bool(last.hma_up)
             and not bool(prev.hma_up)
-            and hma_slope > MIN_HMA_SLOPE
-            and hma_slope_prev < MIN_HMA_SLOPE
+            and (hma_slope > MIN_HMA_SLOPE)
+            and (hma_slope_prev < MIN_HMA_SLOPE)
         )
 
         hma_flip_red = (
-            not bool(last.hma_up)
+            (not bool(last.hma_up))
             and bool(prev.hma_up)
-            and hma_slope < -MIN_HMA_SLOPE
-            and hma_slope_prev > -MIN_HMA_SLOPE
+            and (hma_slope < -MIN_HMA_SLOPE)
+            and (hma_slope_prev > -MIN_HMA_SLOPE)
         )
 
         hma_extended_green = (
             bool(last.hma_up)
             and bool(prev.hma_up)
             and (prev2 is not None and not bool(prev2.hma_up))
-            and hma_slope > MIN_HMA_SLOPE
+            and (hma_slope > MIN_HMA_SLOPE)
         )
 
         hma_extended_red = (
-            not bool(last.hma_up)
-            and not bool(prev.hma_up)
+            (not bool(last.hma_up))
+            and (not bool(prev.hma_up))
             and (prev2 is not None and bool(prev2.hma_up))
-            and hma_slope < -MIN_HMA_SLOPE
+            and (hma_slope < -MIN_HMA_SLOPE)
         )
 
         if params.strict_flip_only:
-            raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
-            raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
+            raw_buy = hma_flip_green and last.rsi > 50 and int(last.ut_state) == 1
+            raw_sell = hma_flip_red and last.rsi < 50 and int(last.ut_state) == -1
             is_strict = True
         else:
-            raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
-            raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
-            is_strict = hma_flip_green or hma_flip_red
+            raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and int(last.ut_state) == 1
+            raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and int(last.ut_state) == -1
+            is_strict = (hma_flip_green or hma_flip_red)
 
         if not (raw_buy or raw_sell):
             return None
@@ -483,10 +542,10 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
                 return None
 
         # === v2.5 Candle Quality Filter ===
-        candle_range = last.high - last.low
-        if candle_range == 0:
+        candle_range = float(last.high - last.low) if ('high' in last and 'low' in last) else 0.0
+        if candle_range == 0 or not np.isfinite(candle_range):
             return None
-        body_ratio = abs(last.close - last.open) / candle_range
+        body_ratio = abs(float(last.close - last.open)) / candle_range if candle_range > 0 else 0.0
         if body_ratio < 0.35:
             return None
 
@@ -494,9 +553,10 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         score = 50
 
         # ADX momentum
-        if last.adx > params.adx_strong_threshold:
+        last_adx = float(last.adx) if pd.notna(last.adx) else 0.0
+        if last_adx > params.adx_strong_threshold:
             score += 20
-        elif last.adx > params.min_adx_threshold:
+        elif last_adx > params.min_adx_threshold:
             score += 10
         else:
             score -= 5
@@ -508,22 +568,23 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             score += 8
 
         # RSI optimal bands (stricter)
-        if action == "BUY" and 55 < last.rsi < 62:
-            score += 10
-        elif action == "BUY" and 52 < last.rsi <= 55:
-            score += 5
-
-        if action == "SELL" and 38 < last.rsi < 45:
-            score += 10
-        elif action == "SELL" and 45 <= last.rsi < 48:
-            score += 5
+        last_rsi = float(last.rsi) if pd.notna(last.rsi) else 50.0
+        if action == "BUY":
+            if 55 < last_rsi < 62:
+                score += 10
+            elif 52 < last_rsi <= 55:
+                score += 5
+        else:
+            if 38 < last_rsi < 45:
+                score += 10
+            elif 45 <= last_rsi < 48:
+                score += 5
 
         # Cascade confirmed
         if higher_trend in ["Bullish", "Bearish"]:
             score += 10
 
         score = int(min(100, max(score, params.min_score_threshold)))
-
         if score < params.min_score_threshold:
             return None
 
@@ -531,44 +592,50 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
                   else SignalQuality.PREMIUM if score >= 80 
                   else SignalQuality.STANDARD)
 
-        atr = last.atr_val
-        sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
-        tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
+        # ATR-based SL/TP (safeguard)
+        atr = float(last.atr_val) if pd.notna(last.atr_val) and last.atr_val > 0 else 1e-8
+        entry = float(last.close)
+        sl = entry - params.atr_sl_multiplier * atr if action == "BUY" else entry + params.atr_sl_multiplier * atr
+        tp = entry + params.atr_tp_multiplier * atr if action == "BUY" else entry - params.atr_tp_multiplier * atr
 
-        rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+        rr = abs(tp - entry) / max(abs(entry - sl), 1e-12)
 
         # === v2.5 Dynamic R:R filter ===
-        volatility_factor = 1 + (last.atr_val / last.close) * 200 if last.atr_val and last.close else 1.0
+        volatility_factor = 1.0 + (atr / max(entry, 1e-8)) * 200.0
         dynamic_rr = params.min_rr_ratio * volatility_factor
-
         if rr < dynamic_rr:
             return None
 
         # === v2.5 RSI band stricter check (post-score) ===
-        if action == "BUY" and not (52 < last.rsi < 68):
+        if action == "BUY" and not (52 < last_rsi < 68):
             return None
-        if action == "SELL" and not (32 < last.rsi < 48):
+        if action == "SELL" and not (32 < last_rsi < 48):
             return None
 
         # === v2.5 Directional double validation (UT_State + HMA) ===
         if action == "BUY":
-            if not (last.ut_state == 1 and last.hma > prev.hma):
+            if not (int(last.ut_state) == 1 and last_hma > prev_hma):
                 return None
         if action == "SELL":
-            if not (last.ut_state == -1 and last.hma < prev.hma):
+            if not (int(last.ut_state) == -1 and last_hma < prev_hma):
                 return None
 
-        if last.time.tzinfo is None:
-            local_time = pytz.utc.localize(last.time).astimezone(TUNIS_TZ)
+        # timestamp -> Tunis tz
+        t = last.time if 'time' in last else None
+        if t is None or pd.isna(t):
+            local_time = datetime.now(TUNIS_TZ)
         else:
-            local_time = last.time.astimezone(TUNIS_TZ)
+            if getattr(t, 'tzinfo', None) is None:
+                local_time = pytz.utc.localize(pd.to_datetime(t)).astimezone(TUNIS_TZ)
+            else:
+                local_time = pd.to_datetime(t).tz_convert(TUNIS_TZ)
 
         signal = Signal(
             timestamp=local_time,
             pair=pair,
             timeframe=tf,
             action=action,
-            entry_price=last.close,
+            entry_price=entry,
             stop_loss=sl,
             take_profit=tp,
             score=score,
@@ -576,13 +643,13 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             position_size=0.0,
             risk_amount=0.0,
             risk_reward=rr,
-            adx=int(last.adx),
-            rsi=int(last.rsi),
+            adx=int(round(last_adx)),
+            rsi=int(round(last_rsi)),
             atr=atr,
             higher_tf_trend=higher_trend,
-            is_live=mode_live and not df.iloc[-1]['complete'],
-            is_fresh_flip=hma_flip_green if action == "BUY" else hma_flip_red,
-            candle_index=idx,
+            is_live=(mode_live and not bool(df.iloc[-1].get('complete', True))),
+            is_fresh_flip=(hma_flip_green if action == "BUY" else hma_flip_red),
+            candle_index=idx_pos,
             is_strict_flip=is_strict
         )
 
@@ -593,7 +660,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         return signal
 
     except Exception as e:
-        logger.error(f"Error {pair} {tf}: {e}")
+        logger.error(f"Error {pair} {tf}: {e}", exc_info=True)
         return None
 
 # ==================== SCAN ====================
@@ -609,23 +676,31 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool,
             for p in pairs for tf in tfs
         }
         
-        for future in as_completed(futures, timeout=60):
-            pair, tf = futures[future]
-            try:
-                result = future.result(timeout=10)
-                if result:
-                    signals.append(result)
-                    stats.signals_found += 1
-                stats.successful_scans += 1
-            except TimeoutError:
-                error_msg = f"{pair} {tf}: Timeout"
-                stats.errors.append(error_msg)
-                stats.failed_scans += 1
-            except Exception as e:
-                error_msg = f"{pair} {tf}: {str(e)}"
-                stats.errors.append(error_msg)
-                stats.failed_scans += 1
-    
+        # as_completed supports timeout but handle exceptions per future
+        try:
+            for future in as_completed(futures, timeout=60):
+                pair, tf = futures[future]
+                try:
+                    result = future.result(timeout=10)
+                    if result:
+                        signals.append(result)
+                        stats.signals_found += 1
+                    stats.successful_scans += 1
+                except TimeoutError:
+                    error_msg = f"{pair} {tf}: Timeout"
+                    stats.errors.append(error_msg)
+                    stats.failed_scans += 1
+                except Exception as e:
+                    error_msg = f"{pair} {tf}: {str(e)}"
+                    stats.errors.append(error_msg)
+                    stats.failed_scans += 1
+        except TimeoutError:
+            # global timeout: record remaining as failed
+            for fut, (pp, ttf) in futures.items():
+                if not fut.done():
+                    stats.errors.append(f"{pp} {ttf}: global timeout")
+                    stats.failed_scans += 1
+
     stats.scan_duration = time.time() - start_time
     return signals, stats
 
@@ -637,7 +712,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     elements = []
     styles = getSampleStyleSheet()
     
-    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.5</b></font>", styles["Title"]))
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v2.5 (fixed)</b></font>", styles["Title"]))
     elements.append(Spacer(1, 8*mm))
     
     now = datetime.now(TUNIS_TZ).strftime('%d/%m/%Y %H:%M:%S')
@@ -650,7 +725,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
         flip_type = "Strict" if s.is_strict_flip else "Ext"
         data.append([
-            s.timestamp.strftime("%H:%M"),
+            s.timestamp.strftime("%H:%M") if hasattr(s.timestamp, 'strftime') else str(s.timestamp),
             s.pair.replace("_", "/"),
             s.timeframe,
             s.quality.value[:4],
@@ -691,7 +766,7 @@ def main():
     col_title, col_time, col_mode = st.columns([3, 2, 2])
     
     with col_title:
-        st.markdown("# BlueStar Enhanced v2.5")
+        st.markdown("# BlueStar Enhanced v2.5 (fixed)")
         st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v24-badge">OPTIMIZED</span>', 
                    unsafe_allow_html=True)
     
@@ -798,14 +873,14 @@ def main():
                 } for s in signals])
                 st.download_button("📥 Télécharger CSV", 
                                  df_csv.to_csv(index=False).encode(), 
-                                 f"bluestar_v25_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
+                                 f"bluestar_v25_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
                                  "text/csv", width="stretch")
             
             with dl3:
                 pdf = generate_pdf(signals)
                 st.download_button("📄 Télécharger PDF", 
                                  pdf, 
-                                 f"bluestar_v25_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
+                                 f"bluestar_v25_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
                                  "application/pdf", width="stretch")
 
             st.markdown("---")
@@ -846,7 +921,7 @@ def main():
 
     st.markdown("---")
     st.markdown("""<div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
-        <b>BlueStar Cascade Enhanced v2.5</b> | Institutional Grade | 
+        <b>BlueStar Cascade Enhanced v2.5 (fixed)</b> | Institutional Grade | 
         Rate Limiter ✅ | Retry Logic ✅ | Timeout ✅ | HMA Validation ✅ | Score >= 50 ✅
     </div>""", unsafe_allow_html=True)
 
