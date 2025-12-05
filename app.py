@@ -1,15 +1,11 @@
 """
-BlueStar Cascade - VERSION 3.0 INSTITUTIONAL GRADE ENHANCED
-Améliorations majeures v3.0 :
-✅ Optimisation scoring avec pondération dynamique
-✅ Filtrage volatilité (élimination signaux low-volatility)
-✅ Confirmation multi-timeframe renforcée
-✅ Position sizing Kelly optimisé avec drawdown protection
-✅ Détection sessions Forex (Londres, NY, Tokyo)
-✅ Correlation checker pour diversification portfolio
-✅ Performance metrics avec Sharpe & Win Rate tracking
-✅ Smart caching avec invalidation intelligente
-✅ Backtesting mini-engine intégré
+BlueStar Cascade - VERSION 3.0 INSTITUTIONAL GRADE ENHANCED - FIXED
+🔧 CORRECTIONS MAJEURES :
+✅ ATR Percentile calcul corrigé (vrai percentile 0-100)
+✅ HMA flip detection fix (gestion NaN)
+✅ Paramètres par défaut optimisés (moins restrictifs)
+✅ Logging détaillé pour debugging
+✅ Validation stricte des types bool
 """
 import streamlit as st
 import pandas as pd
@@ -58,6 +54,7 @@ st.markdown("""
     .stMetric [data-testid="stMetricValue"] {color: #00ff88 !important; font-size: 1.2rem !important; font-weight: 700;}
     .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 3px 10px; border-radius: 15px; font-weight: bold; font-size: 0.65rem; display: inline-block;}
     .v30-badge {background: linear-gradient(45deg, #00ff88, #00ccff); color: white; padding: 3px 10px; border-radius: 15px; font-weight: bold; font-size: 0.65rem; display: inline-block; margin-left: 8px;}
+    .fixed-badge {background: linear-gradient(45deg, #ff6b6b, #ffa500); color: white; padding: 3px 10px; border-radius: 15px; font-weight: bold; font-size: 0.65rem; display: inline-block; margin-left: 8px;}
     .stDataFrame {font-size: 0.75rem !important;}
     thead tr th:first-child {display:none}
     tbody th {display:none}
@@ -209,15 +206,15 @@ class SignalQuality(Enum):
 class TradingParams:
     atr_sl_multiplier: float = 2.0
     atr_tp_multiplier: float = 3.5
-    min_adx_threshold: int = 22
-    adx_strong_threshold: int = 28
+    min_adx_threshold: int = 20  # 🔧 CHANGÉ: 22 → 20
+    adx_strong_threshold: int = 25  # 🔧 CHANGÉ: 28 → 25
     min_rr_ratio: float = 1.5
-    cascade_required: bool = True
-    strict_flip_only: bool = True
-    min_score_threshold: int = 60
-    min_volatility_percentile: float = 30.0
-    max_correlation: float = 0.7
-    session_filter: bool = True
+    cascade_required: bool = False  # 🔧 CHANGÉ: True → False
+    strict_flip_only: bool = False  # 🔧 CHANGÉ: True → False
+    min_score_threshold: int = 55  # 🔧 CHANGÉ: 60 → 55
+    min_volatility_percentile: float = 15.0  # 🔧 CHANGÉ: 30.0 → 15.0
+    max_correlation: float = 0.75  # 🔧 CHANGÉ: 0.7 → 0.75
+    session_filter: bool = False  # 🔧 CHANGÉ: True → False
 
 @dataclass
 class RiskConfig:
@@ -366,7 +363,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             raw=True
         )
 
-    # HMA optimisé
+    # HMA optimisé avec FIX
     try:
         wma_half = wma(close, 10)
         wma_full = wma(close, 20)
@@ -374,15 +371,19 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         
         if wma_half.isna().all() or wma_full.isna().all():
             df['hma'] = np.nan
-            df['hma_up'] = np.nan
+            df['hma_up'] = False
         else:
             df['hma'] = wma(2 * wma_half - wma_full, hma_length)
-            df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(float)
-            df['hma_up'] = df['hma_up'].replace(0, False).replace(1, True)
+            
+            # 🔧 FIX: Gestion correcte des NaN
+            hma_condition = df['hma'] > df['hma'].shift(1)
+            df['hma_up'] = hma_condition.where(hma_condition.notna(), False)
+            df['hma_up'] = df['hma_up'].astype(bool)
+            
     except Exception as e:
         logger.error(f"❌ HMA Error: {e}")
         df['hma'] = np.nan
-        df['hma_up'] = np.nan
+        df['hma_up'] = False
 
     # RSI
     try:
@@ -438,10 +439,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
         df['atr_val'] = atr14
         
-        # ATR Percentile (pour filtrage volatilité)
-        df['atr_percentile'] = df['atr_val'].rolling(100, min_periods=50).apply(
-            lambda x: (x.iloc[-1] / x.quantile(0.5) - 1) * 100 if len(x) >= 50 else np.nan
-        )
+        # 🔧 FIX: ATR Percentile CORRECT (vrai percentile 0-100)
+        def calc_percentile(x):
+            if len(x) < 50:
+                return np.nan
+            return pd.Series(x).rank(pct=True).iloc[-1] * 100
+        
+        df['atr_percentile'] = df['atr_val'].rolling(100, min_periods=50).apply(calc_percentile)
         
     except Exception as e:
         logger.error(f"❌ ADX/UT Error: {e}")
@@ -573,41 +577,48 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         prev = df.iloc[idx-1]
         prev2 = df.iloc[idx-2] if abs(idx-2) <= len(df) else None
         
-        # Validation données
-        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state', 'atr_percentile']
+        # 🔧 FIX: Validation stricte des données
+        required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'ut_state', 'atr_percentile']
         for field in required_fields:
             if pd.isna(last[field]):
+                logger.debug(f"⚠️ {pair} {tf}: {field} est NaN")
                 return None
         
-        if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
+        # 🔧 FIX: Vérification type bool pour hma_up
+        if not isinstance(last['hma_up'], (bool, np.bool_)):
+            logger.debug(f"⚠️ {pair} {tf}: hma_up invalide (type={type(last['hma_up'])})")
             return None
         
-        # Filtrage volatilité
-        if last.atr_percentile < params.min_volatility_percentile:
-            logger.debug(f"⚠️ {pair} {tf} rejeté: low volatility ({last.atr_percentile:.1f}%)")
+        if not isinstance(prev['hma_up'], (bool, np.bool_)):
             return None
         
-        # Détection flip
-        hma_flip_green = bool(last.hma_up) and not bool(prev.hma_up)
-        hma_flip_red = not bool(last.hma_up) and bool(prev.hma_up)
+        # 🔧 FIX: Filtrage volatilité avec DEBUG
+        if last['atr_percentile'] < params.min_volatility_percentile:
+            logger.info(f"🚫 {pair} {tf} VOLATILITÉ: {last['atr_percentile']:.1f}% < {params.min_volatility_percentile}%")
+            return None
+        
+        # Détection flip (maintenant safe avec bool strict)
+        hma_flip_green = (last['hma_up'] == True) and (prev['hma_up'] == False)
+        hma_flip_red = (last['hma_up'] == False) and (prev['hma_up'] == True)
         
         hma_extended_green = False
         hma_extended_red = False
-        if prev2 is not None:
-            hma_extended_green = bool(last.hma_up) and bool(prev.hma_up) and not bool(prev2.hma_up)
-            hma_extended_red = not bool(last.hma_up) and not bool(prev.hma_up) and bool(prev2.hma_up)
+        if prev2 is not None and isinstance(prev2['hma_up'], (bool, np.bool_)):
+            hma_extended_green = (last['hma_up'] == True) and (prev['hma_up'] == True) and (prev2['hma_up'] == False)
+            hma_extended_red = (last['hma_up'] == False) and (prev['hma_up'] == False) and (prev2['hma_up'] == True)
         
         # Logique signal
         if params.strict_flip_only:
-            raw_buy = hma_flip_green and last.rsi > 50 and last.ut_state == 1
-            raw_sell = hma_flip_red and last.rsi < 50 and last.ut_state == -1
+            raw_buy = hma_flip_green and last['rsi'] > 50 and last['ut_state'] == 1
+            raw_sell = hma_flip_red and last['rsi'] < 50 and last['ut_state'] == -1
             is_strict = True
         else:
-            raw_buy = (hma_flip_green or hma_extended_green) and last.rsi > 50 and last.ut_state == 1
-            raw_sell = (hma_flip_red or hma_extended_red) and last.rsi < 50 and last.ut_state == -1
+            raw_buy = (hma_flip_green or hma_extended_green) and last['rsi'] > 50 and last['ut_state'] == 1
+            raw_sell = (hma_flip_red or hma_extended_red) and last['rsi'] < 50 and last['ut_state'] == -1
             is_strict = hma_flip_green or hma_flip_red
         
         if not (raw_buy or raw_sell):
+            logger.debug(f"🚫 {pair} {tf} AUCUN SIGNAL: HMA_up={last['hma_up']}, RSI={last['rsi']:.0f}, UT={last['ut_state']}")
             return None
         
         action = "BUY" if raw_buy else "SELL"
@@ -616,17 +627,19 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         higher_trend, trend_strength = get_trend_alignment(pair, tf)
         if params.cascade_required:
             if action == "BUY" and higher_trend != "Bullish":
+                logger.info(f"🚫 {pair} {tf} {action} CASCADE: trend={higher_trend}")
                 return None
             if action == "SELL" and higher_trend != "Bearish":
+                logger.info(f"🚫 {pair} {tf} {action} CASCADE: trend={higher_trend}")
                 return None
         
         # SCORING OPTIMISÉ (Pondération dynamique)
         score = 50  # Base
         
         # ADX (30 points max)
-        if last.adx > params.adx_strong_threshold:
+        if last['adx'] > params.adx_strong_threshold:
             score += 30
-        elif last.adx > params.min_adx_threshold:
+        elif last['adx'] > params.min_adx_threshold:
             score += 15
         
         # Flip quality (20 points max)
@@ -637,16 +650,16 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         
         # RSI zone (15 points max)
         if action == "BUY":
-            if 50 < last.rsi < 60:
+            if 50 < last['rsi'] < 60:
                 score += 15
-            elif 60 <= last.rsi < 70:
+            elif 60 <= last['rsi'] < 70:
                 score += 10
             else:
                 score += 5
         else:  # SELL
-            if 40 < last.rsi < 50:
+            if 40 < last['rsi'] < 50:
                 score += 15
-            elif 30 < last.rsi <= 40:
+            elif 30 < last['rsi'] <= 40:
                 score += 10
             else:
                 score += 5
@@ -655,37 +668,38 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         score += int(trend_strength * 0.25)
         
         # Volatilité (10 points max)
-        if last.atr_percentile > 50:
+        if last['atr_percentile'] > 50:
             score += 10
-        elif last.atr_percentile > 30:
+        elif last['atr_percentile'] > 30:
             score += 5
         
         score = max(params.min_score_threshold, min(100, score))
         
         if score < params.min_score_threshold:
+            logger.info(f"🚫 {pair} {tf} {action} SCORE: {score} < {params.min_score_threshold}")
             return None
         
         # Session filtering
-        if last.time.tzinfo is None:
-            local_time = pytz.utc.localize(last.time).astimezone(TUNIS_TZ)
+        if last['time'].tzinfo is None:
+            local_time = pytz.utc.localize(last['time']).astimezone(TUNIS_TZ)
         else:
-            local_time = last.time.astimezone(TUNIS_TZ)
+            local_time = last['time'].astimezone(TUNIS_TZ)
         
         session = get_active_session(local_time)
         
         if params.session_filter and session == "Off-Hours":
-            logger.debug(f"⚠️ {pair} {tf} rejeté: off-hours session")
+            logger.debug(f"🚫 {pair} {tf} SESSION: off-hours")
             return None
         
         quality = (SignalQuality.INSTITUTIONAL if score >= 85 
                   else SignalQuality.PREMIUM if score >= 75 
                   else SignalQuality.STANDARD)
         
-        atr = last.atr_val
-        sl = last.close - params.atr_sl_multiplier * atr if action == "BUY" else last.close + params.atr_sl_multiplier * atr
-        tp = last.close + params.atr_tp_multiplier * atr if action == "BUY" else last.close - params.atr_tp_multiplier * atr
+        atr = last['atr_val']
+        sl = last['close'] - params.atr_sl_multiplier * atr if action == "BUY" else last['close'] + params.atr_sl_multiplier * atr
+        tp = last['close'] + params.atr_tp_multiplier * atr if action == "BUY" else last['close'] - params.atr_tp_multiplier * atr
         
-        rr = abs(tp - last.close) / abs(last.close - sl) if abs(last.close - sl) > 0 else 0
+        rr = abs(tp - last['close']) / abs(last['close'] - sl) if abs(last['close'] - sl) > 0 else 0
         if rr < params.min_rr_ratio:
             return None
         
@@ -694,7 +708,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             pair=pair,
             timeframe=tf,
             action=action,
-            entry_price=last.close,
+            entry_price=last['close'],
             stop_loss=sl,
             take_profit=tp,
             score=score,
@@ -702,10 +716,10 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             position_size=0.0,
             risk_amount=0.0,
             risk_reward=rr,
-            adx=int(last.adx),
-            rsi=int(last.rsi),
+            adx=int(last['adx']),
+            rsi=int(last['rsi']),
             atr=atr,
-            atr_percentile=last.atr_percentile,
+            atr_percentile=last['atr_percentile'],
             higher_tf_trend=higher_trend,
             is_live=mode_live and not df.iloc[-1]['complete'],
             is_fresh_flip=hma_flip_green if action == "BUY" else hma_flip_red,
@@ -717,7 +731,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         signal.position_size = risk_manager.calculate_position_size(signal)
         signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
         
-        logger.info(f"✅ {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score} | Session: {session}")
+        logger.info(f"✅ {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score} | ATR%ile: {last['atr_percentile']:.0f}")
         return signal
     
     except Exception as e:
@@ -761,6 +775,7 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool,
         stats.signals_filtered = original_count - len(signals)
     
     stats.scan_duration = time.time() - start_time
+    logger.info(f"📊 SCAN TERMINÉ: {len(signals)} signaux | {stats.scan_duration:.1f}s")
     return signals, stats
 
 # ==================== PDF AMÉLIORÉ ====================
@@ -771,7 +786,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     elements = []
     styles = getSampleStyleSheet()
     
-    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v3.0 Enhanced</b></font>", styles["Title"]))
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v3.0 FIXED</b></font>", styles["Title"]))
     elements.append(Spacer(1, 8*mm))
     
     now = datetime.now(TUNIS_TZ).strftime('%d/%m/%Y %H:%M:%S')
@@ -825,7 +840,7 @@ def main():
     
     with col_title:
         st.markdown("# BlueStar Enhanced v3.0")
-        st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v30-badge">v3.0 ADVANCED</span>', 
+        st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v30-badge">v3.0 ADVANCED</span><span class="fixed-badge">FIXED</span>', 
                    unsafe_allow_html=True)
     
     with col_time:
@@ -848,29 +863,29 @@ def main():
         atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
         atr_tp = c2.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.5, 0.5)
         min_rr = c3.number_input("Min R:R", 1.0, 3.0, 1.5, 0.1)
-        cascade_req = c4.checkbox("Cascade obligatoire", True)
+        cascade_req = c4.checkbox("Cascade obligatoire", False)  # 🔧 CHANGÉ
         
         c5, c6, c7, c8 = st.columns(4)
-        strict_flip = c5.checkbox("Flip strict uniquement", True)
-        min_score = c6.number_input("Score minimum", 50, 100, 60, 5)
-        min_adx = c7.number_input("ADX minimum", 15, 35, 22, 1)
-        adx_strong = c8.number_input("ADX fort", 20, 45, 28, 1)
+        strict_flip = c5.checkbox("Flip strict uniquement", False)  # 🔧 CHANGÉ
+        min_score = c6.number_input("Score minimum", 50, 100, 55, 5)  # 🔧 CHANGÉ
+        min_adx = c7.number_input("ADX minimum", 15, 35, 20, 1)  # 🔧 CHANGÉ
+        adx_strong = c8.number_input("ADX fort", 20, 45, 25, 1)  # 🔧 CHANGÉ
         
         st.markdown("---")
-        st.markdown("**Filtres Avancés v3.0**")
+        st.markdown("**Filtres Avancés v3.0 FIXED**")
         c9, c10, c11, c12 = st.columns(4)
-        min_vol_pct = c9.slider("Min Volatilité %ile", 0, 70, 30, 5)
-        max_corr = c10.slider("Max Corrélation", 0.5, 1.0, 0.7, 0.05)
-        session_filter = c11.checkbox("Filtrer off-hours", True)
+        min_vol_pct = c9.slider("Min Volatilité %ile", 0, 70, 15, 5)  # 🔧 CHANGÉ
+        max_corr = c10.slider("Max Corrélation", 0.5, 1.0, 0.75, 0.05)  # 🔧 CHANGÉ
+        session_filter = c11.checkbox("Filtrer off-hours", False)  # 🔧 CHANGÉ
 
     c1, c2, c3, c4 = st.columns(4)
     balance = c1.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
     max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
     max_portfolio = c3.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
-    scan_btn = c4.button("🚀 SCAN v3.0", type="primary", use_container_width=True)
+    scan_btn = c4.button("🚀 SCAN v3.0 FIXED", type="primary", use_container_width=True)
 
     if scan_btn:
-        with st.spinner("🔍 Scanning markets with v3.0 engine..."):
+        with st.spinner("🔍 Scanning markets with FIXED v3.0 engine..."):
             params = TradingParams(
                 atr_sl_multiplier=atr_sl, 
                 atr_tp_multiplier=atr_tp, 
@@ -894,7 +909,7 @@ def main():
                                      risk_manager, params)
         
         st.markdown("---")
-        st.markdown("### 📊 Résultats du Scan v3.0")
+        st.markdown("### 📊 Résultats du Scan v3.0 FIXED")
         
         m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
         m1.metric("Signaux", len(signals))
@@ -950,14 +965,14 @@ def main():
                 } for s in signals])
                 st.download_button("📥 Télécharger CSV", 
                                  df_csv.to_csv(index=False).encode(), 
-                                 f"bluestar_v30_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
+                                 f"bluestar_v30_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
                                  "text/csv", use_container_width=True)
             
             with dl3:
                 pdf = generate_pdf(signals)
                 st.download_button("📄 Télécharger PDF", 
                                  pdf, 
-                                 f"bluestar_v30_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
+                                 f"bluestar_v30_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
                                  "application/pdf", use_container_width=True)
 
             st.markdown("---")
@@ -996,12 +1011,31 @@ def main():
                         st.info("Aucun signal")
 
         else:
-            st.warning("⚠️ Aucun signal détecté avec les paramètres actuels")
+            st.warning("⚠️ Aucun signal détecté. Vérifiez les logs ci-dessous pour diagnostiquer.")
+            
+            # 🔧 NOUVEAU: Affichage stats de filtrage
+            st.markdown("---")
+            st.markdown("### 🔍 Diagnostic de Filtrage")
+            st.info(f"""
+            **Paramètres actifs:**
+            - Volatilité min: {min_vol_pct}%ile
+            - Cascade requis: {cascade_req}
+            - Flip strict: {strict_flip}
+            - Score min: {min_score}
+            - ADX min: {min_adx}
+            - Session filter: {session_filter}
+            
+            💡 **Suggestions:**
+            - Baissez "Min Volatilité %ile" à 10
+            - Décochez "Cascade obligatoire"
+            - Décochez "Flip strict uniquement"
+            - Baissez "Score minimum" à 50
+            """)
 
     st.markdown("---")
     st.markdown("""<div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
-        <b>BlueStar Cascade Enhanced v3.0</b> | Institutional Grade | 
-        Volatility Filter ✅ | Correlation Check ✅ | Session Filter ✅ | Kelly Optimized ✅ | Multi-TF Cascade ✅
+        <b>BlueStar Cascade Enhanced v3.0 FIXED</b> | Institutional Grade | 
+        🔧 ATR Percentile Fix ✅ | HMA Flip Fix ✅ | Optimized Defaults ✅ | Debug Logging ✅
     </div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
