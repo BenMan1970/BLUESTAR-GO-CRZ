@@ -890,22 +890,39 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool,
                         signals.append(result)
                         corr_manager.add_signal(result)
                         stats.signals_found += 1
-                    elif not result.news_clear:
-                        stats.signals_rejected_news += 1
-                    elif not result.correlation_ok:
-                        stats.signals_rejected_correlation += 1
-                stats.successful_scans += 1
-            except TimeoutError:
-                error_msg = f"{pair} {tf}: Timeout"
-                stats.errors.append(error_msg)
-                stats.failed_scans += 1
-            except Exception as e:
-                error_msg = f"{pair} {tf}: {str(e)}"
-                stats.errors.append(error_msg)
-                stats.failed_scans += 1
+                   # APRÈS ✅ OPTIMISÉ
+with st.expander("⚙️ Configuration Avancée", expanded=False):
+    # Sélecteur de preset
+    st.markdown("### 🎛️ Configuration Rapide")
+    preset_choice = st.selectbox(
+        "Choisir un preset",
+        list(PRESET_CONFIGS.keys()),
+        index=0  # "🎯 ÉQUILIBRÉ" par défaut
+    )
     
-    stats.scan_duration = time.time() - start_time
-    return signals, stats, corr_manager
+    preset = PRESET_CONFIGS[preset_choice]
+    st.markdown(f"<div class='info-box'>ℹ️ {preset['description']}</div>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.markdown("### ⚙️ Paramètres Détaillés")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
+    atr_tp = c2.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.0, 0.5)
+    min_rr = c3.number_input("Min R:R", 1.0, 3.0, preset["min_rr_ratio"], 0.1)
+    cascade_req = c4.checkbox("Cascade obligatoire", preset["cascade_required"])
+    
+    c5, c6, c7, c8 = st.columns(4)
+    strict_flip = c5.checkbox("Flip strict uniquement", preset["strict_flip_only"])
+    min_score = c6.number_input("Score minimum", 45, 100, preset["min_score_threshold"], 5)
+    min_adx = c7.number_input("ADX minimum", 15, 30, preset["min_adx_threshold"], 1)
+    adx_strong = c8.number_input("ADX fort", 20, 40, preset["adx_strong_threshold"], 1)
+    
+    st.markdown("**Filtres Avancés**")
+    f1, f2, f3 = st.columns(3)
+    enable_news = f1.checkbox("Filtre News (2h avant)", preset["enable_news_filter"])
+    enable_corr = f2.checkbox("Gestion Corrélation", preset["enable_correlation_filter"])
+    enable_market = f3.checkbox("Filtre Conditions Marché", preset["enable_market_condition_filter"])
 
 # ==================== PDF GENERATOR ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
