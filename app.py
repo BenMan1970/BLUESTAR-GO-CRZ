@@ -7,7 +7,7 @@ Nouvelles fonctionnalités v2.5 :
 ✅ Détection conditions de marché
 ✅ Support/Résistance basic
 ✅ Scoring amélioré (0-100 strict)
-✅ CORRECTIONS: fillna deprecated methods fixed
+✅ CORRECTIONS: fillna deprecated methods fixed (Pandas 2.0+)
 ✅ Code complet sans troncature
 """
 import streamlit as st
@@ -217,6 +217,7 @@ class NewsFilter:
     @st.cache_data(ttl=21600, show_spinner=False)
     def fetch_forex_factory_news(_self) -> List[NewsEvent]:
         now = datetime.now(pytz.UTC)
+        # DEMO MODE: In production, you would parse a real calendar feed
         demo_events = [
             NewsEvent(
                 time=now + timedelta(hours=2),
@@ -513,7 +514,7 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
 
 # ==================== INDICATEURS (CORRECTED) ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Version corrigée sans FutureWarning"""
+    """Version corrigée compatible Pandas 2.0+ (sans FutureWarning)"""
     if len(df) < 50:
         logger.warning("⚠️ Pas assez de données")
         return df
@@ -532,7 +533,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     try:
-        # HMA Calculation - CORRECTION: Utiliser ffill() et bfill()
+        # HMA Calculation - FIX: Utilisation de .ffill() et .bfill() au lieu de fillna(method=...)
         wma_half = wma(close, 10)
         wma_full = wma(close, 20)
         hma_length = int(np.sqrt(20))
@@ -542,9 +543,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             df['hma_up'] = np.nan
         else:
             hma_series = 2 * wma_half - wma_full
+            # Correction ici pour le log diag.txt
             df['hma'] = wma(hma_series.ffill().bfill(), hma_length)
-            # CORRECTION: Éviter le FutureWarning de replace avec downcasting
+            
+            # Comparaison sécurisée pour éviter les erreurs de type
             df['hma_up'] = (df['hma'] > df['hma'].shift(1)).astype(bool)
+            
     except Exception as e:
         logger.error(f"❌ HMA Error: {e}")
         df['hma'] = np.nan
@@ -562,7 +566,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['rsi'] = np.nan
 
     try:
-        # ATR & ADX Calculation - CORRECTION: Utiliser ffill()
+        # ATR & ADX Calculation - FIX: Utilisation de .ffill()
         tr = pd.concat([
             high - low,
             (high - close.shift()).abs(),
@@ -570,6 +574,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         ], axis=1).max(axis=1)
         
         atr14 = tr.ewm(alpha=1/14, min_periods=14).mean()
+        # Correction ici pour le log diag.txt
         df['atr_val'] = atr14.ffill().fillna(0.0)
         
         # UT Bot calculation
@@ -627,6 +632,10 @@ def get_trend_alignment(pair: str, signal_tf: str) -> str:
             return "Neutral"
         
         df = calculate_indicators(df)
+        
+        # Sécurité supplémentaire si HMA n'est pas calculé
+        if 'hma' not in df.columns or df['hma'].isnull().all():
+            return "Neutral"
         
         if pd.isna(df['hma'].iloc[-1]) or pd.isna(df['hma'].iloc[-2]):
             return "Neutral"
@@ -698,7 +707,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         
         required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'hma_up', 'ut_state']
         for field in required_fields:
-            if pd.isna(last[field]):
+            if field not in last or pd.isna(last[field]):
                 return None
         
         if pd.isna(prev['hma_up']) or (prev2 is not None and pd.isna(prev2['hma_up'])):
@@ -890,39 +899,22 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool,
                         signals.append(result)
                         corr_manager.add_signal(result)
                         stats.signals_found += 1
-                   # APRÈS ✅ OPTIMISÉ
-with st.expander("⚙️ Configuration Avancée", expanded=False):
-    # Sélecteur de preset
-    st.markdown("### 🎛️ Configuration Rapide")
-    preset_choice = st.selectbox(
-        "Choisir un preset",
-        list(PRESET_CONFIGS.keys()),
-        index=0  # "🎯 ÉQUILIBRÉ" par défaut
-    )
+                    elif not result.news_clear:
+                        stats.signals_rejected_news += 1
+                    elif not result.correlation_ok:
+                        stats.signals_rejected_correlation += 1
+                stats.successful_scans += 1
+            except TimeoutError:
+                error_msg = f"{pair} {tf}: Timeout"
+                stats.errors.append(error_msg)
+                stats.failed_scans += 1
+            except Exception as e:
+                error_msg = f"{pair} {tf}: {str(e)}"
+                stats.errors.append(error_msg)
+                stats.failed_scans += 1
     
-    preset = PRESET_CONFIGS[preset_choice]
-    st.markdown(f"<div class='info-box'>ℹ️ {preset['description']}</div>", unsafe_allow_html=True)
-    
-    st.markdown("---")
-    st.markdown("### ⚙️ Paramètres Détaillés")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
-    atr_tp = c2.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.0, 0.5)
-    min_rr = c3.number_input("Min R:R", 1.0, 3.0, preset["min_rr_ratio"], 0.1)
-    cascade_req = c4.checkbox("Cascade obligatoire", preset["cascade_required"])
-    
-    c5, c6, c7, c8 = st.columns(4)
-    strict_flip = c5.checkbox("Flip strict uniquement", preset["strict_flip_only"])
-    min_score = c6.number_input("Score minimum", 45, 100, preset["min_score_threshold"], 5)
-    min_adx = c7.number_input("ADX minimum", 15, 30, preset["min_adx_threshold"], 1)
-    adx_strong = c8.number_input("ADX fort", 20, 40, preset["adx_strong_threshold"], 1)
-    
-    st.markdown("**Filtres Avancés**")
-    f1, f2, f3 = st.columns(3)
-    enable_news = f1.checkbox("Filtre News (2h avant)", preset["enable_news_filter"])
-    enable_corr = f2.checkbox("Gestion Corrélation", preset["enable_correlation_filter"])
-    enable_market = f3.checkbox("Filtre Conditions Marché", preset["enable_market_condition_filter"])
+    stats.scan_duration = time.time() - start_time
+    return signals, stats, corr_manager
 
 # ==================== PDF GENERATOR ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
