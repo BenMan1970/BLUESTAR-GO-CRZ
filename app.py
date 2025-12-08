@@ -470,20 +470,16 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: Ri
 # ==================== PDF GENERATOR (LANDSCAPE & BIGGER) ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
     buffer = BytesIO()
-    # Utilisation de Landscape (Format Paysage)
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=5*mm, rightMargin=5*mm)
     elements = []
     styles = getSampleStyleSheet()
     
-    # Titre plus grand
     elements.append(Paragraph("<font size=20 color=#00ff88><b>BlueStar v3.0 Report</b></font>", styles["Title"]))
     elements.append(Spacer(1, 10*mm))
     
-    # Headers
     data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", "R:R", "Size", "Trend", "Session"]]
     
     for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
-        # Couleurs conditionnelles pour Action
         act_color = "#00ff88" if s.action == "BUY" else "#ff6b6b"
         action_text = f"<font color={act_color}><b>{s.action}</b></font>"
         
@@ -492,7 +488,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
             s.pair.replace("_", "/"), 
             s.timeframe,
             s.quality.value[:4], 
-            Paragraph(action_text, styles["Normal"]), # Utilisation de Paragraph pour la couleur
+            Paragraph(action_text, styles["Normal"]),
             f"{s.entry_price:.5f}", 
             f"{s.stop_loss:.5f}",
             f"{s.take_profit:.5f}", 
@@ -503,7 +499,6 @@ def generate_pdf(signals: List[Signal]) -> bytes:
             s.session[:3]
         ])
     
-    # Largeur des colonnes ajustée pour le mode Paysage (~280mm total)
     col_widths = [18*mm, 22*mm, 15*mm, 22*mm, 20*mm, 25*mm, 25*mm, 25*mm, 15*mm, 15*mm, 25*mm, 20*mm, 20*mm]
     
     table = Table(data, colWidths=col_widths)
@@ -513,10 +508,10 @@ def generate_pdf(signals: List[Signal]) -> bytes:
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 10), # Header Font plus grand
+        ('FONTSIZE', (0,0), (-1,0), 10),
         ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#0f1429")),
         ('TEXTCOLOR', (0,1), (-1,-1), colors.white),
-        ('FONTSIZE', (0,1), (-1,-1), 9), # Body Font plus grand (était 6)
+        ('FONTSIZE', (0,1), (-1,-1), 9),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333")),
         ('LEFTPADDING', (0,0), (-1,-1), 3),
         ('RIGHTPADDING', (0,0), (-1,-1), 3),
@@ -569,13 +564,11 @@ def main():
     max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
     scan_btn = c4.button("🚀 SCAN MARKET", type="primary", use_container_width=True)
 
-    # === GESTION DU SESSION STATE POUR LA PERSISTANCE ===
     if "scan_results" not in st.session_state:
         st.session_state.scan_results = None
     if "scan_stats" not in st.session_state:
         st.session_state.scan_stats = None
 
-    # Si on clique sur le bouton SCAN, on met à jour le state
     if scan_btn:
         with st.spinner("Analyzing Market Structure..."):
             params = TradingParams(
@@ -586,12 +579,9 @@ def main():
             )
             risk_manager = RiskManager(RiskConfig(max_risk, 0.05), balance)
             signals, stats = run_scan(PAIRS_DEFAULT, ["M15", "H1", "H4", "D1"], is_live, risk_manager, params)
-            
-            # Sauvegarde dans la session
             st.session_state.scan_results = signals
             st.session_state.scan_stats = stats
     
-    # === AFFICHAGE DES RÉSULTATS (Depuis le State) ===
     if st.session_state.scan_results is not None:
         signals = st.session_state.scan_results
         stats = st.session_state.scan_stats
@@ -611,8 +601,12 @@ def main():
                 df_exp = pd.DataFrame([vars(s) for s in signals])
                 st.download_button("📥 CSV", df_exp.astype(str).to_csv(index=False).encode(), f"bluestar_{datetime.now().strftime('%H%M')}.csv", "text/csv")
             with d2:
-                # Le clic ici recharge la page, mais réaffiche les données grâce au session_state
-                st.download_button("📄 PDF (Landscape)", generate_pdf(signals), f"report_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
+                st.download_button(
+                    label="📄 PDF", 
+                    data=generate_pdf(signals), 
+                    file_name="BlueStar v3.0 Report.pdf", 
+                    mime="application/pdf"
+                )
 
             st.markdown("---")
             cols = st.columns(4)
@@ -631,7 +625,7 @@ def main():
                     else:
                         st.info("No signal")
         else:
-            if scan_btn: # Afficher warning seulement si on vient de cliquer
+            if scan_btn:
                 st.warning("Aucun signal détecté avec les paramètres actuels.")
 
     st.markdown("---")
