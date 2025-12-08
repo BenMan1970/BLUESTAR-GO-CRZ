@@ -24,7 +24,7 @@ from oandapyV20.exceptions import V20Error
 
 # PDF Export
 from io import BytesIO
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
@@ -467,34 +467,61 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: Ri
     stats.scan_duration = time.time() - start_time
     return signals, stats
 
-# ==================== PDF GENERATOR ====================
+# ==================== PDF GENERATOR (LANDSCAPE & BIGGER) ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm, leftMargin=10*mm, rightMargin=10*mm)
+    # Utilisation de Landscape (Format Paysage)
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=5*mm, rightMargin=5*mm)
     elements = []
     styles = getSampleStyleSheet()
     
-    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v3.0 Report</b></font>", styles["Title"]))
-    elements.append(Spacer(1, 8*mm))
+    # Titre plus grand
+    elements.append(Paragraph("<font size=20 color=#00ff88><b>BlueStar v3.0 Report</b></font>", styles["Title"]))
+    elements.append(Spacer(1, 10*mm))
     
+    # Headers
     data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", "R:R", "Size", "Trend", "Session"]]
+    
     for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
+        # Couleurs conditionnelles pour Action
+        act_color = "#00ff88" if s.action == "BUY" else "#ff6b6b"
+        action_text = f"<font color={act_color}><b>{s.action}</b></font>"
+        
         data.append([
-            s.timestamp.strftime("%H:%M"), s.pair.replace("_", "/"), s.timeframe,
-            s.quality.value[:4], s.action, f"{s.entry_price:.5f}", f"{s.stop_loss:.5f}",
-            f"{s.take_profit:.5f}", str(s.score), f"{s.risk_reward:.1f}",
-            f"{s.position_size:.2f}", s.higher_tf_trend[:4], s.session[:3]
+            s.timestamp.strftime("%H:%M"), 
+            s.pair.replace("_", "/"), 
+            s.timeframe,
+            s.quality.value[:4], 
+            Paragraph(action_text, styles["Normal"]), # Utilisation de Paragraph pour la couleur
+            f"{s.entry_price:.5f}", 
+            f"{s.stop_loss:.5f}",
+            f"{s.take_profit:.5f}", 
+            str(s.score), 
+            f"{s.risk_reward:.1f}",
+            f"{s.position_size:.2f}", 
+            s.higher_tf_trend[:4], 
+            s.session[:3]
         ])
     
-    table = Table(data, colWidths=[15*mm]*13)
+    # Largeur des colonnes ajustée pour le mode Paysage (~280mm total)
+    col_widths = [18*mm, 22*mm, 15*mm, 22*mm, 20*mm, 25*mm, 25*mm, 25*mm, 15*mm, 15*mm, 25*mm, 20*mm, 20*mm]
+    
+    table = Table(data, colWidths=col_widths)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
         ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#00ff88")),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTSIZE', (0,0), (-1,0), 7),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 10), # Header Font plus grand
         ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#0f1429")),
-        ('FONTSIZE', (0,1), (-1,-1), 6),
+        ('TEXTCOLOR', (0,1), (-1,-1), colors.white),
+        ('FONTSIZE', (0,1), (-1,-1), 9), # Body Font plus grand (était 6)
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333")),
+        ('LEFTPADDING', (0,0), (-1,-1), 3),
+        ('RIGHTPADDING', (0,0), (-1,-1), 3),
     ]))
+    
     elements.append(table)
     doc.build(elements)
     return buffer.getvalue()
@@ -542,6 +569,13 @@ def main():
     max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
     scan_btn = c4.button("🚀 SCAN MARKET", type="primary", use_container_width=True)
 
+    # === GESTION DU SESSION STATE POUR LA PERSISTANCE ===
+    if "scan_results" not in st.session_state:
+        st.session_state.scan_results = None
+    if "scan_stats" not in st.session_state:
+        st.session_state.scan_stats = None
+
+    # Si on clique sur le bouton SCAN, on met à jour le state
     if scan_btn:
         with st.spinner("Analyzing Market Structure..."):
             params = TradingParams(
@@ -552,7 +586,16 @@ def main():
             )
             risk_manager = RiskManager(RiskConfig(max_risk, 0.05), balance)
             signals, stats = run_scan(PAIRS_DEFAULT, ["M15", "H1", "H4", "D1"], is_live, risk_manager, params)
-        
+            
+            # Sauvegarde dans la session
+            st.session_state.scan_results = signals
+            st.session_state.scan_stats = stats
+    
+    # === AFFICHAGE DES RÉSULTATS (Depuis le State) ===
+    if st.session_state.scan_results is not None:
+        signals = st.session_state.scan_results
+        stats = st.session_state.scan_stats
+
         st.markdown("---")
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Signaux", len(signals))
@@ -568,7 +611,8 @@ def main():
                 df_exp = pd.DataFrame([vars(s) for s in signals])
                 st.download_button("📥 CSV", df_exp.astype(str).to_csv(index=False).encode(), f"bluestar_{datetime.now().strftime('%H%M')}.csv", "text/csv")
             with d2:
-                st.download_button("📄 PDF", generate_pdf(signals), f"report_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
+                # Le clic ici recharge la page, mais réaffiche les données grâce au session_state
+                st.download_button("📄 PDF (Landscape)", generate_pdf(signals), f"report_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
 
             st.markdown("---")
             cols = st.columns(4)
@@ -583,12 +627,12 @@ def main():
                             "Score": s.score, "Entry": s.entry_price, "SL": s.stop_loss,
                             "TP": s.take_profit
                         } for s in tf_sig])
-                        # L'absence de height=... permet d'éviter le vide
                         st.dataframe(df_disp, use_container_width=True, hide_index=True)
                     else:
                         st.info("No signal")
         else:
-            st.warning("Aucun signal détecté avec les paramètres actuels.")
+            if scan_btn: # Afficher warning seulement si on vient de cliquer
+                st.warning("Aucun signal détecté avec les paramètres actuels.")
 
     st.markdown("---")
     st.markdown("<div style='text-align: center; color: #666; font-size: 0.7rem;'>BlueStar Institutional v3.0 | Proprietary Algorithm</div>", unsafe_allow_html=True)
