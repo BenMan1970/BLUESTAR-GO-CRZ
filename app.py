@@ -58,8 +58,8 @@ st.markdown("""
     .stDataFrame {font-size: 0.75rem !important;}
     .stDataFrame table {border: none !important;}
     .stDataFrame td, .stDataFrame th {border: none !important;}
-    thead tr th:first-child {display:none}
-    tbody th {display:none}
+     thead tr th:first-child {display:none}
+     tbody th {display:none}
     .tf-header {background: linear-gradient(135deg, rgba(0,255,136,0.2), rgba(0,200,255,0.2)); padding: 10px; border-radius: 8px; text-align: center; margin-bottom: 10px; border: 2px solid rgba(0,255,136,0.3);}
     .tf-header h3 {margin: 0; color: #00ff88; font-size: 1.2rem;}
     .tf-header p {margin: 3px 0; color: #a0a0c0; font-size: 0.7rem;}
@@ -208,15 +208,15 @@ class SignalQuality(Enum):
 class TradingParams:
     atr_sl_multiplier: float = 2.0
     atr_tp_multiplier: float = 3.5
-    min_adx_threshold: int = 20
-    adx_strong_threshold: int = 25
+    min_adx_threshold: int = 20  # 🔧 CHANGÉ: 22 → 20
+    adx_strong_threshold: int = 25  # 🔧 CHANGÉ: 28 → 25
     min_rr_ratio: float = 1.5
-    cascade_required: bool = False
-    strict_flip_only: bool = False
-    min_score_threshold: int = 55
-    min_volatility_percentile: float = 15.0
-    max_correlation: float = 0.75
-    session_filter: bool = False
+    cascade_required: bool = False  # 🔧 CHANGÉ: True → False
+    strict_flip_only: bool = False  # 🔧 CHANGÉ: True → False
+    min_score_threshold: int = 55  # 🔧 CHANGÉ: 60 → 55
+    min_volatility_percentile: float = 15.0  # 🔧 CHANGÉ: 30.0 → 15.0
+    max_correlation: float = 0.75  # 🔧 CHANGÉ: 0.7 → 0.75
+    session_filter: bool = False  # 🔧 CHANGÉ: True → False
 
 @dataclass
 class RiskConfig:
@@ -579,14 +579,14 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         prev = df.iloc[idx-1]
         prev2 = df.iloc[idx-2] if abs(idx-2) <= len(df) else None
         
-        # Validation stricte des données
+        # 🔧 FIX: Validation stricte des données
         required_fields = ['hma', 'rsi', 'adx', 'atr_val', 'ut_state', 'atr_percentile']
         for field in required_fields:
             if pd.isna(last[field]):
                 logger.debug(f"⚠️ {pair} {tf}: {field} est NaN")
                 return None
         
-        # Vérification type bool pour hma_up
+        # 🔧 FIX: Vérification type bool pour hma_up
         if not isinstance(last['hma_up'], (bool, np.bool_)):
             logger.debug(f"⚠️ {pair} {tf}: hma_up invalide (type={type(last['hma_up'])})")
             return None
@@ -594,7 +594,7 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         if not isinstance(prev['hma_up'], (bool, np.bool_)):
             return None
         
-        # Filtrage volatilité avec DEBUG
+        # 🔧 FIX: Filtrage volatilité avec DEBUG
         if last['atr_percentile'] < params.min_volatility_percentile:
             logger.info(f"🚫 {pair} {tf} VOLATILITÉ: {last['atr_percentile']:.1f}% < {params.min_volatility_percentile}%")
             return None
@@ -620,4 +620,425 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
             is_strict = hma_flip_green or hma_flip_red
         
         if not (raw_buy or raw_sell):
-            logger.debug(f"🚫 {pair} {tf} AUCUN
+            logger.debug(f"🚫 {pair} {tf} AUCUN SIGNAL: HMA_up={last['hma_up']}, RSI={last['rsi']:.0f}, UT={last['ut_state']}")
+            return None
+        
+        action = "BUY" if raw_buy else "SELL"
+        
+        # Cascade avec strength
+        higher_trend, trend_strength = get_trend_alignment(pair, tf)
+        if params.cascade_required:
+            if action == "BUY" and higher_trend != "Bullish":
+                logger.info(f"🚫 {pair} {tf} {action} CASCADE: trend={higher_trend}")
+                return None
+            if action == "SELL" and higher_trend != "Bearish":
+                logger.info(f"🚫 {pair} {tf} {action} CASCADE: trend={higher_trend}")
+                return None
+        
+        # SCORING OPTIMISÉ (Pondération dynamique)
+        score = 50  # Base
+        
+        # ADX (30 points max)
+        if last['adx'] > params.adx_strong_threshold:
+            score += 30
+        elif last['adx'] > params.min_adx_threshold:
+            score += 15
+        
+        # Flip quality (20 points max)
+        if hma_flip_green or hma_flip_red:
+            score += 20
+        elif hma_extended_green or hma_extended_red:
+            score += 10
+        
+        # RSI zone (15 points max)
+        if action == "BUY":
+            if 50 < last['rsi'] < 60:
+                score += 15
+            elif 60 <= last['rsi'] < 70:
+                score += 10
+            else:
+                score += 5
+        else:  # SELL
+            if 40 < last['rsi'] < 50:
+                score += 15
+            elif 30 < last['rsi'] <= 40:
+                score += 10
+            else:
+                score += 5
+        
+        # Cascade strength (25 points max)
+        score += int(trend_strength * 0.25)
+        
+        # Volatilité (10 points max)
+        if last['atr_percentile'] > 50:
+            score += 10
+        elif last['atr_percentile'] > 30:
+            score += 5
+        
+        score = max(params.min_score_threshold, min(100, score))
+        
+        if score < params.min_score_threshold:
+            logger.info(f"🚫 {pair} {tf} {action} SCORE: {score} < {params.min_score_threshold}")
+            return None
+        
+        # Session filtering
+        if last['time'].tzinfo is None:
+            local_time = pytz.utc.localize(last['time']).astimezone(TUNIS_TZ)
+        else:
+            local_time = last['time'].astimezone(TUNIS_TZ)
+        
+        session = get_active_session(local_time)
+        
+        if params.session_filter and session == "Off-Hours":
+            logger.debug(f"🚫 {pair} {tf} SESSION: off-hours")
+            return None
+        
+        quality = (SignalQuality.INSTITUTIONAL if score >= 85 
+                  else SignalQuality.PREMIUM if score >= 75 
+                  else SignalQuality.STANDARD)
+        
+        atr = last['atr_val']
+        sl = last['close'] - params.atr_sl_multiplier * atr if action == "BUY" else last['close'] + params.atr_sl_multiplier * atr
+        tp = last['close'] + params.atr_tp_multiplier * atr if action == "BUY" else last['close'] - params.atr_tp_multiplier * atr
+        
+        rr = abs(tp - last['close']) / abs(last['close'] - sl) if abs(last['close'] - sl) > 0 else 0
+        if rr < params.min_rr_ratio:
+            return None
+        
+        signal = Signal(
+            timestamp=local_time,
+            pair=pair,
+            timeframe=tf,
+            action=action,
+            entry_price=last['close'],
+            stop_loss=sl,
+            take_profit=tp,
+            score=score,
+            quality=quality,
+            position_size=0.0,
+            risk_amount=0.0,
+            risk_reward=rr,
+            adx=int(last['adx']),
+            rsi=int(last['rsi']),
+            atr=atr,
+            atr_percentile=last['atr_percentile'],
+            higher_tf_trend=higher_trend,
+            is_live=mode_live and not df.iloc[-1]['complete'],
+            is_fresh_flip=hma_flip_green if action == "BUY" else hma_flip_red,
+            candle_index=idx,
+            is_strict_flip=is_strict,
+            session=session
+        )
+        
+        signal.position_size = risk_manager.calculate_position_size(signal)
+        signal.risk_amount = abs(signal.entry_price - signal.stop_loss) * signal.position_size
+        
+        logger.info(f"✅ {pair} {tf} {action} @ {signal.entry_price:.5f} | Score: {score} | ATR%ile: {last['atr_percentile']:.0f}")
+        return signal
+    
+    except Exception as e:
+        logger.error(f"❌ Error {pair} {tf}: {e}")
+        return None
+
+# ==================== SCAN AMÉLIORÉ ====================
+def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, 
+             risk_manager: RiskManager, params: TradingParams) -> Tuple[List[Signal], ScanStats]:
+    start_time = time.time()
+    signals = []
+    stats = ScanStats(total_pairs=len(pairs) * len(tfs))
+    
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(analyze_pair, p, tf, mode_live, risk_manager, params): (p, tf)
+            for p in pairs for tf in tfs
+        }
+        
+        for future in as_completed(futures, timeout=60):
+            pair, tf = futures[future]
+            try:
+                result = future.result(timeout=10)
+                if result:
+                    signals.append(result)
+                    stats.signals_found += 1
+                stats.successful_scans += 1
+            except TimeoutError:
+                error_msg = f"{pair} {tf}: Timeout"
+                stats.errors.append(error_msg)
+                stats.failed_scans += 1
+            except Exception as e:
+                error_msg = f"{pair} {tf}: {str(e)}"
+                stats.errors.append(error_msg)
+                stats.failed_scans += 1
+    
+    # Filtrage corrélation
+    original_count = len(signals)
+    if params.max_correlation < 1.0:
+        signals = check_portfolio_correlation(signals, params.max_correlation)
+        stats.signals_filtered = original_count - len(signals)
+    
+    stats.scan_duration = time.time() - start_time
+    logger.info(f"📊 SCAN TERMINÉ: {len(signals)} signaux | {stats.scan_duration:.1f}s")
+    return signals, stats
+
+# ==================== PDF AMÉLIORÉ ====================
+def generate_pdf(signals: List[Signal]) -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm, 
+                           leftMargin=10*mm, rightMargin=10*mm)
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    elements.append(Paragraph("<font size=16 color=#00ff88><b>BlueStar v3.0 FIXED</b></font>", styles["Title"]))
+    elements.append(Spacer(1, 8*mm))
+    
+    now = datetime.now(TUNIS_TZ).strftime('%d/%m/%Y %H:%M:%S')
+    elements.append(Paragraph(f"<font size=10>Généré le {now}</font>", styles["Normal"]))
+    elements.append(Spacer(1, 10*mm))
+    
+    data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", 
+             "R:R", "Size", "Risk", "ADX", "RSI", "Trend", "Session", "ATR%"]]
+    
+    for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
+        data.append([
+            s.timestamp.strftime("%H:%M"),
+            s.pair.replace("_", "/"),
+            s.timeframe,
+            s.quality.value[:4],
+            s.action,
+            f"{s.entry_price:.5f}",
+            f"{s.stop_loss:.5f}",
+            f"{s.take_profit:.5f}",
+            str(s.score),
+            f"{s.risk_reward:.1f}",
+            f"{s.position_size:.2f}",
+            f"${s.risk_amount:.0f}",
+            str(s.adx),
+            str(s.rsi),
+            s.higher_tf_trend[:4],
+            s.session[:3],
+            f"{s.atr_percentile:.0f}"
+        ])
+    
+    table = Table(data, colWidths=[14*mm,18*mm,10*mm,16*mm,14*mm,18*mm,18*mm,18*mm,
+                                  10*mm,10*mm,14*mm,14*mm,10*mm,10*mm,16*mm,12*mm,12*mm])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#00ff88")),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 7),
+        ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#0f1429")),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333")),
+        ('FONTSIZE', (0,1), (-1,-1), 6),
+    ]))
+    
+    elements.append(table)
+    doc.build(elements)
+    return buffer.getvalue()
+
+# ==================== INTERFACE PRINCIPALE ====================
+def main():
+    col_title, col_time, col_mode = st.columns([3, 2, 2])
+    
+    with col_title:
+        st.markdown("# BlueStar Enhanced v3.0")
+        st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v30-badge">v3.0 ADVANCED</span><span class="fixed-badge">FIXED</span>', 
+                   unsafe_allow_html=True)
+    
+    with col_time:
+        now_tunis = datetime.now(TUNIS_TZ)
+        market_open = now_tunis.hour in range(0, 23)
+        session = get_active_session(now_tunis)
+        st.markdown(f"""<div style='text-align: right; padding-top: 10px;'>
+            <span style='color: #a0a0c0; font-size: 0.8rem;'>🕐 {now_tunis.strftime('%H:%M:%S')}</span><br>
+            <span style='color: {"#00ff88" if market_open else "#ff6666"};'>
+                {"OPEN" if market_open else "CLOSED"}
+            </span> {get_session_badge(session)}
+        </div>""", unsafe_allow_html=True)
+    
+    with col_mode:
+        mode = st.radio("Mode", ["Confirmed", "Live"], horizontal=True, label_visibility="collapsed")
+        is_live = "Live" in mode
+
+    with st.expander("⚙️ Configuration Avancée", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        atr_sl = c1.number_input("SL Multiplier (ATR)", 1.0, 4.0, 2.0, 0.5)
+        atr_tp = c2.number_input("TP Multiplier (ATR)", 1.5, 6.0, 3.5, 0.5)
+        min_rr = c3.number_input("Min R:R", 1.0, 3.0, 1.5, 0.1)
+        cascade_req = c4.checkbox("Cascade obligatoire", False)  # 🔧 CHANGÉ
+        
+        c5, c6, c7, c8 = st.columns(4)
+        strict_flip = c5.checkbox("Flip strict uniquement", False)  # 🔧 CHANGÉ
+        min_score = c6.number_input("Score minimum", 50, 100, 55, 5)  # 🔧 CHANGÉ
+        min_adx = c7.number_input("ADX minimum", 15, 35, 20, 1)  # 🔧 CHANGÉ
+        adx_strong = c8.number_input("ADX fort", 20, 45, 25, 1)  # 🔧 CHANGÉ
+        
+        st.markdown("---")
+        st.markdown("**Filtres Avancés v3.0 FIXED**")
+        c9, c10, c11, c12 = st.columns(4)
+        min_vol_pct = c9.slider("Min Volatilité %ile", 0, 70, 15, 5)  # 🔧 CHANGÉ
+        max_corr = c10.slider("Max Corrélation", 0.5, 1.0, 0.75, 0.05)  # 🔧 CHANGÉ
+        session_filter = c11.checkbox("Filtrer off-hours", False)  # 🔧 CHANGÉ
+
+    c1, c2, c3, c4 = st.columns(4)
+    balance = c1.number_input("Balance ($)", 1000, 1000000, 10000, 1000)
+    max_risk = c2.slider("Risk/Trade (%)", 0.5, 3.0, 1.0, 0.1) / 100
+    max_portfolio = c3.slider("Portfolio Risk (%)", 2.0, 10.0, 5.0, 0.5) / 100
+    scan_btn = c4.button("🚀 SCAN v3.0 FIXED", type="primary", use_container_width=True)
+
+    if scan_btn = c4.button("🚀 SCAN", type="primary", use_container_width=True):
+            params = TradingParams(
+                atr_sl_multiplier=atr_sl, 
+                atr_tp_multiplier=atr_tp, 
+                min_rr_ratio=min_rr, 
+                cascade_required=cascade_req,
+                strict_flip_only=strict_flip,
+                min_score_threshold=min_score,
+                min_adx_threshold=min_adx,
+                adx_strong_threshold=adx_strong,
+                min_volatility_percentile=min_vol_pct,
+                max_correlation=max_corr,
+                session_filter=session_filter
+            )
+            risk_config = RiskConfig(
+                max_risk_per_trade=max_risk, 
+                max_portfolio_risk=max_portfolio
+            )
+            risk_manager = RiskManager(risk_config, balance)
+            
+            signals, stats = run_scan(PAIRS_DEFAULT, ["H1", "H4", "D1"], is_live, 
+                                     risk_manager, params)
+        
+        st.markdown("---")
+        st.markdown("### 📊 Résultats du Scan v3.0 FIXED")
+        
+        m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+        m1.metric("Signaux", len(signals))
+        m2.metric("Institutional", len([s for s in signals if s.quality == SignalQuality.INSTITUTIONAL]))
+        m3.metric("Filtrés", stats.signals_filtered)
+        m4.metric("Avg Score", f"{np.mean([s.score for s in signals]):.0f}" if signals else "0")
+        m5.metric("Exposition", f"${sum(s.risk_amount for s in signals):.0f}")
+        m6.metric("Avg R:R", f"{np.mean([s.risk_reward for s in signals]):.1f}:1" if signals else "0:1")
+        m7.metric("Durée", f"{stats.scan_duration:.1f}s")
+        
+        api_stats = rate_limiter.get_stats()
+        st.markdown(f"""<div class='success-box'>
+            ✅ <b>Performance API:</b> {api_stats['total_requests']} requêtes | 
+            {api_stats['total_errors']} erreurs | 
+            Success rate: {api_stats['success_rate']}%
+        </div>""", unsafe_allow_html=True)
+        
+        if stats.signals_filtered > 0:
+            st.markdown(f"""<div class='alert-box'>
+                ⚠️ <b>Correlation Filter:</b> {stats.signals_filtered} signaux filtrés pour réduire la corrélation du portfolio
+            </div>""", unsafe_allow_html=True)
+        
+        if stats.errors:
+            with st.expander(f"⚠️ Erreurs ({len(stats.errors)})", expanded=False):
+                for error in stats.errors[:10]:
+                    st.markdown(f"<div class='error-box'>❌ {error}</div>", unsafe_allow_html=True)
+
+        if signals:
+            st.markdown("---")
+            dl1, dl2, dl3 = st.columns([1,1,1])
+            
+            with dl1:
+                df_csv = pd.DataFrame([{
+                    "Time": s.timestamp.strftime("%Y-%m-%d %H:%M"), 
+                    "Pair": s.pair.replace("_","/"), 
+                    "TF": s.timeframe,
+                    "Quality": s.quality.value, 
+                    "Action": s.action, 
+                    "Entry": s.entry_price, 
+                    "SL": s.stop_loss, 
+                    "TP": s.take_profit,
+                    "Score": s.score, 
+                    "RR": s.risk_reward, 
+                    "Size": s.position_size, 
+                    "Risk_USD": s.risk_amount,
+                    "ADX": s.adx, 
+                    "RSI": s.rsi,
+                    "ATR_Percentile": round(s.atr_percentile, 1),
+                    "Higher_TF": s.higher_tf_trend, 
+                    "Session": s.session,
+                    "Fresh_Flip": s.is_fresh_flip, 
+                    "Live": s.is_live
+                } for s in signals])
+                st.download_button("📥 Télécharger CSV", 
+                                 df_csv.to_csv(index=False).encode(), 
+                                 f"bluestar_v30_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
+                                 "text/csv", use_container_width=True)
+            
+            with dl3:
+                pdf = generate_pdf(signals)
+                st.download_button("📄 Télécharger PDF", 
+                                 pdf, 
+                                 f"bluestar_v30_fixed_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
+                                 "application/pdf", use_container_width=True)
+
+            st.markdown("---")
+            col_h1, col_h4, col_d1 = st.columns(3)
+            
+            for col, tf in zip([col_h1, col_h4, col_d1], ["H1", "H4", "D1"]):
+                with col:
+                    tf_sig = [s for s in signals if s.timeframe == tf]
+                    st.markdown(f"""<div class='tf-header'>
+                        <h3>{tf}</h3>
+                        <p>{len(tf_sig)} signal{'s' if len(tf_sig)>1 else ''}</p>
+                    </div>""", unsafe_allow_html=True)
+                    
+                    if tf_sig:
+                        tf_sig.sort(key=lambda x: (x.score, x.timestamp), reverse=True)
+                        df_disp = pd.DataFrame([{
+                            "Heure": s.timestamp.strftime("%H:%M"), 
+                            "Paire": s.pair.replace("_","/"),
+                            "Qualité": s.quality.value[:4],
+                            "Action": f"{'🟢' if s.action=='BUY' else '🔴'}{s.action}",
+                            "Score": s.score, 
+                            "Entry": f"{s.entry_price:.5f}", 
+                            "SL": f"{s.stop_loss:.5f}", 
+                            "TP": f"{s.take_profit:.5f}",
+                            "R:R": f"{s.risk_reward:.1f}:1", 
+                            "Taille": f"{s.position_size:.2f}", 
+                            "Risque": f"${s.risk_amount:.0f}",
+                            "ADX": s.adx, 
+                            "RSI": s.rsi,
+                            "ATR%": f"{s.atr_percentile:.0f}",
+                            "Trend": s.higher_tf_trend[:4],
+                            "Session": s.session[:3]
+                        } for s in tf_sig])
+                        st.dataframe(df_disp, use_container_width=True, hide_index=True, height=400)
+                    else:
+                        st.info("Aucun signal")
+
+        else:
+            st.warning("⚠️ Aucun signal détecté. Vérifiez les logs ci-dessous pour diagnostiquer.")
+            
+            # 🔧 NOUVEAU: Affichage stats de filtrage
+            st.markdown("---")
+            st.markdown("### 🔍 Diagnostic de Filtrage")
+            st.info(f"""
+            **Paramètres actifs:**
+            - Volatilité min: {min_vol_pct}%ile
+            - Cascade requis: {cascade_req}
+            - Flip strict: {strict_flip}
+            - Score min: {min_score}
+            - ADX min: {min_adx}
+            - Session filter: {session_filter}
+            
+            💡 **Suggestions:**
+            - Baissez "Min Volatilité %ile" à 10
+            - Décochez "Cascade obligatoire"
+            - Décochez "Flip strict uniquement"
+            - Baissez "Score minimum" à 50
+            """)
+
+    st.markdown("---")
+    st.markdown("""<div style='text-align: center; color: #666; font-size: 0.7rem; padding: 15px;'>
+        <b>BlueStar Cascade Enhanced v3.0 FIXED</b> | Institutional Grade | 
+        🔧 ATR Percentile Fix ✅ | HMA Flip Fix ✅ | Optimized Defaults ✅ | Debug Logging ✅
+    </div>""", unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
+
