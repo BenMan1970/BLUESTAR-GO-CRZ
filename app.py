@@ -82,12 +82,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# LISTE MISE A JOUR AVEC INDICES
 PAIRS_DEFAULT = [
+    # Forex
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
     "EUR_GBP","EUR_JPY","GBP_JPY","AUD_JPY","CAD_JPY","NZD_JPY",
     "EUR_AUD","EUR_CAD","EUR_NZD","GBP_AUD","GBP_CAD","GBP_NZD",
     "AUD_CAD","AUD_NZD","CAD_CHF","CHF_JPY","AUD_CHF","NZD_CHF",
-    "EUR_CHF","GBP_CHF","USD_SEK","XAU_USD","XPT_USD"
+    "EUR_CHF","GBP_CHF","USD_SEK",
+    # Métaux
+    "XAU_USD","XPT_USD",
+    # Indices US (Ajoutés)
+    "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
 
 GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
@@ -633,3 +639,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+       
