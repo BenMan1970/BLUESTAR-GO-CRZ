@@ -640,7 +640,8 @@ def main():
                             "Qual": s.quality.value,
                             "Act": f"{'🟢' if s.action=='BUY' else '🔴'} {s.action}",
                             "Score": s.score, 
-                            "Entry": f"{s.entry_price:.5f}", 
+                            "Entry": f"{s.entry_price:.5f}",
+                            "SL": f"{s.stop_loss:.5f}",
                             "TP": f"{s.take_profit:.5f}"
                         } for s in tf_sig])
                         st.dataframe(df_disp, use_container_width=True, hide_index=True)
@@ -655,4 +656,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
