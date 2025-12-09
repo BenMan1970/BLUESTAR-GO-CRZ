@@ -82,7 +82,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# LISTE MISE A JOUR AVEC INDICES
 PAIRS_DEFAULT = [
     # Forex
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
@@ -92,7 +91,7 @@ PAIRS_DEFAULT = [
     "EUR_CHF","GBP_CHF","USD_SEK",
     # Métaux
     "XAU_USD","XPT_USD",
-    # Indices US (Ajoutés)
+    # Indices US
     "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
 
@@ -236,9 +235,9 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
 
 # ==================== DATACLASSES ====================
 class SignalQuality(Enum):
-    INSTITUTIONAL = "Institutional"
-    PREMIUM = "Premium"
-    STANDARD = "Standard"
+    INSTITUTIONAL = "Inst"  # Changé pour "Inst" directement
+    PREMIUM = "Prem"
+    STANDARD = "Stan"
 
 @dataclass
 class TradingParams:
@@ -473,7 +472,7 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: Ri
     stats.scan_duration = time.time() - start_time
     return signals, stats
 
-# ==================== PDF GENERATOR (LANDSCAPE & BIGGER) ====================
+# ==================== PDF GENERATOR ====================
 def generate_pdf(signals: List[Signal]) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm, leftMargin=5*mm, rightMargin=5*mm)
@@ -485,7 +484,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     
     data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", "R:R", "Size", "Trend", "Session"]]
     
-    for s in sorted(signals, key=lambda x: (x.score, x.timestamp), reverse=True):
+    for s in sorted(signals, key=lambda x: (x.timestamp, x.score), reverse=True): # TRI PAR TEMPS PUIS SCORE
         act_color = "#00ff88" if s.action == "BUY" else "#ff6b6b"
         action_text = f"<font color={act_color}><b>{s.action}</b></font>"
         
@@ -493,7 +492,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
             s.timestamp.strftime("%H:%M"), 
             s.pair.replace("_", "/"), 
             s.timeframe,
-            s.quality.value[:4], 
+            s.quality.value, 
             Paragraph(action_text, styles["Normal"]),
             f"{s.entry_price:.5f}", 
             f"{s.stop_loss:.5f}",
@@ -618,14 +617,19 @@ def main():
             cols = st.columns(4)
             for col, tf in zip(cols, ["M15", "H1", "H4", "D1"]):
                 with col:
-                    tf_sig = sorted([s for s in signals if s.timeframe == tf], key=lambda x: x.score, reverse=True)
+                    # TRI PAR HEURE (plus récent en haut)
+                    tf_sig = sorted([s for s in signals if s.timeframe == tf], key=lambda x: (x.timestamp, x.score), reverse=True)
                     st.markdown(f"<div class='tf-header'><h3>{tf}</h3><p>{len(tf_sig)} signal(s)</p></div>", unsafe_allow_html=True)
                     
                     if tf_sig:
                         df_disp = pd.DataFrame([{
-                            "Pair": s.pair.replace("_","/"), "Act": s.action,
-                            "Score": s.score, "Entry": s.entry_price, "SL": s.stop_loss,
-                            "TP": s.take_profit
+                            "Heure": s.timestamp.strftime("%H:%M"),
+                            "Pair": s.pair.replace("_","/"), 
+                            "Qual": s.quality.value, # Affiche "Inst"
+                            "Act": f"{'🟢' if s.action=='BUY' else '🔴'} {s.action}",
+                            "Score": s.score, 
+                            "Entry": f"{s.entry_price:.5f}", 
+                            "TP": f"{s.take_profit:.5f}"
                         } for s in tf_sig])
                         st.dataframe(df_disp, use_container_width=True, hide_index=True)
                     else:
@@ -639,4 +643,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-       
+
+ 
