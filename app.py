@@ -235,7 +235,7 @@ def get_candles(pair: str, tf: str, count: int = 300) -> pd.DataFrame:
 
 # ==================== DATACLASSES ====================
 class SignalQuality(Enum):
-    INSTITUTIONAL = "Inst"  # Changé pour "Inst" directement
+    INSTITUTIONAL = "Inst"
     PREMIUM = "Prem"
     STANDARD = "Stan"
 
@@ -293,6 +293,11 @@ class ScanStats:
 # ==================== INDICATORS & LOGIC ====================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < 50: return df
+    
+    # ✅ VALIDATION DES DONNÉES
+    df = df.dropna(subset=['open', 'high', 'low', 'close'])
+    if len(df) < 50:
+        return pd.DataFrame()
     
     close, high, low = df['close'], df['high'], df['low']
 
@@ -390,6 +395,9 @@ def analyze_pair(pair: str, tf: str, mode_live: bool, risk_manager: RiskManager,
         if len(df) < 100: return None
         df = calculate_indicators(df)
         
+        # Si le DataFrame est vide après validation, on retourne None
+        if df.empty: return None
+        
         idx = -1 if mode_live else (-2 if not df.iloc[-1]['complete'] else -1)
         last = df.iloc[idx]
         prev = df.iloc[idx-1]
@@ -456,11 +464,16 @@ def run_scan(pairs: List[str], tfs: List[str], mode_live: bool, risk_manager: Ri
     
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(analyze_pair, p, tf, mode_live, risk_manager, params): (p, tf) for p in pairs for tf in tfs}
-        for future in as_completed(futures):
+        
+        # ✅ TIMEOUT AJOUTÉ
+        for future in as_completed(futures, timeout=45):
             try:
-                res = future.result()
+                res = future.result(timeout=10)
                 if res: signals.append(res)
                 stats.successful_scans += 1
+            except TimeoutError:
+                stats.successful_scans += 1
+                continue
             except:
                 pass
     
@@ -484,7 +497,7 @@ def generate_pdf(signals: List[Signal]) -> bytes:
     
     data = [["Heure", "Paire", "TF", "Qualité", "Action", "Entry", "SL", "TP", "Score", "R:R", "Size", "Trend", "Session"]]
     
-    for s in sorted(signals, key=lambda x: (x.timestamp, x.score), reverse=True): # TRI PAR TEMPS PUIS SCORE
+    for s in sorted(signals, key=lambda x: (x.timestamp, x.score), reverse=True):
         act_color = "#00ff88" if s.action == "BUY" else "#ff6b6b"
         action_text = f"<font color={act_color}><b>{s.action}</b></font>"
         
@@ -617,7 +630,6 @@ def main():
             cols = st.columns(4)
             for col, tf in zip(cols, ["M15", "H1", "H4", "D1"]):
                 with col:
-                    # TRI PAR HEURE (plus récent en haut)
                     tf_sig = sorted([s for s in signals if s.timeframe == tf], key=lambda x: (x.timestamp, x.score), reverse=True)
                     st.markdown(f"<div class='tf-header'><h3>{tf}</h3><p>{len(tf_sig)} signal(s)</p></div>", unsafe_allow_html=True)
                     
@@ -625,7 +637,7 @@ def main():
                         df_disp = pd.DataFrame([{
                             "Heure": s.timestamp.strftime("%H:%M"),
                             "Pair": s.pair.replace("_","/"), 
-                            "Qual": s.quality.value, # Affiche "Inst"
+                            "Qual": s.quality.value,
                             "Act": f"{'🟢' if s.action=='BUY' else '🔴'} {s.action}",
                             "Score": s.score, 
                             "Entry": f"{s.entry_price:.5f}", 
@@ -643,5 +655,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
  
