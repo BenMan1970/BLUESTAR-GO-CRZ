@@ -1,7 +1,8 @@
 """
-BlueStar Institutional v5.1 (Stable CSM)
-Fixes the API Freeze by fetching CSM data sequentially.
-Replaces Score column with CSM Strength Differential.
+BlueStar Institutional v5.2 (Corrected Logic)
+- CSM calculated on DAILY timeframe (matches websites logic)
+- UI restored to focus on the Signals Table
+- CSM integrates into the 'Score' column quietly
 """
 import streamlit as st
 import pandas as pd
@@ -26,19 +27,16 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar v5.1", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar v5.2", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
     
-    /* DASHBOARD CSM */
-    .csm-box {background: rgba(255,255,255,0.05); border-radius: 8px; padding: 10px; text-align: center; border: 1px solid rgba(255,255,255,0.1);}
-    .csm-val {font-size: 1.4rem; font-weight: bold;}
-    
     /* TABLEAUX */
     [data-testid="stDataFrame"] {border: none !important;}
     [data-testid="stHeader"] {background-color: transparent !important;}
+    
     .tf-header {
         background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%); 
         border-left: 4px solid #00ff88;
@@ -48,16 +46,19 @@ st.markdown("""
     
     /* BADGES */
     .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem;}
+    .csm-badge {background: #333; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; border: 1px solid #555;}
 </style>
 """, unsafe_allow_html=True)
 
-# Listes
-ALL_MAJOR_PAIRS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD"] # Liste réduite pour stabilité
+# Paires Principales pour le CSM (Le "Panier")
+MAJORS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD"]
+CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
+
+# Paires à Scanner (Trading)
 SCAN_TARGETS = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","USD_CAD","EUR_JPY","GBP_JPY","XAU_USD","US30_USD","NAS100_USD"]
 TIMEFRAMES = ["M15", "H1", "H4"]
-GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4"}
+GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4", "D1": "D"}
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
-CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
 
 # ==================== DATA CLASSES ====================
 @dataclass
@@ -76,8 +77,9 @@ class Signal:
     entry_price: float
     stop_loss: float
     take_profit: float
+    score: int          # Score Technique (0-100)
+    csm_val: float      # Score CSM (-10 à +10)
     confluences: List[str]
-    csm_diff: float  # La valeur CSM (Force)
 
 # ==================== API ====================
 @st.cache_resource
@@ -87,7 +89,8 @@ def get_oanda_client():
 
 client = get_oanda_client()
 
-def get_candles(pair, tf, count=300):
+def get_candles_safe(pair, tf, count=250):
+    time.sleep(0.05) # Anti-ban
     try:
         r = InstrumentsCandles(instrument=pair, params={"granularity":GRANULARITY_MAP.get(tf,"H1"), "count":count, "price":"M"})
         client.request(r)
@@ -97,52 +100,50 @@ def get_candles(pair, tf, count=300):
         return df
     except: return pd.DataFrame()
 
-# ==================== 1. CSM CALCULATOR (SÉQUENTIEL = SAFE) ====================
-def calculate_csm_safe():
-    """Calcule la force des devises une par une pour ne pas bloquer l'API"""
+# ==================== 1. CSM LOGIC (CORRIGÉE : DAILY TREND) ====================
+def calculate_csm_daily():
+    """
+    Calcule la force relative basée sur la bougie DAILY actuelle.
+    Simule la logique de currencystrengthmeter.org
+    """
     scores = {c: 0.0 for c in CURRENCIES}
     
-    # On utilise une liste réduite mais représentative pour aller vite et ne pas crash
-    pairs_to_check = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD"]
-    
-    for pair in pairs_to_check:
-        # Pause de sécurité
-        time.sleep(0.1)
-        df = get_candles(pair, "H1", count=10) # Besoin de peu de bougies
-        if len(df) < 2: continue
+    # On scanne les 7 majeurs en Daily
+    for pair in MAJORS:
+        df = get_candles_safe(pair, "D1", count=2) # On a juste besoin de la bougie du jour
+        if len(df) < 1: continue
         
+        # Variation du jour en %
         open_p = df.iloc[-1]['open']
         close_p = df.iloc[-1]['close']
-        pct = ((close_p - open_p) / open_p) * 100
+        change = ((close_p - open_p) / open_p) * 100
         
         base, quote = pair.split("_")
         
-        # Poids simplifié
-        if pct > 0: # Base forte, Quote faible
-            scores[base] += abs(pct) * 10
-            scores[quote] -= abs(pct) * 10
-        else: # Base faible, Quote forte
-            scores[base] -= abs(pct) * 10
-            scores[quote] += abs(pct) * 10
-            
-    # Normalisation 0-10
-    final = {}
-    vals = list(scores.values())
-    if not vals: return {c: 5.0 for c in CURRENCIES}
-    
-    mn, mx = min(vals), max(vals)
-    for c, s in scores.items():
-        if mx - mn == 0: norm = 5.0
-        else: norm = ((s - mn) / (mx - mn)) * 10
-        final[c] = round(norm, 1)
+        # Pondération : 1% de mouvement = 10 points de force
+        points = change * 10
         
-    return final
+        # Distribution des points
+        # Ex: EURUSD monte (+). EUR gagne, USD perd.
+        scores[base] += points
+        scores[quote] -= points
+        
+    # Normalisation pour avoir du 0 à 10 (approx)
+    # On ajoute 5.0 à tout le monde pour centrer autour de 5
+    final_scores = {}
+    for c, s in scores.items():
+        # Clamp entre 0 et 10
+        val = 5.0 + s
+        val = max(0.0, min(10.0, val))
+        final_scores[c] = round(val, 1)
+        
+    return final_scores
 
-# ==================== 2. ANALYSE TECHNIQUE ====================
+# ==================== 2. ANALYSE TECHNIQUE (BLUESTAR CORE) ====================
 def analyze_market(df, pair, tf, params, csm_data):
-    if len(df) < 200: return None
+    if len(df) < 100: return None
     
-    # --- INDICATEURS ---
+    # Indicateurs
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     
     def hma(series, length=20):
@@ -160,10 +161,11 @@ def analyze_market(df, pair, tf, params, csm_data):
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # --- LOGIQUE ---
+    # Logique Signal
     hma_up = curr['hma'] > prev['hma']
     hma_down = curr['hma'] < prev['hma']
     
+    # Strict Flip check
     flip_up = hma_up and (prev['hma'] < df.iloc[-3]['hma'])
     flip_down = hma_down and (prev['hma'] > df.iloc[-3]['hma'])
     
@@ -190,20 +192,27 @@ def analyze_market(df, pair, tf, params, csm_data):
     if not action: return None
     if params.use_fvg and "FVG" not in conf: return None
 
-    # --- CSM CALC ---
+    # Score Technique de base (pour le tri)
+    tech_score = 60
+    if "Cloud" in conf: tech_score += 15
+    if "FVG" in conf: tech_score += 15
+    
+    # --- CSM INTEGRATION ---
     try:
         base, quote = pair.split("_")
         s_base = csm_data.get(base, 5.0)
         s_quote = csm_data.get(quote, 5.0)
     except:
-        s_base, s_quote = 5.0, 5.0
+        s_base, s_quote = 5.0, 5.0 # Neutre pour or/indices
         
-    # Différentiel de force : Si je BUY, je veux Base > Quote
-    if action == "BUY": diff = s_base - s_quote
-    else: diff = s_quote - s_base
-    
-    # On filtre les trades stupides (contre la force)
-    if diff < -1.5: return None # Trop dangereux
+    # Calcul du Différentiel pour affichage
+    if action == "BUY":
+        csm_diff = s_base - s_quote # On veut positif
+    else:
+        csm_diff = s_quote - s_base # On veut positif
+        
+    # Filtre CSM (Si on trade contre une force majeure > 2.0, on ignore)
+    if csm_diff < -2.0: return None
 
     atr = (curr['high'] - curr['low'])
     sl = curr['close'] - (atr * params.atr_sl) if action == "BUY" else curr['close'] + (atr * params.atr_sl)
@@ -213,7 +222,7 @@ def analyze_market(df, pair, tf, params, csm_data):
         timestamp=pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ),
         pair=pair, timeframe=tf, action=action,
         entry_price=curr['close'], stop_loss=sl, take_profit=tp,
-        confluences=conf, csm_diff=diff
+        score=tech_score, csm_val=csm_diff, confluences=conf
     )
 
 def smart_format(pair, price):
@@ -225,14 +234,13 @@ def smart_format(pair, price):
 # ==================== MAIN ====================
 def main():
     c1, c2 = st.columns([3,1])
-    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v5.1</span>", unsafe_allow_html=True)
+    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v5.2</span>", unsafe_allow_html=True)
     with c2: 
         if st.button("Reset"):
             st.session_state.clear()
             st.rerun()
 
     if 'scan_results' not in st.session_state: st.session_state.scan_results = None
-    if 'csm_data' not in st.session_state: st.session_state.csm_data = None
 
     with st.expander("⚙️ Configuration", expanded=False):
         c1, c2 = st.columns(2)
@@ -241,15 +249,15 @@ def main():
         fvg = c2.checkbox("FVG Required", True)
         flip = c2.checkbox("Strict Flip", True)
 
-    if st.button("🚀 SCANNER (CSM + TECHNIQUE)", type="primary", use_container_width=True):
-        if not client: st.error("No API Token")
+    if st.button("🚀 SCANNER MARCHÉ", type="primary", use_container_width=True):
+        if not client: st.error("Token API Manquant")
         else:
-            # 1. CSM Phase (Séquentiel pour éviter crash)
-            with st.spinner("Analyse des Forces (Currency Strength)..."):
-                csm = calculate_csm_safe()
-                st.session_state.csm_data = csm
+            # 1. Calcul CSM Daily (Rapide et en background)
+            # On ne l'affiche pas en gros, on l'utilise pour le calcul
+            with st.spinner("Calibrage des forces Daily..."):
+                csm_data = calculate_csm_daily()
             
-            # 2. Scan Phase (Barre progression)
+            # 2. Scan Technique
             progress = st.progress(0)
             status = st.empty()
             
@@ -258,64 +266,54 @@ def main():
             total = len(SCAN_TARGETS) * len(TIMEFRAMES)
             done = 0
             
-            # ThreadPool limité à 4
             with ThreadPoolExecutor(max_workers=4) as exc:
-                futures = {exc.submit(lambda p,t: (get_candles(p,t), p, t), p, tf): (p,tf) for p in SCAN_TARGETS for tf in TIMEFRAMES}
+                futures = {exc.submit(lambda p,t: (get_candles_safe(p,t), p, t), p, tf): (p,tf) for p in SCAN_TARGETS for tf in TIMEFRAMES}
                 
                 for f in as_completed(futures):
-                    # Petite pause pour laisser respirer l'API
-                    time.sleep(0.05)
                     done += 1
                     progress.progress(done/total)
-                    status.text(f"Scanning... {int((done/total)*100)}%")
+                    status.text(f"Analyse Technique... {int((done/total)*100)}%")
                     try:
                         df, p, tf = f.result()
                         if not df.empty:
-                            s = analyze_market(df, p, tf, params, csm)
+                            s = analyze_market(df, p, tf, params, csm_data)
                             if s: signals.append(s)
                     except: pass
             
             status.empty()
             progress.empty()
-            st.session_state.scan_results = sorted(signals, key=lambda x: x.csm_diff, reverse=True)
+            st.session_state.scan_results = sorted(signals, key=lambda x: x.csm_val, reverse=True) # Tri par force CSM
 
-    # --- DISPLAY CSM ---
-    if st.session_state.csm_data:
-        csm = st.session_state.csm_data
-        st.markdown("#### 📊 Force des Devises (0-10)")
-        cols = st.columns(8)
-        sorted_csm = sorted(csm.items(), key=lambda x: x[1], reverse=True)
-        for i, (curr, val) in enumerate(sorted_csm):
-            col_txt = "#00ff88" if val >= 7 else ("#ff4b4b" if val <= 3 else "#fff")
-            cols[i].markdown(f"<div class='csm-box'><div style='color:#aaa'>{curr}</div><div class='csm-val' style='color:{col_txt}'>{val}</div></div>", unsafe_allow_html=True)
-        st.markdown("---")
-
-    # --- DISPLAY SIGNALS ---
+    # --- RESULTATS ---
     if st.session_state.scan_results:
         signals = st.session_state.scan_results
         
         if signals:
-            # PDF GEN
             buf = BytesIO()
             doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=10*mm)
-            elems = [Paragraph("<b>BlueStar v5.1 Report</b>", getSampleStyleSheet()['Title']), Spacer(1, 10*mm)]
+            elems = [Paragraph("<b>BlueStar Report</b>", getSampleStyleSheet()['Title']), Spacer(1, 10*mm)]
             
             for tf in TIMEFRAMES:
                 tf_sigs = [s for s in signals if s.timeframe == tf]
                 if not tf_sigs: continue
-                elems.append(Paragraph(f"<b>{tf}</b>", getSampleStyleSheet()['Normal']))
-                data = [["Time", "Pair", "Action", "Price", "Force Diff", "Conf"]]
+                elems.append(Paragraph(f"<b>{tf} Structure</b>", getSampleStyleSheet()['Normal']))
+                data = [["Time", "Pair", "Action", "Price", "Force", "Conf"]]
                 for s in tf_sigs:
                     c = colors.green if s.action == "BUY" else colors.red
-                    data.append([s.timestamp.strftime("%H:%M"), s.pair, s.action, smart_format(s.pair, s.entry_price), f"{s.csm_diff:+.1f}", ", ".join(s.confluences)])
+                    data.append([
+                        s.timestamp.strftime("%H:%M"), s.pair, s.action, 
+                        smart_format(s.pair, s.entry_price), 
+                        f"{s.csm_val:+.1f}", # Affiche la force CSM
+                        ", ".join(s.confluences)
+                    ])
                 t = Table(data)
-                t.setStyle(TableStyle([('TEXTCOLOR',(0,0),(-1,0),colors.white), ('BACKGROUND',(0,0),(-1,0),colors.black)]))
+                t.setStyle(TableStyle([('TEXTCOLOR',(0,0),(-1,0),colors.white), ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#1a1f3a"))]))
                 elems.append(t); elems.append(Spacer(1, 5*mm))
             
             doc.build(elems)
             st.download_button("📄 PDF Report", buf.getvalue(), "report.pdf", "application/pdf")
-        
-        if not signals: st.info("Aucun signal. Les devises sont peut-être neutres.")
+
+        if not signals: st.info("Aucun signal technique valide aligné avec la force des devises.")
         else:
             for tf in TIMEFRAMES:
                 tf_sigs = [s for s in signals if s.timeframe == tf]
@@ -324,12 +322,19 @@ def main():
                     data = []
                     for s in tf_sigs:
                         icon = "🟢" if s.action == "BUY" else "🔴"
-                        # Nouvelle colonne FORCE = CSM Diff
+                        
+                        # Affichage de la FORCE CSM
+                        force_str = f"{s.csm_val:+.1f}"
+                        
                         data.append({
-                            "Heure": s.timestamp.strftime("%H:%M"), "Paire": s.pair.replace("_","/"),
-                            "Signal": f"{icon} {s.action}", "Prix": smart_format(s.pair, s.entry_price),
-                            "Force (CSM)": f"{s.csm_diff:+.1f}",  # C'est ici que ça change !
-                            "Confirmations": ", ".join(s.confluences)
+                            "Time": s.timestamp.strftime("%H:%M"), 
+                            "Pair": s.pair.replace("_","/"),
+                            "Signal": f"{icon} {s.action}", 
+                            "Price": smart_format(s.pair, s.entry_price),
+                            "SL": smart_format(s.pair, s.stop_loss), 
+                            "TP": smart_format(s.pair, s.take_profit),
+                            "CSM Force": force_str,  # VOILA LA COLONNE MODIFIÉE
+                            "Confluences": ", ".join(s.confluences)
                         })
                     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
