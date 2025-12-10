@@ -1,18 +1,16 @@
 """
-BlueStar Institutional v3.1 (Enhanced Logic)
-Professional Grade Algorithm with Smart Money Concepts
+BlueStar Institutional v3.2 (Visual Artifact + Smart Logic + State Fix)
+Professional Grade Algorithm with Smart Money Concepts & Persistent State
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pytz
 from datetime import datetime
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Tuple
+from dataclasses import dataclass
+from typing import List, Optional
 from enum import Enum
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
 # OANDA API
@@ -26,61 +24,56 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 
-# ==================== CONFIGURATION & STYLE ====================
-st.set_page_config(page_title="BlueStar Institutional v3.1", layout="wide", initial_sidebar_state="collapsed")
+# ==================== CONFIGURATION & VISUAL STYLE (ARTEFACT RESTORED) ====================
+st.set_page_config(page_title="BlueStar Institutional v3.2", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
-    .block-container {padding-top: 1rem !important;}
     
-    /* STYLE CARTE SIGNAL */
-    .stMetric {background: rgba(16, 20, 45, 0.8); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
-    .stMetric label {color: #a0a0c0 !important; font-size: 0.8rem !important;}
+    /* STYLE METRIQUE & BADGES (Le look "Artefact") */
+    .stMetric {background: rgba(255,255,255,0.05); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1);}
+    .stMetric label {color: #a0a0c0 !important; font-size: 0.75rem !important;}
     .stMetric [data-testid="stMetricValue"] {color: #00ff88 !important; font-size: 1.4rem !important; font-weight: 700; text-shadow: 0 0 10px rgba(0,255,136,0.3);}
     
-    /* BADGES */
-    .institutional-badge {background: linear-gradient(90deg, #ffd700, #ffaa00); color: black; padding: 4px 12px; border-radius: 4px; font-weight: 800; font-size: 0.7rem; box-shadow: 0 2px 5px rgba(255, 215, 0, 0.3); letter-spacing: 1px;}
-    .smart-money-badge {background: linear-gradient(90deg, #9d00ff, #bd00ff); color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.6rem; font-weight: bold; margin-left: 5px;}
+    /* BADGES HEADER */
+    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem; display: inline-block; box-shadow: 0 0 10px rgba(255, 215, 0, 0.4);}
+    .v3-badge {background: linear-gradient(45deg, #00ff88, #00ccff); color: white; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem; display: inline-block; margin-left: 8px; box-shadow: 0 0 10px rgba(0, 255, 136, 0.4);}
     
-    /* TABLES */
-    [data-testid="stDataFrame"] {border: none !important;}
-    [data-testid="stHeader"] {background-color: rgba(0,0,0,0) !important;}
-    
-    /* ZONES DE TIME FRAME */
+    /* ZONE TIMEFRAME */
     .tf-header {
-        background: rgba(255, 255, 255, 0.03); 
+        background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%); 
         border-left: 4px solid #00ff88;
-        padding: 10px 15px; 
-        border-radius: 0 8px 8px 0; 
-        margin-bottom: 15px;
-        display: flex; justify-content: space-between; align-items: center;
+        padding: 8px 15px; 
+        margin-top: 20px;
+        margin-bottom: 10px;
+        border-radius: 0 10px 10px 0;
     }
-    .tf-title {font-size: 1.1rem; font-weight: bold; color: #fff;}
-    .tf-count {background: rgba(0,255,136,0.2); color: #00ff88; padding: 2px 8px; border-radius: 10px; font-size: 0.8rem;}
-
-    /* CUSTOM SCROLLBAR */
-    ::-webkit-scrollbar {width: 8px; height: 8px;}
-    ::-webkit-scrollbar-track {background: #0a0e27;}
-    ::-webkit-scrollbar-thumb {background: #333; border-radius: 4px;}
-    ::-webkit-scrollbar-thumb:hover {background: #555;}
+    .tf-header h3 {margin: 0; color: #fff; font-size: 1.1rem; letter-spacing: 1px;}
+    
+    /* TABLEAUX */
+    [data-testid="stDataFrame"] {border: none !important;}
+    [data-testid="stHeader"] {background-color: transparent !important;}
+    
+    /* BADGES CONFLUENCE */
+    .conf-tag {background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #ccc; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; margin-right: 4px;}
+    .smc-tag {background: rgba(157, 0, 255, 0.2); border: 1px solid #9d00ff; color: #d08fff; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== CONSTANTES & SETTINGS ====================
+# ==================== CONSTANTES ====================
 PAIRS_DEFAULT = [
     "EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","NZD_USD","USD_CAD",
     "EUR_JPY","GBP_JPY","AUD_JPY","XAU_USD","US30_USD", "NAS100_USD"
 ]
-
 GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4", "D1": "D"}
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
 
-# ==================== CLASSES DE DONNÉES ====================
+# ==================== LOGIQUE MÉTIER (SMART MONEY v3.1) ====================
 class SignalQuality(Enum):
-    INSTITUTIONAL = "💎 INST"  # Trade parfait
-    PREMIUM = "✨ PREM"       # Très bon trade
-    STANDARD = "⚡ STD"       # Trade standard
+    INSTITUTIONAL = "DIAMOND"
+    PREMIUM = "GOLD"
+    STANDARD = "SILVER"
 
 @dataclass
 class TradingParams:
@@ -88,8 +81,8 @@ class TradingParams:
     atr_tp_multiplier: float
     min_rr: float
     min_score: int
-    use_ema_filter: bool  # Force trend direction
-    detect_fvg: bool      # Cherche les Fair Value Gaps
+    use_ema_filter: bool
+    detect_fvg: bool
 
 @dataclass
 class Signal:
@@ -102,15 +95,13 @@ class Signal:
     take_profit: float
     score: int
     quality: SignalQuality
-    confluences: List[str]  # Liste des confirmations (ex: "EMA200", "FVG", "Cloud")
+    confluences: List[str]
     rr_ratio: float
-    adx: float
 
-# ==================== API & OANDA ====================
+# --- OANDA API ---
 @st.cache_resource
 def get_oanda_client():
     try:
-        # Assurez-vous d'avoir .streamlit/secrets.toml avec OANDA_ACCESS_TOKEN
         return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
     except:
         return None
@@ -124,250 +115,179 @@ def get_candles(pair: str, tf: str, count: int = 250) -> pd.DataFrame:
         params = {"granularity": gran, "count": count, "price": "M"}
         r = InstrumentsCandles(instrument=pair, params=params)
         client.request(r)
-        data = []
-        for c in r.response['candles']:
-            if c['complete']:
-                data.append({
-                    'time': c['time'],
-                    'open': float(c['mid']['o']),
-                    'high': float(c['mid']['h']),
-                    'low': float(c['mid']['l']),
-                    'close': float(c['mid']['c'])
-                })
+        data = [{
+            'time': c['time'],
+            'open': float(c['mid']['o']),
+            'high': float(c['mid']['h']),
+            'low': float(c['mid']['l']),
+            'close': float(c['mid']['c'])
+        } for c in r.response['candles'] if c['complete']]
         df = pd.DataFrame(data)
         if not df.empty:
-            df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None) # UTC Naive
+            df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
         return df
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
-# ==================== COEUR ALGORITHMIQUE (NOUVEAU) ====================
-def calculate_indicators_v3(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcul optimisé vectoriel pour performance maximale"""
-    if df.empty: return df
-    
-    # 1. EMA 200 (Trend Filter)
-    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    
-    # 2. HMA (Hull Moving Average) - Trigger rapide
-    def hma(series, length=20):
-        wma_half = series.rolling(length//2).apply(lambda x: np.dot(x, np.arange(1, length//2+1)) / np.arange(1, length//2+1).sum(), raw=True)
-        wma_full = series.rolling(length).apply(lambda x: np.dot(x, np.arange(1, length+1)) / np.arange(1, length+1).sum(), raw=True)
-        diff = 2 * wma_half - wma_full
-        sqrt_len = int(np.sqrt(length))
-        return diff.rolling(sqrt_len).apply(lambda x: np.dot(x, np.arange(1, sqrt_len+1)) / np.arange(1, sqrt_len+1).sum(), raw=True)
-
-    df['hma'] = hma(df['close'], 20)
-    
-    # 3. Ichimoku Cloud (Filter) - Juste le Kumo pour la direction
-    high9 = df['high'].rolling(9).max()
-    low9 = df['low'].rolling(9).min()
-    tenkan = (high9 + low9) / 2
-    
-    high26 = df['high'].rolling(26).max()
-    low26 = df['low'].rolling(26).min()
-    kijun = (high26 + low26) / 2
-    
-    df['ssa'] = ((tenkan + kijun) / 2).shift(26)
-    df['ssb'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-    
-    # 4. ATR & ADX (Volatilité & Force)
-    df['tr'] = np.maximum(df['high'] - df['low'], 
-               np.maximum(abs(df['high'] - df['close'].shift(1)), 
-                          abs(df['low'] - df['close'].shift(1))))
-    df['atr'] = df['tr'].rolling(14).mean()
-    
-    # ADX simplifié
-    up = df['high'].diff()
-    down = -df['low'].diff()
-    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-    
-    # Utilisation d'EWM pour lisser comme TradingView
-    df['adx'] = pd.Series(plus_dm).ewm(alpha=1/14).mean() # Approx rapide pour la démo
-    
-    # 5. Stochastic RSI (Timing précis)
-    rsi_period = 14
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    min_rsi = df['rsi'].rolling(14).min()
-    max_rsi = df['rsi'].rolling(14).max()
-    df['stoch_k'] = ((df['rsi'] - min_rsi) / (max_rsi - min_rsi)) * 100
-    
-    # 6. Fair Value Gap (Smart Money)
-    # Bullish FVG: Low of candle 0 > High of candle 2
-    # Bearish FVG: High of candle 0 < Low of candle 2
-    df['fvg_bull'] = (df['low'] > df['high'].shift(2)) & (df['close'] > df['open']) & (df['close'].shift(1) > df['open'].shift(1))
-    df['fvg_bear'] = (df['high'] < df['low'].shift(2)) & (df['close'] < df['open']) & (df['close'].shift(1) < df['open'].shift(1))
-
-    return df
-
+# --- INDICATEURS & ANALYSE ---
 def analyze_market_structure(df: pd.DataFrame, pair: str, tf: str, params: TradingParams) -> Optional[Signal]:
     if len(df) < 200: return None
     
+    # Indicateurs Vectorisés
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    
+    # HMA
+    def hma(series, length=20):
+        wma_half = series.rolling(length//2).apply(lambda x: np.dot(x, np.arange(1, length//2+1)) / np.arange(1, length//2+1).sum(), raw=True)
+        wma_full = series.rolling(length).apply(lambda x: np.dot(x, np.arange(1, length+1)) / np.arange(1, length+1).sum(), raw=True)
+        return (2 * wma_half - wma_full).rolling(int(np.sqrt(length))).apply(lambda x: np.dot(x, np.arange(1, int(np.sqrt(length))+1)) / np.arange(1, int(np.sqrt(length))+1).sum(), raw=True)
+
+    df['hma'] = hma(df['close'], 20)
+    
+    # Ichimoku Cloud Check
+    high9, low9 = df['high'].rolling(9).max(), df['low'].rolling(9).min()
+    tenkan = (high9 + low9) / 2
+    high26, low26 = df['high'].rolling(26).max(), df['low'].rolling(26).min()
+    kijun = (high26 + low26) / 2
+    df['ssa'] = ((tenkan + kijun) / 2).shift(26)
+    df['ssb'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+    
+    # ATR & FVG
+    df['atr'] = (df['high'] - df['low']).rolling(14).mean()
+    df['fvg_bull'] = (df['low'] > df['high'].shift(2)) & (df['close'] > df['open'])
+    df['fvg_bear'] = (df['high'] < df['low'].shift(2)) & (df['close'] < df['open'])
+
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # --- 1. FILTRE TENDANCE MAJEURE (EMA 200) ---
-    trend_bullish = curr['close'] > curr['ema200']
-    trend_bearish = curr['close'] < curr['ema200']
-    
-    if params.use_ema_filter:
-        if not (trend_bullish or trend_bearish): return None # Marché plat sur l'EMA
+    # Filtres
+    trend_bull = curr['close'] > curr['ema200']
+    trend_bear = curr['close'] < curr['ema200']
+    if params.use_ema_filter and not (trend_bull or trend_bear): return None
 
-    # --- 2. TRIGGER (HMA + STOCH RSI) ---
-    # HMA Change de couleur ET StochRSI confirme
-    hma_buy = curr['hma'] > curr['hma'] - (prev['hma'] - df.iloc[-3]['hma']) # HMA tourne vers le haut
-    hma_sell = curr['hma'] < curr['hma'] - (prev['hma'] - df.iloc[-3]['hma'])
+    # Trigger HMA (Changement de pente)
+    hma_up = curr['hma'] > prev['hma'] and prev['hma'] < df.iloc[-3]['hma']
+    hma_down = curr['hma'] < prev['hma'] and prev['hma'] > df.iloc[-3]['hma']
     
-    # Validation HMA pure (pente)
-    is_hma_green = curr['hma'] > prev['hma']
-    is_hma_red = curr['hma'] < prev['hma']
-    
-    # --- 3. CONFLUENCES CHECKLIST ---
+    # Simple validation de direction courante si pas de flip exact
+    is_green = curr['hma'] > prev['hma']
+    is_red = curr['hma'] < prev['hma']
+
+    action = None
     score = 0
     confluences = []
-    
-    # Action Determination
-    action = None
-    
-    # Logique d'achat
-    if is_hma_green and trend_bullish:
-        # Check Cloud
-        above_cloud = curr['close'] > max(curr['ssa'], curr['ssb'])
-        if above_cloud: 
-            score += 20
-            confluences.append("☁️ Cloud")
-        
-        # Check FVG (Récent sur les 3 dernières bougies)
-        has_fvg = any(df['fvg_bull'].iloc[-3:])
-        if has_fvg: 
-            score += 25
-            confluences.append("💰 FVG")
-            
-        # Check Momentum (StochRSI sort de la zone de survente)
-        stoch_ok = prev['stoch_k'] < 80 # Pas en surachat extrême au départ
-        if stoch_ok: score += 10
-        
-        # Check Trend Strength
-        if curr['close'] > curr['ema200']: 
-            score += 25
-            confluences.append("📈 Trend")
-            
+
+    if is_green and trend_bull:
         action = "BUY"
-
-    # Logique de vente
-    elif is_hma_red and trend_bearish:
-        # Check Cloud
-        below_cloud = curr['close'] < min(curr['ssa'], curr['ssb'])
-        if below_cloud: 
-            score += 20
-            confluences.append("☁️ Cloud")
+        if curr['close'] > max(curr['ssa'], curr['ssb']):
+            score += 20; confluences.append("Cloud")
+        if any(df['fvg_bull'].iloc[-3:]):
+            score += 30; confluences.append("FVG")
+        if curr['close'] > curr['ema200']:
+            score += 25; confluences.append("Trend")
             
-        # Check FVG
-        has_fvg = any(df['fvg_bear'].iloc[-3:])
-        if has_fvg: 
-            score += 25
-            confluences.append("💰 FVG")
-            
-        # Check Momentum
-        stoch_ok = prev['stoch_k'] > 20
-        if stoch_ok: score += 10
-        
-        # Check Trend Strength
-        if curr['close'] < curr['ema200']: 
-            score += 25
-            confluences.append("📉 Trend")
-            
+    elif is_red and trend_bear:
         action = "SELL"
-        
-    else:
-        return None
+        if curr['close'] < min(curr['ssa'], curr['ssb']):
+            score += 20; confluences.append("Cloud")
+        if any(df['fvg_bear'].iloc[-3:]):
+            score += 30; confluences.append("FVG")
+        if curr['close'] < curr['ema200']:
+            score += 25; confluences.append("Trend")
 
-    # --- SCORE FINAL & FILTRAGE ---
-    if params.detect_fvg and "💰 FVG" not in confluences and score < 80:
-        return None # Si on veut être strict sur la Smart Money
-        
+    if not action: return None
+    
+    score += 10 # Base score
+    if params.detect_fvg and "FVG" not in confluences: return None
     if score < params.min_score: return None
-    
-    # Calcul SL/TP
+
+    # Risk Mgmt
     atr = curr['atr']
-    if action == "BUY":
-        sl = curr['close'] - (atr * params.atr_sl_multiplier)
-        tp = curr['close'] + (atr * params.atr_tp_multiplier)
-    else:
-        sl = curr['close'] + (atr * params.atr_sl_multiplier)
-        tp = curr['close'] - (atr * params.atr_tp_multiplier)
-        
+    sl = curr['close'] - (atr * params.atr_sl_multiplier) if action == "BUY" else curr['close'] + (atr * params.atr_sl_multiplier)
+    tp = curr['close'] + (atr * params.atr_tp_multiplier) if action == "BUY" else curr['close'] - (atr * params.atr_tp_multiplier)
     rr = abs(tp - curr['close']) / abs(curr['close'] - sl)
-    if rr < params.min_rr: return None
-    
-    quality = SignalQuality.STANDARD
-    if score >= 85: quality = SignalQuality.INSTITUTIONAL
-    elif score >= 65: quality = SignalQuality.PREMIUM
-    
-    # UTC -> Tunis time for display
-    local_time = pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ)
+
+    qual = SignalQuality.INSTITUTIONAL if score >= 80 else SignalQuality.PREMIUM
 
     return Signal(
-        timestamp=local_time,
+        timestamp=pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ),
         pair=pair, timeframe=tf, action=action,
         entry_price=curr['close'], stop_loss=sl, take_profit=tp,
-        score=score, quality=quality, confluences=confluences,
-        rr_ratio=rr, adx=curr['adx'] if not pd.isna(curr['adx']) else 0
+        score=score, quality=qual, confluences=confluences, rr_ratio=rr
     )
 
-# ==================== ORCHESTRATION DU SCAN ====================
-def scan_market(pairs, tfs, params):
+def scan_market_thread(pairs, tfs, params):
     signals = []
-    
-    def worker(p, tf):
-        df = get_candles(p, tf)
-        if df.empty: return None
-        df = calculate_indicators_v3(df)
-        return analyze_market_structure(df, p, tf, params)
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(worker, p, tf): (p, tf) for p in pairs for tf in tfs}
-        for future in as_completed(futures):
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = []
+        for p in pairs:
+            for tf in tfs:
+                futures.append(executor.submit(lambda p, t: (get_candles(p,t), p, t), p, tf))
+        
+        for f in as_completed(futures):
             try:
-                res = future.result()
-                if res: signals.append(res)
+                df, p, tf = f.result()
+                if not df.empty:
+                    sig = analyze_market_structure(df, p, tf, params)
+                    if sig: signals.append(sig)
             except: pass
-            
     return sorted(signals, key=lambda x: x.score, reverse=True)
 
-# ==================== GÉNÉRATION PDF ====================
-def create_pdf_report(signals):
+# ==================== PDF GENERATOR (LOOK ARTEFACT) ====================
+def generate_pdf(signals):
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, bottomMargin=10*mm)
     elements = []
     styles = getSampleStyleSheet()
     
-    title = Paragraph("<b>Rapport BlueStar Institutional v3.1</b>", styles['Title'])
-    elements.append(title)
+    # Titre stylisé
+    elements.append(Paragraph("<font size=24 color='#00ff88'><b>BlueStar Institutional Report</b></font>", styles["Title"]))
+    elements.append(Spacer(1, 5*mm))
+    elements.append(Paragraph(f"<font size=10 color='#a0a0c0'>Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}</font>", styles["Normal"]))
     elements.append(Spacer(1, 10*mm))
     
-    data = [['Heure', 'Paire', 'TF', 'Action', 'Prix', 'Score', 'Confluences']]
+    # Données
+    data = [["TIME", "PAIR", "TF", "ACTION", "ENTRY", "SL", "TP", "SCORE", "CONFLUENCES"]]
+    
     for s in signals:
-        conf_str = ", ".join(s.confluences)
-        color = colors.green if s.action == "BUY" else colors.red
+        act_color = "#00ff88" if s.action == "BUY" else "#ff6b6b"
+        action_txt = f"<font color='{act_color}'><b>{s.action}</b></font>"
+        
+        # Confluences jolies
+        conf_txt = ""
+        for c in s.confluences:
+            bg = "#9d00ff" if c == "FVG" else "#333333"
+            conf_txt += f"[{c}] "
+
         data.append([
-            s.timestamp.strftime('%H:%M'),
-            s.pair, s.timeframe, s.action,
-            f"{s.entry_price:.5f}", str(s.score), conf_str
+            s.timestamp.strftime("%H:%M"),
+            s.pair.replace("_", "/"),
+            s.timeframe,
+            Paragraph(action_txt, styles["Normal"]),
+            f"{s.entry_price:.4f}",
+            f"{s.stop_loss:.4f}",
+            f"{s.take_profit:.4f}",
+            f"{s.score}",
+            Paragraph(f"<font size=8>{conf_txt}</font>", styles["Normal"])
         ])
         
-    table = Table(data, colWidths=[20*mm, 30*mm, 15*mm, 20*mm, 30*mm, 15*mm, 120*mm])
+    # Style Tableau "Cyber"
+    table = Table(data, colWidths=[20*mm, 25*mm, 15*mm, 20*mm, 25*mm, 25*mm, 25*mm, 15*mm, 80*mm])
     table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0f1429")), # Header Dark Blue
+        ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#00ff88")), # Header Neon Green
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 10),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        
+        # Lignes alternées sombres
+        ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#1a1f3a")),
+        ('TEXTCOLOR', (0,1), (-1,-1), colors.white),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333333")),
+        
+        # Bordure externe
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#00ff88")),
     ]))
     
     elements.append(table)
@@ -375,91 +295,111 @@ def create_pdf_report(signals):
     buffer.seek(0)
     return buffer
 
-# ==================== INTERFACE UTILISATEUR ====================
+# ==================== MAIN UI ====================
 def main():
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.markdown("# 🔵 BlueStar Institutional v3.1")
-        st.markdown("*Algorithme de Confluence Multi-Timeframe & Smart Money*")
-    with col2:
-        if st.button("🔄 Rafraîchir Données"):
-            st.cache_data.clear()
+    # En-tête "Artefact"
+    col_logo, col_refresh = st.columns([3, 1])
+    with col_logo:
+        st.markdown("""
+            <h1 style='margin-bottom:0; padding-bottom:0'>BlueStar Institutional</h1>
+            <div>
+                <span class='institutional-badge'>INSTITUTIONAL</span>
+                <span class='v3-badge'>v3.2</span>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col_refresh:
+        st.write("") # Spacer
+        if st.button("🧹 Clear Cache"):
+            st.session_state.scan_results = None
             st.rerun()
 
-    # Sidebar Config
-    with st.expander("🛠️ Configuration Avancée & Stratégie", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        sl_mult = c1.slider("Stop Loss (x ATR)", 1.0, 3.0, 1.5, 0.1)
-        tp_mult = c2.slider("Take Profit (x ATR)", 1.0, 5.0, 3.0, 0.1)
-        min_score = c3.slider("Score Minimum (Qualité)", 50, 90, 65, 5)
-        
-        c4, c5 = st.columns(2)
-        use_ema = c4.checkbox("Filtre Tendance (EMA 200) - Recommandé", True)
-        detect_fvg = c5.checkbox("Focus Smart Money (FVG Obligatoire)", False)
+    # --- ÉTAT DE SESSION (LE FIX POUR LE PDF) ---
+    if 'scan_results' not in st.session_state:
+        st.session_state.scan_results = None
 
-    # Bouton d'action
-    run_scan = st.button("🚀 LANCER LE SCAN DE MARCHÉ", type="primary", use_container_width=True)
+    # --- CONFIG ---
+    with st.expander("⚙️ PARAMÈTRES ALGORITHME", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        sl_mult = c1.number_input("SL (xATR)", 1.0, 3.0, 1.5)
+        tp_mult = c2.number_input("TP (xATR)", 1.0, 6.0, 3.0)
+        min_score = c3.slider("Min Score", 50, 90, 65)
+        use_fvg = c4.checkbox("FVG Only", False)
 
-    if run_scan:
+    # --- BOUTON DE SCAN ---
+    if st.button("🚀 SCANNER LE MARCHÉ", type="primary", use_container_width=True):
         if not client:
-            st.error("⚠️ Clé API OANDA manquante dans .streamlit/secrets.toml")
-            st.stop()
-            
-        with st.spinner("Analyse des structures institutionnelles en cours..."):
-            params = TradingParams(sl_mult, tp_mult, 1.5, min_score, use_ema, detect_fvg)
-            signals = scan_market(PAIRS_DEFAULT, ["M15", "H1", "H4", "D1"], params)
-            
-            if not signals:
-                st.warning("Aucune opportunité haute probabilité détectée pour le moment. Le marché est peut-être indécis.")
-            else:
-                # Top Metrics
-                best_signal = signals[0]
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Opportunités", len(signals))
-                m2.metric("Meilleure Paire", best_signal.pair.replace("_", "/"))
-                m3.metric("Direction", best_signal.action, delta=str(best_signal.score), delta_color="normal")
-                m4.metric("Qualité", best_signal.quality.value)
-                
-                st.markdown("---")
-                
-                # Affichage par Timeframe
-                for tf in ["M15", "H1", "H4", "D1"]:
-                    tf_sigs = [s for s in signals if s.timeframe == tf]
-                    if not tf_sigs: continue
-                    
-                    st.markdown(f"<div class='tf-header'><span class='tf-title'>{tf} Timeframe</span><span class='tf-count'>{len(tf_sigs)} Signaux</span></div>", unsafe_allow_html=True)
-                    
-                    for s in tf_sigs:
-                        # Carte Signal
-                        with st.container():
-                            cc1, cc2, cc3, cc4, cc5, cc6 = st.columns([1, 1, 1, 2, 1, 1])
-                            
-                            cc1.markdown(f"**{s.pair.replace('_', '/')}**")
-                            
-                            color = "#00ff88" if s.action == "BUY" else "#ff4b4b"
-                            cc2.markdown(f"<span style='color:{color}; font-weight:bold; font-size:1.1rem'>{s.action}</span>", unsafe_allow_html=True)
-                            
-                            cc3.markdown(f"Entry: `{s.entry_price:.5f}`")
-                            
-                            # Confluences visuelles
-                            conf_html = ""
-                            for conf in s.confluences:
-                                conf_html += f"<span class='institutional-badge' style='margin-right:4px;'>{conf}</span>"
-                            if "💰 FVG" in s.confluences:
-                                conf_html += "<span class='smart-money-badge'>SMC</span>"
-                            cc4.markdown(conf_html, unsafe_allow_html=True)
-                            
-                            cc5.markdown(f"SL: `{s.stop_loss:.5f}`<br>TP: `{s.take_profit:.5f}`", unsafe_allow_html=True)
-                            
-                            score_color = "#00ff88" if s.score > 80 else "#ffcc00"
-                            cc6.markdown(f"<span style='font-size:1.5rem; font-weight:bold; color:{score_color}'>{s.score}%</span>", unsafe_allow_html=True)
-                            
-                            st.markdown("<hr style='margin: 5px 0; border-color: rgba(255,255,255,0.05);'>", unsafe_allow_html=True)
+            st.error("API Token Manquant")
+        else:
+            with st.spinner("Analyse Institutionnelle en cours..."):
+                params = TradingParams(sl_mult, tp_mult, 1.5, min_score, True, use_fvg)
+                results = scan_market_thread(PAIRS_DEFAULT, ["M15", "H1", "H4", "D1"], params)
+                # SAUVEGARDE DANS LE STATE
+                st.session_state.scan_results = results
+                # Pas de rerun forcé, Streamlit va relire le script et trouver le state rempli en bas
 
-                # Export PDF
-                st.markdown("### 📤 Export")
-                pdf_data = create_pdf_report(signals)
-                st.download_button("Télécharger Rapport PDF", pdf_data, "BlueStar_Report.pdf", "application/pdf", use_container_width=True)
+    # --- AFFICHAGE DES RÉSULTATS (Depuis le State) ---
+    if st.session_state.scan_results is not None:
+        signals = st.session_state.scan_results
+        
+        st.markdown("---")
+        
+        # Métriques Globales
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Opportunités", len(signals))
+        best = signals[0] if signals else None
+        if best:
+            k2.metric("Meilleur Signal", best.pair.replace("_","/"))
+            k3.metric("Score Max", f"{best.score}/100")
+            k4.metric("Qualité", best.quality.value)
+
+        # --- BOUTON PDF (HORS DU BLOC SCAN POUR NE PAS RELANCER) ---
+        st.markdown("###")
+        c_pdf, c_csv = st.columns(2)
+        with c_pdf:
+            if signals:
+                pdf_file = generate_pdf(signals)
+                st.download_button(
+                    label="📄 TÉLÉCHARGER RAPPORT PDF",
+                    data=pdf_file,
+                    file_name=f"BlueStar_Report_{datetime.now().strftime('%H%M')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+        # --- VISUEL TABLEAU PAR TF ---
+        if not signals:
+            st.info("Aucun signal détecté.")
+        else:
+            for tf in ["M15", "H1", "H4", "D1"]:
+                tf_sigs = [s for s in signals if s.timeframe == tf]
+                if tf_sigs:
+                    st.markdown(f"<div class='tf-header'><h3>{tf} TIMEFRAME</h3></div>", unsafe_allow_html=True)
+                    
+                    # Préparation données pour affichage propre
+                    disp_data = []
+                    for s in tf_sigs:
+                        icon = "🟢" if s.action == "BUY" else "🔴"
+                        conf_str = " ".join([f"[{c}]" for c in s.confluences])
+                        disp_data.append({
+                            "Heure": s.timestamp.strftime("%H:%M"),
+                            "Paire": s.pair.replace("_", "/"),
+                            "Signal": f"{icon} {s.action}",
+                            "Prix": f"{s.entry_price:.5f}",
+                            "SL": f"{s.stop_loss:.5f}",
+                            "TP": f"{s.take_profit:.5f}",
+                            "Score": s.score,
+                            "Confluences": conf_str
+                        })
+                    
+                    st.dataframe(
+                        pd.DataFrame(disp_data), 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "Score": st.column_config.ProgressColumn("Force", min_value=0, max_value=100, format="%d"),
+                        }
+                    )
 
 if __name__ == "__main__":
     main()
