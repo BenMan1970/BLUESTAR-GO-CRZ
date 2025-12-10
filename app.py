@@ -1,5 +1,6 @@
 """
-BlueStar Institutional v3.4 (Nuanced Scoring & Organized PDF)
+BlueStar Institutional v3.5 (Smart Formatting & Nuanced Scoring)
+Corrects Decimal Places for JPY/Indices/Gold
 """
 import streamlit as st
 import pandas as pd
@@ -8,7 +9,6 @@ import pytz
 from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Optional
-from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
@@ -24,18 +24,14 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIG ====================
-st.set_page_config(page_title="BlueStar v3.4", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar v3.5", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
-    
-    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem; box-shadow: 0 0 10px rgba(255, 215, 0, 0.4);}
-    .tf-badge {background: #00ff88; color: #000; padding: 2px 8px; border-radius: 4px; font-weight: bold;}
-    
+    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem;}
     [data-testid="stDataFrame"] {border: none !important;}
     [data-testid="stHeader"] {background-color: transparent !important;}
-    
     .tf-header {
         background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%); 
         border-left: 4px solid #00ff88;
@@ -68,6 +64,18 @@ class Signal:
     take_profit: float
     score: int
     confluences: List[str]
+
+# ==================== FORMATTER INTELLIGENT ====================
+def smart_format(pair: str, price: float) -> str:
+    """Ajuste les décimales selon l'actif"""
+    if "JPY" in pair:
+        return f"{price:.3f}" # USDJPY -> 145.231
+    elif "US30" in pair or "NAS100" in pair or "SPX" in pair:
+        return f"{price:.1f}" # US30 -> 34500.5
+    elif "XAU" in pair:
+        return f"{price:.2f}" # GOLD -> 2300.50
+    else:
+        return f"{price:.5f}" # EURUSD -> 1.05234
 
 # ==================== LOGIC ====================
 @st.cache_resource
@@ -109,19 +117,17 @@ def analyze_intraday(df: pd.DataFrame, pair: str, tf: str, params: TradingParams
 
     # Cloud proxy
     h52 = df['high'].rolling(52).max(); l52 = df['low'].rolling(52).min()
-    df['ssb'] = ((h52 + l52) / 2).shift(26) # Kumo B projected back
+    df['ssb'] = ((h52 + l52) / 2).shift(26)
 
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # Logic
     action = None
     bull_trend = curr['close'] > curr['ema200']
     bear_trend = curr['close'] < curr['ema200']
     hma_green = curr['hma'] > prev['hma']
     hma_red = curr['hma'] < prev['hma']
 
-    # FVG
     fvg_bull = any((df['low'] > df['high'].shift(2)).iloc[-5:])
     fvg_bear = any((df['high'] < df['low'].shift(2)).iloc[-5:])
 
@@ -141,30 +147,25 @@ def analyze_intraday(df: pd.DataFrame, pair: str, tf: str, params: TradingParams
 
     if not action: return None
 
-    # --- NOUVEAU SCORING NUANCÉ ---
-    # Base starts at 60 (Passable)
+    # Scoring v3.5
     score = 60
-    
-    # 1. Structure Quality (+10 per major confluence)
     if "Cloud" in confluences: score += 10
     if "FVG" in confluences: score += 10
     if "Trend" in confluences: score += 10
     
-    # 2. RSI Health Check (Momentum)
     rsi = curr['rsi']
     if action == "BUY":
-        if 40 <= rsi <= 65: score += 5  # Perfect buy zone
-        elif rsi > 70: score -= 10      # Overbought danger
-    else: # SELL
-        if 35 <= rsi <= 60: score += 5  # Perfect sell zone
-        elif rsi < 30: score -= 10      # Oversold danger
+        if 40 <= rsi <= 65: score += 5
+        elif rsi > 70: score -= 10
+    else:
+        if 35 <= rsi <= 60: score += 5
+        elif rsi < 30: score -= 10
         
-    # 3. Volatility Check (Body size relative to ATR)
     atr = (curr['high'] - curr['low'])
     avg_atr = df['high'].diff().abs().rolling(14).mean().iloc[-1]
-    if atr > avg_atr * 1.2: score += 4 # Strong impulsive candle
+    if atr > avg_atr * 1.2: score += 4
     
-    score = max(50, min(99, int(score))) # Cap between 50 and 99
+    score = max(50, min(99, int(score)))
 
     if params.use_fvg and "FVG" not in confluences: return None
     if score < params.min_score: return None
@@ -193,25 +194,20 @@ def scan_thread(pairs, tfs, params):
             except: pass
     return sorted(signals, key=lambda x: x.score, reverse=True)
 
-# ==================== ORGANIZED PDF ====================
+# ==================== PDF ====================
 def generate_pdf(signals):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm)
     elements = []
     styles = getSampleStyleSheet()
     
-    # Title
     elements.append(Paragraph("<font size=20 color='#00ff88'><b>BlueStar Intraday Report</b></font>", styles["Title"]))
-    elements.append(Spacer(1, 5*mm))
-    elements.append(Paragraph(f"Scan Time: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["Normal"]))
     elements.append(Spacer(1, 10*mm))
     
-    # Loop through Timeframes to organize PDF
     for tf in ["M15", "H1", "H4"]:
         tf_sigs = [s for s in signals if s.timeframe == tf]
         if not tf_sigs: continue
         
-        # Header for Section
         elements.append(Paragraph(f"<font size=14 color='white' backcolor='#00ff88'>&nbsp;<b>{tf} STRUCTURE</b>&nbsp;</font>", styles["Normal"]))
         elements.append(Spacer(1, 3*mm))
         
@@ -219,22 +215,26 @@ def generate_pdf(signals):
         for s in tf_sigs:
             col = "#00ff88" if s.action == "BUY" else "#ff6b6b"
             conf_str = ", ".join(s.confluences)
+            
+            # Application du Smart Formatting ici
+            p_str = smart_format(s.pair, s.entry_price)
+            
             data.append([
                 s.timestamp.strftime("%H:%M"), s.pair.replace("_","/"),
                 Paragraph(f"<font color='{col}'><b>{s.action}</b></font>", styles["Normal"]),
-                f"{s.entry_price:.5f}", f"{s.score}", 
+                p_str, f"{s.score}", 
                 Paragraph(f"<font size=9>{conf_str}</font>", styles["Normal"])
             ])
             
         t = Table(data, colWidths=[25*mm, 35*mm, 25*mm, 35*mm, 20*mm, 100*mm])
         t.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")), # Header row
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
             ('TEXTCOLOR', (0,0), (-1,0), colors.white),
             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#555")),
-            ('ROWBACKGROUNDS', (1,0), (-1,-1), [colors.white, colors.HexColor("#f0f0f0")]) # Striped rows
+            ('ROWBACKGROUNDS', (1,0), (-1,-1), [colors.white, colors.HexColor("#f0f0f0")])
         ]))
         elements.append(t)
         elements.append(Spacer(1, 10*mm))
@@ -243,10 +243,10 @@ def generate_pdf(signals):
     buffer.seek(0)
     return buffer
 
-# ==================== MAIN ====================
+# ==================== UI ====================
 def main():
     c1, c2 = st.columns([3,1])
-    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v3.4</span>", unsafe_allow_html=True)
+    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v3.5</span>", unsafe_allow_html=True)
     with c2: 
         if st.button("Clear Cache"): 
             st.session_state.scan_results = None
@@ -270,12 +270,10 @@ def main():
     if st.session_state.scan_results:
         signals = st.session_state.scan_results
         
-        # PDF Button
         st.markdown("###")
         if signals:
             st.download_button("📥 DOWNLOAD ORGANIZED PDF", generate_pdf(signals), f"BlueStar_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
         
-        # Display Grouped
         if not signals: st.info("No Signals")
         else:
             for tf in TIMEFRAMES:
@@ -285,14 +283,21 @@ def main():
                     data = []
                     for s in tf_sigs:
                         icon = "🟢" if s.action == "BUY" else "🔴"
+                        
+                        # Application du Smart Formatting ici pour le Tableau
+                        price_fmt = smart_format(s.pair, s.entry_price)
+                        sl_fmt = smart_format(s.pair, s.stop_loss)
+                        tp_fmt = smart_format(s.pair, s.take_profit)
+                        
                         data.append({
                             "Time": s.timestamp.strftime("%H:%M"), "Pair": s.pair.replace("_","/"),
-                            "Signal": f"{icon} {s.action}", "Price": f"{s.entry_price:.5f}",
-                            "SL": f"{s.stop_loss:.5f}", "TP": f"{s.take_profit:.5f}",
+                            "Signal": f"{icon} {s.action}", 
+                            "Price": price_fmt,
+                            "SL": sl_fmt, 
+                            "TP": tp_fmt,
                             "Score": s.score, "Confluences": ", ".join(s.confluences)
                         })
                     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
-   
