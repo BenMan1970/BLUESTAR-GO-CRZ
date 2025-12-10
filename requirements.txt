@@ -1,5 +1,5 @@
 streamlit
-oandapy-v20
+oandapyV20
 reportlab
 pytz
 numpy<2.0.0
