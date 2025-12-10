@@ -1,6 +1,6 @@
 streamlit
-pandas
-numpy<2.0.0
 oandapy-v20
 reportlab
 pytz
+numpy<2.0.0
+pandas==2.0.3
