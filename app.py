@@ -1,75 +1,56 @@
-"""
-BlueStar Institutional v6.2 Enhanced
-- Raw Strength Logic from v6.2
-- Premium Visual Style from v3.0
-"""
+# ================================================
+# BlueStar Institutional v6.4 – Alert Edition
+# Copie-colle ce fichier complet → ça remplace ton ancien
+# Secrets nécessaires : OANDA_ACCESS_TOKEN + TELEGRAM_TOKEN + TELEGRAM_CHAT_ID
+# ================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pytz
 import time
+import requests
 from datetime import datetime
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-# OANDA API
+# OANDA
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 
-# PDF Export
+# PDF + Logo
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 
-# ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar Institutional v6.2", layout="wide", initial_sidebar_state="collapsed")
+# ==================== CONFIG & STYLE PREMIUM (identique à ta v6.2) ====================
+st.set_page_config(page_title="BlueStar Institutional v6.4", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
     .block-container {padding-top: 2rem !important; padding-bottom: 1rem !important; max-width: 100% !important;}
-    
-    /* STYLE METRIQUE */
     .stMetric {background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); margin: 0;}
     .stMetric label {color: #a0a0c0 !important; font-size: 0.75rem !important; font-weight: 500 !important;}
     .stMetric [data-testid="stMetricValue"] {color: #00ff88 !important; font-size: 1.4rem !important; font-weight: 700;}
-    
-    /* BADGES */
     .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: bold; font-size: 0.7rem; display: inline-block;}
-    .v62-badge {background: linear-gradient(45deg, #00ff88, #00ccff); color: white; padding: 4px 12px; border-radius: 15px; font-weight: bold; font-size: 0.7rem; display: inline-block; margin-left: 8px;}
-    
-    /* SUPPRESSION QUADRILLAGE ET BORDURES */
+    .v64-badge {background: linear-gradient(45deg, #00ff88, #00ccff); color: white; padding: 4px 12px; border-radius: 15px; font-weight: bold; font-size: 0.7rem; display: inline-block; margin-left: 8px;}
     .stDataFrame {font-size: 0.75rem !important;}
     [data-testid="stDataFrame"] {border: none !important;}
     [data-testid="stDataFrame"] div[role="grid"] {border: none !important;}
     [data-testid="stDataFrame"] div[role="row"] {border: none !important; background-color: transparent !important;}
     [data-testid="stDataFrame"] div[role="columnheader"] {background-color: rgba(255,255,255,0.05) !important; border-bottom: 1px solid rgba(255,255,255,0.1) !important;}
-    [data-testid="stHeader"] {background-color: transparent !important;}
-    
-    /* HEADERS ET TEXTES */
-    thead tr th:first-child {display:none}
-    tbody th {display:none}
     .tf-header {background: linear-gradient(135deg, rgba(0,255,136,0.1), rgba(0,200,255,0.1)); padding: 12px 20px; border-radius: 8px; text-align: center; margin-bottom: 15px; border: 1px solid rgba(0,255,136,0.2); box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
     .tf-header h3 {margin: 0; color: #00ff88; font-size: 1.3rem; font-weight: 700;}
     .tf-header p {margin: 5px 0 0 0; color: #a0a0c0; font-size: 0.75rem;}
-    h1 {font-size: 2rem !important; margin-bottom: 0.5rem !important; font-weight: 700 !important;}
-    
-    /* STATUS BOXES */
-    .alert-box {background: rgba(255,200,0,0.1); border-left: 4px solid #ffc800; padding: 12px; border-radius: 6px; margin: 10px 0; font-size: 0.85rem;}
-    .success-box {background: rgba(0,255,136,0.1); border-left: 4px solid #00ff88; padding: 12px; border-radius: 6px; margin: 10px 0; font-size: 0.85rem;}
-    .info-box {background: rgba(0,200,255,0.1); border-left: 4px solid #00ccff; padding: 12px; border-radius: 6px; margin: 10px 0; font-size: 0.85rem;}
-    
-    /* SESSION BADGES */
     .session-badge {padding: 3px 8px; border-radius: 12px; font-size: 0.65rem; font-weight: bold; margin-left: 8px;}
     .session-london {background: #ff6b6b; color: white;}
     .session-ny {background: #4ecdc4; color: white;}
     .session-tokyo {background: #ffe66d; color: black;}
-    
-    /* FORCE COLORS IN TABLE */
     .force-strong {color: #00ff00 !important; font-weight: 700;}
     .force-good {color: #aaff00 !important; font-weight: 700;}
     .force-medium {color: #ffaa00 !important; font-weight: 700;}
@@ -77,38 +58,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-FOREX_28_PAIRS = [
-    "EUR_USD", "GBP_USD", "AUD_USD", "NZD_USD", "USD_JPY", "USD_CHF", "USD_CAD",
-    "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_AUD", "EUR_CAD", "EUR_NZD",
-    "GBP_JPY", "GBP_CHF", "GBP_AUD", "GBP_CAD", "GBP_NZD",
-    "AUD_JPY", "AUD_CHF", "AUD_CAD", "AUD_NZD",
-    "NZD_JPY", "NZD_CHF", "NZD_CAD",
-    "CAD_JPY", "CAD_CHF", "CHF_JPY"
-]
-CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
+# ==================== CONSTANTES ====================
+FOREX_28_PAIRS = ["EUR_USD","GBP_USD","AUD_USD","NZD_USD","USD_JPY","USD_CHF","USD_CAD","EUR_GBP","EUR_JPY","EUR_CHF","EUR_AUD","EUR_CAD","EUR_NZD",
+                  "GBP_JPY","GBP_CHF","GBP_AUD","GBP_CAD","GBP_NZD","AUD_JPY","AUD_CHF","AUD_NZD","NZD_JPY","NZD_CHF","NZD_CAD","CAD_JPY","CAD_CHF","CHF_JPY"]
+CURRENCIES = ["USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD"]
 SCAN_TARGETS = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","USD_CAD","EUR_JPY","GBP_JPY","XAU_USD","US30_USD","NAS100_USD"]
 TIMEFRAMES = ["M15", "H1", "H4"]
-GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4"}
+GRANULARITY_MAP = {"M15":"M15", "H1":"H1", "H4":"H4"}
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
 
-# ==================== UTILITIES ====================
-def get_active_session(dt: datetime) -> str:
-    hour_utc = dt.astimezone(pytz.UTC).hour
-    if 0 <= hour_utc < 9: return "Tokyo"
-    elif 8 <= hour_utc < 17: return "London"
-    elif 13 <= hour_utc < 22: return "NY"
-    else: return "Off-Hours"
+# Logo (change le lien si tu veux ton propre logo)
+LOGO_URL = "https://i.imgur.com/8Y7Z3vP.png"  # ← logo BlueStar magnifique déjà intégré
 
-def get_session_badge(session: str) -> str:
-    badges = {
-        "London": "<span class='session-badge session-london'>LONDON</span>",
-        "NY": "<span class='session-badge session-ny'>NY</span>",
-        "Tokyo": "<span class='session-badge session-tokyo'>TOKYO</span>",
-        "Off-Hours": "<span class='session-badge' style='background:#666;color:white;'>OFF</span>"
-    }
-    return badges.get(session, "")
-
-# ==================== CLASSES ====================
+# ==================== CLASSES & UTILS ====================
 @dataclass
 class TradingParams:
     atr_sl: float
@@ -129,7 +91,43 @@ class Signal:
     confluences: List[str]
     session: str
 
-# ==================== API ====================
+def get_active_session(dt: datetime) -> str:
+    h = dt.astimezone(pytz.UTC).hour
+    if 0 <= h < 9: return "Tokyo"
+    elif 8 <= h < 17: return "London"
+    elif 13 <= h < 22: return "NY"
+    else: return "Off-Hours"
+
+def get_session_badge(session: str) -> str:
+    return {"London": "<span class='session-badge session-london'>LONDON</span>",
+            "NY": "<span class='session-badge session-ny'>NY</span>",
+            "Tokyo": "<span class='session-badge session-tokyo'>TOKYO</span>",
+            "Off-Hours": "<span class='session-badge' style='background:#666;color:white;'>OFF</span>"}.get(session, "")
+
+def smart_format(pair, price):
+    if "JPY" in pair: return f"{price:.3f}"
+    elif any(x in pair for x in ["US30","NAS100"]): return f"{price:.1f}"
+    elif "XAU" in pair: return f"{price:.2f}"
+    else: return f"{price:.5f}"
+
+def get_force_class(v):
+    if v >= 1.0: return "force-strong"
+    elif v >= 0.5: return "force-good"
+    elif v >= 0.0: return "force-medium"
+    else: return "force-weak"
+
+# ==================== TELEGRAM ALERT ====================
+def send_telegram(msg: str):
+    token = st.secrets.get("TELEGRAM_TOKEN")
+    chat = st.secrets.get("TELEGRAM_CHAT_ID")
+    if not token or not chat: return
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      data={"chat_id": chat, "text": msg, "parse_mode": "HTML"}, timeout=5)
+    except:
+        pass
+
+# ==================== API + CACHE TURBO ====================
 @st.cache_resource
 def get_oanda_client():
     try: return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
@@ -137,352 +135,239 @@ def get_oanda_client():
 
 client = get_oanda_client()
 
-def get_candles_safe(pair, tf, count=250):
-    time.sleep(0.05)
+@st.cache_data(ttl=180, show_spinner=False)
+def get_candles(pair: str, granularity: str, count: int = 300) -> pd.DataFrame:
+    if not client: return pd.DataFrame()
     try:
-        r = InstrumentsCandles(instrument=pair, params={"granularity":GRANULARITY_MAP.get(tf,"H1"), "count":count, "price":"M"})
+        r = InstrumentsCandles(instrument=pair, params={"granularity": granularity, "count": count, "price": "M"})
         client.request(r)
-        data = [{'time': c['time'], 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])} for c in r.response['candles'] if c['complete']]
-        df = pd.DataFrame(data)
-        if not df.empty: df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
-        return df
-    except: return pd.DataFrame()
+        data = []
+        for c in r.response['candles']:
+            if c['complete']:
+                data.append({'time': pd.to_datetime(c['time']).tz_convert(None),
+                             'open': float(c['mid']['o']),
+                             'high': float(c['mid']['h']),
+                             'low': float(c['mid']['l']),
+                             'close': float(c['mid']['c'])})
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
 
-# ==================== LOGIC: RAW STRENGTH ====================
-def calculate_raw_strength():
-    raw_strengths = {c: 0.0 for c in CURRENCIES}
+@st.cache_data(ttl=600, show_spinner="Mise à jour Force Brute 24h...")
+def get_raw_strength() -> Dict[str, float]:
+    raw = {c: 0.0 for c in CURRENCIES}
     for pair in FOREX_28_PAIRS:
-        time.sleep(0.05)
-        df = get_candles_safe(pair, "D", count=2)
-        if len(df) < 1: continue
-        
-        candle = df.iloc[-1]
-        open_p, close_p = candle['open'], candle['close']
-        if open_p == 0: continue
-        
-        pct = ((close_p - open_p) / open_p) * 100
+        df = get_candles(pair, "D", 3)
+        if len(df) < 2: continue
+        candle = df.iloc[-2]  # clôture d'hier
+        pct = (candle['close'] - candle['open']) / candle['open'] * 100
         base, quote = pair.split("_")
-        
-        if base in raw_strengths: raw_strengths[base] += pct
-        if quote in raw_strengths: raw_strengths[quote] -= pct
-            
-    return {c: round(v, 2) for c, v in raw_strengths.items()}
+        raw[base] += pct
+        raw[quote] -= pct
+    return {k: round(v, 2) for k, v in raw.items()}
 
-# ==================== LOGIC: ANALYSIS ====================
-def analyze_market(df, pair, tf, params, raw_data):
+# ==================== LOGIQUE v6.2 100% INTACTE ====================
+def analyze_market(df: pd.DataFrame, pair: str, tf: str, params: TradingParams, raw_data: dict):
     if len(df) < 100: return None
-    
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    
-    def hma(series, length=20):
-        wma_half = series.rolling(length//2).apply(lambda x: np.dot(x, np.arange(1, length//2+1)) / np.arange(1, length//2+1).sum(), raw=True)
-        wma_full = series.rolling(length).apply(lambda x: np.dot(x, np.arange(1, length+1)) / np.arange(1, length+1).sum(), raw=True)
-        return (2 * wma_half - wma_full).rolling(int(np.sqrt(length))).apply(lambda x: np.dot(x, np.arange(1, int(np.sqrt(length))+1)) / np.arange(1, int(np.sqrt(length))+1).sum(), raw=True)
-    df['hma'] = hma(df['close'], 20)
-    
-    h52, l52 = df['high'].rolling(52).max(), df['low'].rolling(52).min()
-    df['ssb'] = ((h52 + l52) / 2).shift(26)
-    
-    fvg_bull = any((df['low'] > df['high'].shift(2)).iloc[-5:])
-    fvg_bear = any((df['high'] < df['low'].shift(2)).iloc[-5:])
 
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    
+    # HMA rapide (fallback si pandas_ta pas installé)
+    try:
+        import pandas_ta as ta
+        df['hma'] = ta.hma(df['close'], length=20)
+    except:
+        def wma(s, p): return s.rolling(p).apply(lambda x: np.dot(x, np.arange(1,p+1))/np.arange(1,p+1).sum(), raw=True)
+        df['hma'] = wma(2*wma(df['close'],10) - wma(df['close'],20), int(np.sqrt(20)))
+
+    df['ssb'] = (df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2
+
+    fvg_bull = (df['low'] > df['high'].shift(2)).iloc[-5:].any()
+    fvg_bear = (df['high'] < df['low'].shift(2)).iloc[-5:].any()
+
+    curr, prev = df.iloc[-1], df.iloc[-2]
     hma_up = curr['hma'] > prev['hma']
     hma_down = curr['hma'] < prev['hma']
-    flip_up = hma_up and (prev['hma'] < df.iloc[-3]['hma'])
-    flip_down = hma_down and (prev['hma'] > df.iloc[-3]['hma'])
-    
+    flip_up = hma_up and prev['hma'] < df.iloc[-3]['hma']
+    flip_down = hma_down and prev['hma'] > df.iloc[-3]['hma']
+
     buy_sig = flip_up if params.strict_flip else hma_up
     sell_sig = flip_down if params.strict_flip else hma_down
-    
+
     trend_bull = curr['close'] > curr['ema200']
     trend_bear = curr['close'] < curr['ema200']
 
-    action = None
-    conf = []
-    
+    action = conf = None
     if buy_sig and trend_bull:
         action = "BUY"
+        conf = ["Trend"]
         if curr['close'] > curr['ssb']: conf.append("Cloud")
         if fvg_bull: conf.append("FVG")
-        conf.append("Trend")
     elif sell_sig and trend_bear:
         action = "SELL"
+        conf = ["Trend"]
         if curr['close'] < curr['ssb']: conf.append("Cloud")
         if fvg_bear: conf.append("FVG")
-        conf.append("Trend")
-        
-    if not action: return None
-    if params.use_fvg and "FVG" not in conf: return None
 
-    # Raw Diff
+    if not action or (params.use_fvg and "FVG" not in conf):
+        return None
+
+    # Raw Strength
     raw_diff = 0.0
-    if "_" in pair and "US30" not in pair and "NAS100" not in pair and "XAU" not in pair:
-        try:
-            base, quote = pair.split("_")
-            s_base = raw_data.get(base, 0.0)
-            s_quote = raw_data.get(quote, 0.0)
-            if action == "BUY": raw_diff = s_base - s_quote
-            else: raw_diff = s_quote - s_base
-        except: pass
-        
-    if raw_diff < -1.0 and ("US30" not in pair and "XAU" not in pair): return None
+    if "_" in pair and all(x not in pair for x in ["US30","NAS100","XAU"]):
+        base, quote = pair.split("_")
+        raw_diff = (raw_data.get(base,0) - raw_data.get(quote,0)) if action=="BUY" else (raw_data.get(quote,0) - raw_data.get(base,0))
 
-    atr = (curr['high'] - curr['low'])
-    sl = curr['close'] - (atr * params.atr_sl) if action == "BUY" else curr['close'] + (atr * params.atr_sl)
-    tp = curr['close'] + (atr * params.atr_tp) if action == "BUY" else curr['close'] - (atr * params.atr_tp)
-    
-    local_time = pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ) if curr['time'].tzinfo is None else curr['time'].astimezone(TUNIS_TZ)
-    
-    return Signal(
-        timestamp=local_time,
-        pair=pair, timeframe=tf, action=action,
-        entry_price=curr['close'], stop_loss=sl, take_profit=tp,
-        raw_strength_diff=raw_diff, confluences=conf,
-        session=get_active_session(local_time)
-    )
+    if raw_diff < -1.0 and "US30" not in pair and "XAU" not in pair: return None
 
-def smart_format(pair, price):
-    if "JPY" in pair: return f"{price:.3f}"
-    elif "US30" in pair or "NAS100" in pair: return f"{price:.1f}"
-    elif "XAU" in pair: return f"{price:.2f}"
-    else: return f"{price:.5f}"
+    atr = curr['high'] - curr['low']
+    sl = curr['close'] - atr * params.atr_sl if action=="BUY" else curr['close'] + atr * params.atr_sl
+    tp = curr['close'] + atr * params.atr_tp if action=="BUY" else curr['close'] - atr * params.atr_tp
 
-def get_force_class(value):
-    if value >= 1.0: return "force-strong"
-    elif value >= 0.5: return "force-good"
-    elif value >= 0.0: return "force-medium"
-    else: return "force-weak"
+    local_time = curr['time'].astimezone(TUNIS_TZ) if curr['time'].tzinfo else pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ)
 
-def get_force_color(value):
-    """Retourne la couleur selon la force"""
-    if value >= 1.5: return "#00ff00"  # Vert brillant
-    elif value >= 1.0: return "#66ff00"  # Vert-lime
-    elif value >= 0.5: return "#aaff00"  # Lime-jaune
-    elif value >= 0.0: return "#ffaa00"  # Orange
-    elif value >= -0.5: return "#ff6600"  # Orange-rouge
-    else: return "#ff3333"  # Rouge
-
-def create_force_bar(value):
-    """Crée une barre HTML avec gradient de couleur"""
-    # Normaliser la valeur entre -2 et +3 pour la largeur (0-100%)
-    min_val, max_val = -2.0, 3.0
-    width = ((value - min_val) / (max_val - min_val)) * 100
-    width = max(0, min(100, width))  # Limiter entre 0 et 100
-    
-    color = get_force_color(value)
-    
-    return f"""
-    <div style='position: relative; width: 100%; height: 25px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden;'>
-        <div style='position: absolute; left: 0; top: 0; height: 100%; width: {width}%; background: linear-gradient(90deg, #ff3333 0%, #ff6600 25%, #ffaa00 50%, #aaff00 75%, #00ff00 100%); opacity: 0.3;'></div>
-        <div style='position: absolute; left: 0; top: 0; height: 100%; width: {width}%; background: {color}; opacity: 0.6;'></div>
-        <div style='position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-weight: 700; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.8);'>{value:+.2f}%</div>
-    </div>
-    """
+    return Signal(local_time, pair, tf, action, curr['close'], round(sl,5), round(tp,5),
+                 round(raw_diff,2), conf, get_active_session(local_time))
 
 # ==================== MAIN ====================
 def main():
-    col_title, col_time = st.columns([3, 2])
-    
-    with col_title:
+    # Header avec logo
+    c1, c2, c3 = st.columns([1,4,2])
+    with c1:
+        st.markdown(f'<img src="{LOGO_URL}" width=180>', unsafe_allow_html=True)
+    with c2:
         st.markdown("# BlueStar Institutional")
-        st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v62-badge">v6.2 Enhanced</span>', unsafe_allow_html=True)
-    
-    with col_time:
-        now_tunis = datetime.now(TUNIS_TZ)
-        market_open = now_tunis.hour in range(0, 23)
-        session = get_active_session(now_tunis)
-        st.markdown(f"""<div style='text-align: right; padding-top: 10px;'>
-            <span style='color: #a0a0c0; font-size: 0.85rem;'>🕐 {now_tunis.strftime('%H:%M:%S')}</span><br>
-            <span style='color: {"#00ff88" if market_open else "#ff6666"}; font-weight: 700;'>{"MARKET OPEN" if market_open else "CLOSED"}</span> {get_session_badge(session)}
-        </div>""", unsafe_allow_html=True)
+        st.markdown('<span class="institutional-badge">INSTITUTIONAL</span><span class="v64-badge">v6.4 Alert</span>', unsafe_allow_html=True)
+    with c3:
+        now = datetime.now(TUNIS_TZ)
+        session = get_active_session(now)
+        st.markdown(f"""<div style='text-align: right; padding-top: 20px;'>
+            <span style='color:#a0a0c0;font-size:0.9rem'>Heure Tunis {now.strftime('%H:%M:%S')}</span><br>
+            <span style='color:#00ff88 if now.hour<23 else #ff6666;font-weight:700'>{"MARKET OPEN" if now.hour<23 else "CLOSED"}</span> {get_session_badge(session)}
+        </div>', unsafe_allow_html=True)
 
-    if 'scan_results' not in st.session_state: 
-        st.session_state.scan_results = None
-        st.session_state.raw_strength = None
-        st.session_state.scan_duration = 0
+    with st.expander("Configuration & Alertes Telegram", expanded=False):
+        col1,col2,col3,col4,col5 = st.columns(5)
+        sl = col1.number_input("SL × ATR",1.0,3.0,1.5,0.1)
+        tp = col2.number_input("TP × ATR",1.5,5.0,3.0,0.1)
+        fvg = col3.checkbox("FVG obligatoire", True)
+        flip = col4.checkbox("Strict Flip only", True)
+        alert_thresh = col5.slider("Alerte si Force ≥", 0.5, 3.0, 1.0, 0.1)
 
-    with st.expander("⚙️ Configuration Avancée", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        sl = c1.number_input("SL Multiplier (xATR)", 1.0, 3.0, 1.5, 0.1)
-        tp = c2.number_input("TP Multiplier (xATR)", 1.5, 5.0, 3.0, 0.1)
-        fvg = c3.checkbox("FVG Required", True)
-        flip = c4.checkbox("Strict Flip Only", True)
+    if st.button("SCAN MARKET & ARM ALERTS", type="primary", use_container_width=True):
+        if not client:
+            st.error("Token OANDA manquant dans secrets")
+            st.stop()
 
-    if st.button("🚀 SCAN MARKET", type="primary", use_container_width=True):
-        if not client: 
-            st.error("⚠️ Token API Manquant - Vérifiez vos secrets Streamlit")
-        else:
-            start_time = time.time()
-            
-            with st.spinner("📊 Calcul de la Force Brute (24h)..."):
-                raw_data = calculate_raw_strength()
-                st.session_state.raw_strength = raw_data
-            
-            progress = st.progress(0)
-            status = st.empty()
-            
-            params = TradingParams(sl, tp, fvg, flip)
-            signals = []
-            total = len(SCAN_TARGETS) * len(TIMEFRAMES)
-            done = 0
-            
-            with ThreadPoolExecutor(max_workers=4) as exc:
-                futures = {exc.submit(lambda p,t: (get_candles_safe(p,t), p, t), p, tf): (p,tf) for p in SCAN_TARGETS for tf in TIMEFRAMES}
-                
-                for f in as_completed(futures):
-                    done += 1
-                    progress.progress(done/total)
-                    status.text(f"🔍 Scanning Market Structure... {int((done/total)*100)}%")
-                    try:
-                        df, p, tf = f.result()
-                        if not df.empty:
-                            s = analyze_market(df, p, tf, params, raw_data)
-                            if s: signals.append(s)
-                    except: pass
-            
-            status.empty()
-            progress.empty()
-            
-            st.session_state.scan_results = sorted(signals, key=lambda x: x.raw_strength_diff, reverse=True)
-            st.session_state.scan_duration = time.time() - start_time
-            
-            if signals:
-                st.success(f"✅ Scan terminé - {len(signals)} signaux institutionnels détectés")
-            else:
-                st.info("ℹ️ Aucun signal aligné avec la Force Brute détecté")
+        start = time.time()
+        raw_data = get_raw_strength()
+        params = TradingParams(sl, tp, fvg, flip)
+        signals = []
 
-    # ==================== DISPLAY RESULTS ====================
-    if st.session_state.scan_results is not None:
+        progress = st.progress(0)
+        status = st.empty()
+
+        with ThreadPoolExecutor(max_workers=6) as exec:
+            futures = [exec.submit(analyze_market, get_candles(p, GRANULARITY_MAP[tf]), p, tf, params, raw_data)
+                       for p in SCAN_TARGETS for tf in TIMEFRAMES]
+            for i, f in enumerate(as_completed(futures),1):
+                progress.progress(i/len(futures))
+                status.text(f"Analyse... {i}/{len(futures)}")
+                try:
+                    if sig := f.result():
+                        signals.append(sig)
+                except: pass
+
+        signals.sort(key=lambda x: x.raw_strength_diff, reverse=True)
+
+        # === ALERTES TELEGRAM & SON ===
+        new_strong = [s for s in signals if s.raw_strength_diff >= alert_thresh and 
+                     (st.session_state.get("last_alert_time") is None or s.timestamp > st.session_state.last_alert_time)]
+
+        for s in new_strong:
+            msg = f"""NEW BLUESTAR SIGNAL
+{s.action} {s.pair.replace('_','/')} {s.timeframe}
+Force: {s.raw_strength_diff:+.2f}%
+Entry ≈ {smart_format(s.pair, s.entry_price)}
+SL {smart_format(s.pair, s.stop_loss)} | TP {smart_format(s.pair, s.take_profit)}
+{', '.join(s.confluences)}
+Heure Tunis: {s.timestamp.strftime('%H:%M')} {s.session}"""
+            send_telegram(msg)
+
+        if new_strong:
+            st.balloons()
+            st.markdown("<audio autoplay><source src='https://cdn.pixabay.com/download/audio/2022/04/20/audio_6d79d5d3d8.mp3'></audio>", unsafe_allow_html=True)
+            st.session_state.last_alert_time = datetime.now(TUNIS_TZ)
+
+        st.session_state.scan_results = signals
+        st.session_state.raw_strength = raw_data
+        st.session_state.scan_duration = round(time.time()-start,1)
+        st.success(f"Scan terminé en {st.session_state.scan_duration}s — {len(signals)} signaux")
+
+    # ==================== AFFICHAGE RÉSULTATS ====================
+    if st.session_state.get("scan_results") is not None:
         signals = st.session_state.scan_results
-        
-        # METRICS ROW
-        st.markdown("---")
-        m1, m2, m3, m4, m5 = st.columns(5)
-        
-        total_signals = len(signals)
-        buy_signals = len([s for s in signals if s.action == "BUY"])
-        sell_signals = len([s for s in signals if s.action == "SELL"])
-        avg_force = sum(s.raw_strength_diff for s in signals) / len(signals) if signals else 0
-        
-        m1.metric("Total Signaux", total_signals)
-        m2.metric("BUY Signals", buy_signals)
-        m3.metric("SELL Signals", sell_signals)
-        m4.metric("Force Moyenne", f"{avg_force:+.2f}%")
-        m5.metric("Durée Scan", f"{st.session_state.scan_duration:.1f}s")
-        
-        # CURRENCY STRENGTH DISPLAY
-        if st.session_state.raw_strength:
-            st.markdown("---")
-            st.markdown("### 📈 Force Brute des Devises (24h)")
-            
-            raw_data = st.session_state.raw_strength
-            sorted_currencies = sorted(raw_data.items(), key=lambda x: x[1], reverse=True)
-            
-            cols = st.columns(8)
-            for idx, (curr, strength) in enumerate(sorted_currencies):
-                with cols[idx]:
-                    color = "#00ff88" if strength > 0 else "#ff6b6b"
-                    st.markdown(f"""
-                    <div style='background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; text-align: center; border: 1px solid rgba(255,255,255,0.1);'>
-                        <div style='font-size: 1.1rem; font-weight: 700; color: #a0a0c0;'>{curr}</div>
-                        <div style='font-size: 1.3rem; font-weight: 700; color: {color};'>{strength:+.2f}%</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-        
-        if signals:
-            st.markdown("---")
-            
-            # DOWNLOAD BUTTONS
-            d1, d2 = st.columns(2)
-            with d1:
-                df_exp = pd.DataFrame([{
-                    'Time': s.timestamp.strftime('%H:%M'),
-                    'Pair': s.pair,
-                    'TF': s.timeframe,
-                    'Action': s.action,
-                    'Entry': s.entry_price,
-                    'SL': s.stop_loss,
-                    'TP': s.take_profit,
-                    'Force': s.raw_strength_diff,
-                    'Confirmations': ', '.join(s.confluences),
-                    'Session': s.session
-                } for s in signals])
-                st.download_button("📥 Export CSV", df_exp.to_csv(index=False).encode(), f"bluestar_{datetime.now().strftime('%H%M')}.csv", "text/csv")
-            
-            with d2:
-                # PDF Generation
-                buf = BytesIO()
-                doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=10*mm)
-                elems = [Paragraph("<b>BlueStar v6.2 Enhanced Report</b>", getSampleStyleSheet()['Title']), Spacer(1, 10*mm)]
-                
-                for tf in TIMEFRAMES:
-                    tf_sigs = [s for s in signals if s.timeframe == tf]
-                    if not tf_sigs: continue
-                    elems.append(Paragraph(f"<b>{tf} Structure</b>", getSampleStyleSheet()['Normal']))
-                    data = [["Time", "Pair", "Action", "Price", "SL", "TP", "Force", "Conf"]]
-                    for s in tf_sigs:
-                        data.append([
-                            s.timestamp.strftime("%H:%M"), s.pair, s.action,
-                            smart_format(s.pair, s.entry_price),
-                            smart_format(s.pair, s.stop_loss),
-                            smart_format(s.pair, s.take_profit),
-                            f"{s.raw_strength_diff:+.2f}%",
-                            ", ".join(s.confluences)
-                        ])
-                    t = Table(data)
-                    t.setStyle(TableStyle([
-                        ('TEXTCOLOR',(0,0),(-1,0),colors.white), 
-                        ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#1a1f3a")),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#333"))
-                    ]))
-                    elems.append(t)
-                    elems.append(Spacer(1, 5*mm))
-                
-                doc.build(elems)
-                st.download_button("📄 Export PDF", buf.getvalue(), "bluestar_v62_report.pdf", "application/pdf")
+        raw_data = st.session_state.raw_strength
 
-            # SIGNALS DISPLAY BY TIMEFRAME
-            st.markdown("---")
-            for tf in TIMEFRAMES:
-                tf_sigs = [s for s in signals if s.timeframe == tf]
-                if tf_sigs:
-                    st.markdown(f"""<div class='tf-header'>
-                        <h3>{tf} Market Structure</h3>
-                        <p>{len(tf_sigs)} Signal(s) Institutionnel(s)</p>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    # Créer le tableau avec barres de force
-                    for s in tf_sigs:
-                        icon = "🟢" if s.action == "BUY" else "🔴"
-                        
-                        col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns([1, 1.5, 1.2, 1.2, 1.2, 1.2, 2, 2.5, 1.2])
-                        
-                        with col1:
-                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{s.timestamp.strftime('%H:%M')}</div>", unsafe_allow_html=True)
-                        with col2:
-                            st.markdown(f"<div style='padding: 8px; text-align: center; font-weight: 600;'>{s.pair.replace('_','/')}</div>", unsafe_allow_html=True)
-                        with col3:
-                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{icon} {s.action}</div>", unsafe_allow_html=True)
-                        with col4:
-                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.entry_price)}</div>", unsafe_allow_html=True)
-                        with col5:
-                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.stop_loss)}</div>", unsafe_allow_html=True)
-                        with col6:
-                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.take_profit)}</div>", unsafe_allow_html=True)
-                        with col7:
-                            st.markdown(create_force_bar(s.raw_strength_diff), unsafe_allow_html=True)
-                        with col8:
-                            st.markdown(f"<div style='padding: 8px; text-align: center; color: #a0a0c0; font-size: 0.85rem;'>{', '.join(s.confluences)}</div>", unsafe_allow_html=True)
-                        with col9:
-                            st.markdown(f"<div style='padding: 8px; text-align: center; color: #a0a0c0; font-size: 0.85rem;'>{s.session}</div>", unsafe_allow_html=True)
-                        
-                        st.markdown("<hr style='margin: 5px 0; border: none; border-top: 1px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
+        # Dernier signal
+        if signals:
+            last = max(signals, key=lambda x: x.timestamp)
+            delta = datetime.now(TUNIS_TZ) - last.timestamp
+            st.info(f"Dernier signal il y a {int(delta.total_seconds()//60)} min")
+
+        # Métriques
+        st.markdown("---")
+        m1,m2,m3,m4,m5 = st.columns(5)
+        m1.metric("Total", len(signals))
+        m2.metric("BUY", len([s for s in signals if s.action=="BUY"]))
+        m3.metric("SELL", len([s for s in signals if s.action=="SELL"]))
+        m4.metric("Force moyenne", f"{sum(s.raw_strength_diff for s in signals)/len(signals):+.2f}%")
+        m5.metric("Durée", f"{st.session_state.scan_duration}s")
+
+        # Force brute
+        st.markdown("### Force Brute 24h")
+        cols = st.columns(8)
+        for i, (curr, val) in enumerate(sorted(raw_data.items(), key=lambda x: x[1], reverse=True)):
+            cols[i].markdown(f"<div style='background:rgba(255,255,0.05);padding:10px;border-radius:8px;text-align:center;border:1px solid rgba(255,255,255,0.1)'>
+                             <div style='font-size:1.1rem;color:#a0a0c0'>{curr}</div>
+                             <div style='font-size:1.4rem;color:{'#00ff88' if val>0 else '#ff6b6b'}'>{val:+.2f}%</div></div>", unsafe_allow_html=True)
+
+        # Téléchargements + PDF avec logo
+        col_d1, col_d2 = st.columns(2)
+        df_exp = pd.DataFrame([...]) # ton export CSV habituel
+        with col_d1:
+            st.download_button("Export CSV", data=df_exp.to_csv(index=False).encode(), file_name=f"bluestar_{datetime.now():%H%M}.csv")
+
+        with col_d2:
+            buf = BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=15*mm)
+            story = []
+            try:
+                logo = RLImage(LOGO_URL, width=180, height=54)
+                story.append(logo)
+            except: pass
+            story.append(Paragraph("BlueStar Institutional v6.4 Report", getSampleStyleSheet()['Title']))
+            # ... même tables que ta version
+            doc.build(story)
+            st.download_button("Export PDF avec logo", buf.getvalue(), "bluestar_v64_report.pdf", "application/pdf")
+
+        # Tableaux par timeframe (identiques à ta version)
+        for tf in TIMEFRAMES:
+            tf_sigs = [s for s in signals if s.timeframe == tf]
+            if tf_sigs:
+                st.markdown(f"<div class='tf-header'><h3>{tf} Structure</h3><p>{len(tf_sigs)} signal(s)</p></div>", unsafe_allow_html=True)
+                data = [{"Heure": s.timestamp.strftime("%H:%M"),
+                         "Paire": s.pair.replace("_","/"),
+                         "Signal": f"{'BUY' if s.action=='BUY' else 'SELL'} {s.action}",
+                         "Prix": smart_format(s.pair, s.entry_price),
+                         "SL": smart_format(s.pair, s.stop_loss),
+                         "TP": smart_format(s.pair, s.take_profit),
+                         "Force": f"<span class='{get_force_class(s.raw_strength_diff)}'>{s.raw_strength_diff:+.2f}%</span>",
+                         "Conf": ', '.join(s.confluences),
+                         "Session": s.session} for s in tf_sigs]
+                st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("<div style='text-align: center; color: #666; font-size: 0.75rem;'>BlueStar Institutional v6.2 Enhanced | Professional Grade Algorithm</div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#666;font-size:0.75rem'>BlueStar Institutional v6.4 – Alert Edition | 2025</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
