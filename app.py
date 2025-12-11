@@ -256,6 +256,32 @@ def get_force_class(value):
     elif value >= 0.0: return "force-medium"
     else: return "force-weak"
 
+def get_force_color(value):
+    """Retourne la couleur selon la force"""
+    if value >= 1.5: return "#00ff00"  # Vert brillant
+    elif value >= 1.0: return "#66ff00"  # Vert-lime
+    elif value >= 0.5: return "#aaff00"  # Lime-jaune
+    elif value >= 0.0: return "#ffaa00"  # Orange
+    elif value >= -0.5: return "#ff6600"  # Orange-rouge
+    else: return "#ff3333"  # Rouge
+
+def create_force_bar(value):
+    """Crée une barre HTML avec gradient de couleur"""
+    # Normaliser la valeur entre -2 et +3 pour la largeur (0-100%)
+    min_val, max_val = -2.0, 3.0
+    width = ((value - min_val) / (max_val - min_val)) * 100
+    width = max(0, min(100, width))  # Limiter entre 0 et 100
+    
+    color = get_force_color(value)
+    
+    return f"""
+    <div style='position: relative; width: 100%; height: 25px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden;'>
+        <div style='position: absolute; left: 0; top: 0; height: 100%; width: {width}%; background: linear-gradient(90deg, #ff3333 0%, #ff6600 25%, #ffaa00 50%, #aaff00 75%, #00ff00 100%); opacity: 0.3;'></div>
+        <div style='position: absolute; left: 0; top: 0; height: 100%; width: {width}%; background: {color}; opacity: 0.6;'></div>
+        <div style='position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-weight: 700; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.8);'>{value:+.2f}%</div>
+    </div>
+    """
+
 # ==================== MAIN ====================
 def main():
     col_title, col_time = st.columns([3, 2])
@@ -428,25 +454,32 @@ def main():
                         <p>{len(tf_sigs)} Signal(s) Institutionnel(s)</p>
                     </div>""", unsafe_allow_html=True)
                     
-                    data = []
+                    # Créer le tableau avec barres de force
                     for s in tf_sigs:
                         icon = "🟢" if s.action == "BUY" else "🔴"
-                        force_class = get_force_class(s.raw_strength_diff)
                         
-                        data.append({
-                            "Heure": s.timestamp.strftime("%H:%M"), 
-                            "Paire": s.pair.replace("_","/"),
-                            "Signal": f"{icon} {s.action}", 
-                            "Prix": smart_format(s.pair, s.entry_price),
-                            "SL": smart_format(s.pair, s.stop_loss), 
-                            "TP": smart_format(s.pair, s.take_profit),
-                            "Force": f"{s.raw_strength_diff:+.2f}%",
-                            "Confirmations": ", ".join(s.confluences),
-                            "Session": s.session
-                        })
-                    
-                    df_view = pd.DataFrame(data)
-                    st.dataframe(df_view, use_container_width=True, hide_index=True)
+                        col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns([1, 1.5, 1.2, 1.2, 1.2, 1.2, 2, 2.5, 1.2])
+                        
+                        with col1:
+                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{s.timestamp.strftime('%H:%M')}</div>", unsafe_allow_html=True)
+                        with col2:
+                            st.markdown(f"<div style='padding: 8px; text-align: center; font-weight: 600;'>{s.pair.replace('_','/')}</div>", unsafe_allow_html=True)
+                        with col3:
+                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{icon} {s.action}</div>", unsafe_allow_html=True)
+                        with col4:
+                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.entry_price)}</div>", unsafe_allow_html=True)
+                        with col5:
+                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.stop_loss)}</div>", unsafe_allow_html=True)
+                        with col6:
+                            st.markdown(f"<div style='padding: 8px; text-align: center;'>{smart_format(s.pair, s.take_profit)}</div>", unsafe_allow_html=True)
+                        with col7:
+                            st.markdown(create_force_bar(s.raw_strength_diff), unsafe_allow_html=True)
+                        with col8:
+                            st.markdown(f"<div style='padding: 8px; text-align: center; color: #a0a0c0; font-size: 0.85rem;'>{', '.join(s.confluences)}</div>", unsafe_allow_html=True)
+                        with col9:
+                            st.markdown(f"<div style='padding: 8px; text-align: center; color: #a0a0c0; font-size: 0.85rem;'>{s.session}</div>", unsafe_allow_html=True)
+                        
+                        st.markdown("<hr style='margin: 5px 0; border: none; border-top: 1px solid rgba(255,255,255,0.1);'>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("<div style='text-align: center; color: #666; font-size: 0.75rem;'>BlueStar Institutional v6.2 Enhanced | Professional Grade Algorithm</div>", unsafe_allow_html=True)
