@@ -1,8 +1,7 @@
 """
-BlueStar Institutional v6.1 (Visual Strength Edition)
-- Raw Strength Logic (24h sum)
-- Visual Heatmap for Strength (Red -> Orange -> Green)
-- Simplified UI labels
+BlueStar Institutional v6.2 (Fix for Pandas 2.0.3)
+- Replaces style.map with style.applymap for compatibility
+- Keeps Raw Strength Logic & Heatmap
 """
 import streamlit as st
 import pandas as pd
@@ -11,7 +10,7 @@ import pytz
 import time
 from datetime import datetime
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
@@ -27,7 +26,7 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar v6.1", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar v6.2", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -216,12 +215,13 @@ def style_dataframe(df):
             return f'color: {color}; font-weight: bold;'
         except: return ''
         
-    return df.style.map(color_force_col, subset=['Force'])
+    # --- CORRECTION ICI : applymap AU LIEU DE map POUR PANDAS 2.0.3 ---
+    return df.style.applymap(color_force_col, subset=['Force'])
 
 # ==================== MAIN ====================
 def main():
     c1, c2 = st.columns([3,1])
-    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v6.1</span>", unsafe_allow_html=True)
+    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v6.2</span>", unsafe_allow_html=True)
     with c2: 
         if st.button("Reset"):
             st.session_state.clear()
