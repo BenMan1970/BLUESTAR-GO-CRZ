@@ -1,6 +1,7 @@
 """
-BlueStar Institutional v4.1 (Stable Engine)
-Fixes the "Freeze" issue by adding Rate Limiting and Progress Bar
+BlueStar Institutional v6.0 (Raw Strength Edition)
+Implements the 'Raw Strength' algorithm (sum of 24h moves across 28 pairs).
+Replaces Score with Raw Strength Differential.
 """
 import streamlit as st
 import pandas as pd
@@ -9,14 +10,13 @@ import pytz
 import time
 from datetime import datetime
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
 # OANDA API
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
-from oandapyV20.exceptions import V20Error
 
 # PDF Export
 from reportlab.lib.pagesizes import A4, landscape
@@ -26,26 +26,51 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 
 # ==================== CONFIGURATION ====================
-st.set_page_config(page_title="BlueStar v4.1", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="BlueStar v6.0", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%); padding: 1rem !important;}
-    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem; box-shadow: 0 0 10px rgba(255, 215, 0, 0.4);}
+    
+    /* TABLEAUX */
     [data-testid="stDataFrame"] {border: none !important;}
     [data-testid="stHeader"] {background-color: transparent !important;}
+    
     .tf-header {
         background: linear-gradient(90deg, rgba(0,255,136,0.1) 0%, rgba(0,0,0,0) 100%); 
         border-left: 4px solid #00ff88;
         padding: 8px 15px; margin-top: 20px; margin-bottom: 10px;
     }
     .tf-header h3 {margin: 0; color: #fff; font-size: 1.1rem;}
-    /* Style de la barre de progression */
-    .stProgress > div > div > div > div { background-color: #00ff88; }
+    
+    /* BADGES */
+    .institutional-badge {background: linear-gradient(45deg, #ffd700, #ffed4e); color: black; padding: 4px 12px; border-radius: 15px; font-weight: 800; font-size: 0.7rem;}
+    .raw-badge {background: #ff0055; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
-PAIRS_DEFAULT = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","USD_CAD","EUR_JPY","GBP_JPY","XAU_USD","US30_USD","NAS100_USD"]
+# LES 28 PAIRES MAJEURES (Pour le calcul Raw Strength)
+FOREX_28_PAIRS = [
+    # USD
+    "EUR_USD", "GBP_USD", "AUD_USD", "NZD_USD", "USD_JPY", "USD_CHF", "USD_CAD",
+    # EUR
+    "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_AUD", "EUR_CAD", "EUR_NZD",
+    # GBP
+    "GBP_JPY", "GBP_CHF", "GBP_AUD", "GBP_CAD", "GBP_NZD",
+    # AUD
+    "AUD_JPY", "AUD_CHF", "AUD_CAD", "AUD_NZD",
+    # NZD
+    "NZD_JPY", "NZD_CHF", "NZD_CAD",
+    # CAD
+    "CAD_JPY", "CAD_CHF",
+    # CHF
+    "CHF_JPY"
+]
+
+CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
+
+# SCAN TARGETS (Ce qu'on trade)
+SCAN_TARGETS = ["EUR_USD","GBP_USD","USD_JPY","USD_CHF","AUD_USD","USD_CAD","EUR_JPY","GBP_JPY","XAU_USD","US30_USD","NAS100_USD"]
 TIMEFRAMES = ["M15", "H1", "H4"]
 GRANULARITY_MAP = {"M15": "M15", "H1": "H1", "H4": "H4"}
 TUNIS_TZ = pytz.timezone('Africa/Tunis')
@@ -53,12 +78,10 @@ TUNIS_TZ = pytz.timezone('Africa/Tunis')
 # ==================== DATA CLASSES ====================
 @dataclass
 class TradingParams:
-    atr_sl_multiplier: float
-    atr_tp_multiplier: float
-    min_score: int
+    atr_sl: float
+    atr_tp: float
     use_fvg: bool
     strict_flip: bool
-    session_filter: bool
 
 @dataclass
 class Signal:
@@ -69,22 +92,10 @@ class Signal:
     entry_price: float
     stop_loss: float
     take_profit: float
-    score: int
+    raw_strength_diff: float  # La force brute
     confluences: List[str]
 
-# ==================== UTILS ====================
-def is_active_session(dt: datetime) -> bool:
-    hour = dt.hour
-    if 8 <= hour < 22: return True
-    return False
-
-def smart_format(pair: str, price: float) -> str:
-    if "JPY" in pair: return f"{price:.3f}"
-    elif "US30" in pair or "NAS100" in pair or "SPX" in pair: return f"{price:.1f}"
-    elif "XAU" in pair: return f"{price:.2f}"
-    else: return f"{price:.5f}"
-
-# ==================== API & ENGINE (CORRIGÉ) ====================
+# ==================== API ====================
 @st.cache_resource
 def get_oanda_client():
     try: return API(access_token=st.secrets["OANDA_ACCESS_TOKEN"])
@@ -92,229 +103,244 @@ def get_oanda_client():
 
 client = get_oanda_client()
 
-def get_candles_safe(pair, tf):
-    """Récupère les bougies avec sécurité anti-crash"""
-    # 1. Petite pause pour ne pas spammer l'API
-    time.sleep(0.15) 
-    
+def get_candles_safe(pair, tf, count=250):
+    time.sleep(0.05)
     try:
-        r = InstrumentsCandles(instrument=pair, params={"granularity":GRANULARITY_MAP.get(tf,"H1"), "count":500, "price":"M"})
+        r = InstrumentsCandles(instrument=pair, params={"granularity":GRANULARITY_MAP.get(tf,"H1"), "count":count, "price":"M"})
         client.request(r)
         data = [{'time': c['time'], 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])} for c in r.response['candles'] if c['complete']]
         df = pd.DataFrame(data)
         if not df.empty: df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
         return df
-    except V20Error:
-        return pd.DataFrame() # Erreur API connue
-    except Exception:
-        return pd.DataFrame() # Autre erreur
+    except: return pd.DataFrame()
 
-def analyze_market(df: pd.DataFrame, pair: str, tf: str, params: TradingParams) -> Optional[Signal]:
-    if len(df) < 200: return None
+# ==================== 1. RAW STRENGTH ALGORITHM ====================
+def calculate_raw_strength():
+    """
+    Implémente la logique exacte 'Raw Strength' :
+    Somme des mouvements % sur 24h (D1) pour les 28 paires.
+    """
+    raw_strengths = {c: 0.0 for c in CURRENCIES}
     
-    # --- INDICATORS ---
+    # On récupère les 28 paires en séquentiel (Safe Mode)
+    # Pour le calcul Raw, on a besoin de la bougie DAILY actuelle (D1)
+    
+    for pair in FOREX_28_PAIRS:
+        # Pause micro pour API
+        time.sleep(0.05)
+        
+        # On prend D1 count=2 pour avoir la bougie en cours et la précédente si besoin
+        # Mais le Raw Strength se calcule souvent sur la variation depuis l'Open D1
+        df = get_candles_safe(pair, "D", count=2)
+        if len(df) < 1: continue
+        
+        # Mouvement en % depuis l'Open de la journée
+        candle = df.iloc[-1]
+        open_p = candle['open']
+        close_p = candle['close']
+        
+        if open_p == 0: continue
+        movement_pct = ((close_p - open_p) / open_p) * 100
+        
+        base, quote = pair.split("_")
+        
+        # LOGIQUE RAW STRENGTH EXACTE
+        # Si Base (ex: EUR) vs Quote (ex: USD)
+        # Mouvement positif = Base gagne, Quote perd
+        
+        if base in raw_strengths:
+            raw_strengths[base] += movement_pct
+        
+        if quote in raw_strengths:
+            # Si c'est la quote, un mouvement positif de la paire signifie que la quote PERD de la valeur
+            # Donc on soustrait
+            raw_strengths[quote] -= movement_pct
+            
+    # Arrondi
+    for c in raw_strengths:
+        raw_strengths[c] = round(raw_strengths[c], 2)
+        
+    return raw_strengths
+
+# ==================== 2. ANALYSE TECHNIQUE + RAW INTEGRATION ====================
+def analyze_market(df, pair, tf, params, raw_data):
+    if len(df) < 100: return None
+    
+    # Indicateurs
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    
     def hma(series, length=20):
         wma_half = series.rolling(length//2).apply(lambda x: np.dot(x, np.arange(1, length//2+1)) / np.arange(1, length//2+1).sum(), raw=True)
         wma_full = series.rolling(length).apply(lambda x: np.dot(x, np.arange(1, length+1)) / np.arange(1, length+1).sum(), raw=True)
         return (2 * wma_half - wma_full).rolling(int(np.sqrt(length))).apply(lambda x: np.dot(x, np.arange(1, int(np.sqrt(length))+1)) / np.arange(1, int(np.sqrt(length))+1).sum(), raw=True)
     df['hma'] = hma(df['close'], 20)
-
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-
-    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     
-    h52 = df['high'].rolling(52).max(); l52 = df['low'].rolling(52).min()
+    h52, l52 = df['high'].rolling(52).max(), df['low'].rolling(52).min()
     df['ssb'] = ((h52 + l52) / 2).shift(26)
-
-    # --- LOGIC ---
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    timestamp_local = pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ)
-
-    if params.session_filter and not is_active_session(timestamp_local): return None
-
-    hma_rising = curr['hma'] > prev['hma']
-    hma_falling = curr['hma'] < prev['hma']
     
-    # Strict Flip Logic
-    hma_flip_up = hma_rising and (prev['hma'] < df.iloc[-3]['hma'])
-    hma_flip_down = hma_falling and (prev['hma'] > df.iloc[-3]['hma'])
-    
-    is_buy = hma_flip_up if params.strict_flip else hma_rising
-    is_sell = hma_flip_down if params.strict_flip else hma_falling
-
-    bull_trend = curr['close'] > curr['ema200']
-    bear_trend = curr['close'] < curr['ema200']
-
     fvg_bull = any((df['low'] > df['high'].shift(2)).iloc[-5:])
     fvg_bear = any((df['high'] < df['low'].shift(2)).iloc[-5:])
 
-    action = None
-    confluences = []
-
-    if is_buy and bull_trend:
-        action = "BUY"
-        if curr['close'] > curr['ssb']: confluences.append("Cloud")
-        if fvg_bull: confluences.append("FVG")
-        confluences.append("Trend")
-            
-    elif is_sell and bear_trend:
-        action = "SELL"
-        if curr['close'] < curr['ssb']: confluences.append("Cloud")
-        if fvg_bear: confluences.append("FVG")
-        confluences.append("Trend")
-
-    if not action: return None
-
-    # Scoring
-    score = 60
-    if "Cloud" in confluences: score += 10
-    if "FVG" in confluences: score += 10
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    rsi = curr['rsi']
-    if action == "BUY":
-        if 40 <= rsi <= 65: score += 10
-        elif rsi > 70: score -= 15
-    else:
-        if 35 <= rsi <= 60: score += 10
-        elif rsi < 30: score -= 15
+    # Signal Logic
+    hma_up = curr['hma'] > prev['hma']
+    hma_down = curr['hma'] < prev['hma']
+    
+    flip_up = hma_up and (prev['hma'] < df.iloc[-3]['hma'])
+    flip_down = hma_down and (prev['hma'] > df.iloc[-3]['hma'])
+    
+    buy_sig = flip_up if params.strict_flip else hma_up
+    sell_sig = flip_down if params.strict_flip else hma_down
+    
+    trend_bull = curr['close'] > curr['ema200']
+    trend_bear = curr['close'] < curr['ema200']
+
+    action = None
+    conf = []
+    
+    if buy_sig and trend_bull:
+        action = "BUY"
+        if curr['close'] > curr['ssb']: conf.append("Cloud")
+        if fvg_bull: conf.append("FVG")
+        conf.append("Trend")
+    elif sell_sig and trend_bear:
+        action = "SELL"
+        if curr['close'] < curr['ssb']: conf.append("Cloud")
+        if fvg_bear: conf.append("FVG")
+        conf.append("Trend")
         
-    score = max(50, min(99, int(score)))
+    if not action: return None
+    if params.use_fvg and "FVG" not in conf: return None
 
-    if params.use_fvg and "FVG" not in confluences: return None
-    if score < params.min_score: return None
+    # --- RAW STRENGTH INTEGRATION ---
+    raw_diff = 0.0
+    
+    # Pour Forex
+    if "_" in pair and "US30" not in pair and "NAS100" not in pair and "XAU" not in pair:
+        try:
+            base, quote = pair.split("_")
+            s_base = raw_data.get(base, 0.0)
+            s_quote = raw_data.get(quote, 0.0)
+            
+            # Calcul du Différentiel Raw
+            # Si BUY EURUSD : Force = EUR - USD
+            # Si SELL EURUSD : Force = USD - EUR
+            
+            if action == "BUY":
+                raw_diff = s_base - s_quote
+            else:
+                raw_diff = s_quote - s_base
+                
+        except: pass
+        
+    # Filtre de sécurité : Si Raw Diff est négative, on trade contre le flux journalier
+    # On filtre si c'est trop négatif (ex: -1.0%)
+    if raw_diff < -1.0 and ("US30" not in pair and "XAU" not in pair): return None
 
-    atr_val = (curr['high'] - curr['low'])
-    sl = curr['close'] - (atr_val * params.atr_sl_multiplier) if action == "BUY" else curr['close'] + (atr_val * params.atr_sl_multiplier)
-    tp = curr['close'] + (atr_val * params.atr_tp_multiplier) if action == "BUY" else curr['close'] - (atr_val * params.atr_tp_multiplier)
-
+    atr = (curr['high'] - curr['low'])
+    sl = curr['close'] - (atr * params.atr_sl) if action == "BUY" else curr['close'] + (atr * params.atr_sl)
+    tp = curr['close'] + (atr * params.atr_tp) if action == "BUY" else curr['close'] - (atr * params.atr_tp)
+    
     return Signal(
-        timestamp=timestamp_local, pair=pair, timeframe=tf, action=action,
+        timestamp=pytz.utc.localize(curr['time']).astimezone(TUNIS_TZ),
+        pair=pair, timeframe=tf, action=action,
         entry_price=curr['close'], stop_loss=sl, take_profit=tp,
-        score=score, confluences=confluences
+        raw_strength_diff=raw_diff, confluences=conf
     )
 
-def scan_with_progress(pairs, tfs, params):
-    signals = []
-    total_tasks = len(pairs) * len(tfs)
-    
-    # Barre de progression
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Max Workers réduit à 4 pour éviter le freeze OANDA
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(lambda p,t: (get_candles_safe(p,t), p, t), p, tf): (p,tf) for p in pairs for tf in tfs}
-        
-        completed = 0
-        for f in as_completed(futures):
-            try:
-                completed += 1
-                # Mise à jour progression
-                progress = completed / total_tasks
-                progress_bar.progress(progress)
-                status_text.text(f"Scanning... {int(progress*100)}%")
-                
-                df, p, tf = f.result()
-                if not df.empty:
-                    s = analyze_market(df, p, tf, params)
-                    if s: signals.append(s)
-            except: pass
-            
-    status_text.empty()
-    progress_bar.empty()
-    return sorted(signals, key=lambda x: x.score, reverse=True)
-
-# ==================== PDF ====================
-def generate_pdf(signals):
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=10*mm, leftMargin=10*mm, rightMargin=10*mm)
-    elements = []
-    styles = getSampleStyleSheet()
-    
-    elements.append(Paragraph("<font size=20 color='#00ff88'><b>BlueStar Institutional Report</b></font>", styles["Title"]))
-    elements.append(Spacer(1, 5*mm))
-    elements.append(Paragraph(f"Scan Time: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["Normal"]))
-    elements.append(Spacer(1, 10*mm))
-    
-    for tf in ["M15", "H1", "H4"]:
-        tf_sigs = [s for s in signals if s.timeframe == tf]
-        if not tf_sigs: continue
-        
-        elements.append(Paragraph(f"<font size=14 color='white' backcolor='#00ff88'>&nbsp;<b>{tf} STRUCTURE</b>&nbsp;</font>", styles["Normal"]))
-        elements.append(Spacer(1, 5*mm))
-        
-        data = [["HEURE", "PAIRE", "ACTION", "PRIX", "SCORE", "CONFIRMATIONS"]]
-        for s in tf_sigs:
-            col = "#00ff88" if s.action == "BUY" else "#ff6b6b"
-            p_str = smart_format(s.pair, s.entry_price)
-            data.append([
-                s.timestamp.strftime("%H:%M"), s.pair.replace("_","/"),
-                Paragraph(f"<font color='{col}'><b>{s.action}</b></font>", styles["Normal"]),
-                p_str, f"{s.score}", 
-                Paragraph(f"<font size=9>{', '.join(s.confluences)}</font>", styles["Normal"])
-            ])
-            
-        t = Table(data, colWidths=[25*mm, 35*mm, 25*mm, 35*mm, 20*mm, 130*mm])
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1a1f3a")),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#555")),
-            ('ROWBACKGROUNDS', (1,0), (-1,-1), [colors.white, colors.HexColor("#f0f0f0")]),
-        ]))
-        elements.append(t)
-        elements.append(Spacer(1, 10*mm))
-
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
+def smart_format(pair, price):
+    if "JPY" in pair: return f"{price:.3f}"
+    elif "US30" in pair or "NAS100" in pair: return f"{price:.1f}"
+    elif "XAU" in pair: return f"{price:.2f}"
+    else: return f"{price:.5f}"
 
 # ==================== MAIN ====================
 def main():
     c1, c2 = st.columns([3,1])
-    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v4.1</span>", unsafe_allow_html=True)
+    with c1: st.markdown("### BlueStar Institutional <span class='institutional-badge'>v6.0</span> <span class='raw-badge'>RAW STRENGTH</span>", unsafe_allow_html=True)
     with c2: 
-        if st.button("Clear Cache"): 
-            st.session_state.scan_results = None
+        if st.button("Reset"):
+            st.session_state.clear()
             st.rerun()
 
     if 'scan_results' not in st.session_state: st.session_state.scan_results = None
 
-    with st.expander("⚙️ Configuration Avancée", expanded=False):
+    with st.expander("⚙️ Configuration", expanded=False):
         c1, c2 = st.columns(2)
-        with c1:
-            sl = st.number_input("SL xATR", 1.0, 3.0, 1.5)
-            tp = st.number_input("TP xATR", 1.0, 5.0, 3.0)
-            sc = st.slider("Score Min", 50, 95, 65)
-        with c2:
-            st.markdown("**Filtres**")
-            use_fvg = st.checkbox("Smart Money (FVG)", value=True)
-            strict_flip = st.checkbox("Strict HMA Flip", value=True)
-            sess_filt = st.checkbox("Session Filter", value=False)
+        sl = c1.number_input("SL xATR", 1.0, 3.0, 1.5)
+        tp = c1.number_input("TP xATR", 1.0, 5.0, 3.0)
+        fvg = c2.checkbox("FVG Required", True)
+        flip = c2.checkbox("Strict Flip", True)
 
-    if st.button("SCAN MARKET (SAFE MODE)", type="primary", use_container_width=True):
-        if not client: st.error("No API Token")
+    if st.button("🚀 SCANNER (RAW STRENGTH METHOD)", type="primary", use_container_width=True):
+        if not client: st.error("Token API Manquant")
         else:
-            with st.spinner("Initializing Scan Engine..."):
-                params = TradingParams(sl, tp, sc, use_fvg, strict_flip, sess_filt)
-                # Utilisation de la nouvelle fonction avec progression
-                st.session_state.scan_results = scan_with_progress(PAIRS_DEFAULT, TIMEFRAMES, params)
+            # 1. Calcul RAW STRENGTH (Les 28 Paires)
+            with st.spinner("Calcul 'Raw Strength' sur 28 Paires Forex..."):
+                raw_data = calculate_raw_strength()
+                
+                # Affichage debug rapide pour l'utilisateur
+                # st.write("Raw Strength Data:", raw_data) 
+            
+            # 2. Scan Technique
+            progress = st.progress(0)
+            status = st.empty()
+            
+            params = TradingParams(sl, tp, fvg, flip)
+            signals = []
+            total = len(SCAN_TARGETS) * len(TIMEFRAMES)
+            done = 0
+            
+            with ThreadPoolExecutor(max_workers=4) as exc:
+                futures = {exc.submit(lambda p,t: (get_candles_safe(p,t), p, t), p, tf): (p,tf) for p in SCAN_TARGETS for tf in TIMEFRAMES}
+                
+                for f in as_completed(futures):
+                    done += 1
+                    progress.progress(done/total)
+                    status.text(f"Analyse Technique... {int((done/total)*100)}%")
+                    try:
+                        df, p, tf = f.result()
+                        if not df.empty:
+                            s = analyze_market(df, p, tf, params, raw_data)
+                            if s: signals.append(s)
+                    except: pass
+            
+            status.empty()
+            progress.empty()
+            st.session_state.scan_results = sorted(signals, key=lambda x: x.raw_strength_diff, reverse=True)
 
+    # --- RESULTATS ---
     if st.session_state.scan_results:
         signals = st.session_state.scan_results
         
-        st.markdown("###")
         if signals:
-            st.download_button("📄 Télécharger PDF", generate_pdf(signals), f"BlueStar_{datetime.now().strftime('%H%M')}.pdf", "application/pdf")
-        
-        if not signals: st.info("No Signals found.")
+            buf = BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=10*mm)
+            elems = [Paragraph("<b>BlueStar Raw Strength Report</b>", getSampleStyleSheet()['Title']), Spacer(1, 10*mm)]
+            
+            for tf in TIMEFRAMES:
+                tf_sigs = [s for s in signals if s.timeframe == tf]
+                if not tf_sigs: continue
+                elems.append(Paragraph(f"<b>{tf} Structure</b>", getSampleStyleSheet()['Normal']))
+                data = [["Time", "Pair", "Action", "Price", "Force (Raw %)", "Conf"]]
+                for s in tf_sigs:
+                    c = colors.green if s.action == "BUY" else colors.red
+                    data.append([
+                        s.timestamp.strftime("%H:%M"), s.pair, s.action, 
+                        smart_format(s.pair, s.entry_price), 
+                        f"{s.raw_strength_diff:+.2f}%", # Affichage Raw %
+                        ", ".join(s.confluences)
+                    ])
+                t = Table(data)
+                t.setStyle(TableStyle([('TEXTCOLOR',(0,0),(-1,0),colors.white), ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#1a1f3a"))]))
+                elems.append(t); elems.append(Spacer(1, 5*mm))
+            
+            doc.build(elems)
+            st.download_button("📄 PDF Report", buf.getvalue(), "report.pdf", "application/pdf")
+
+        if not signals: st.info("Aucun signal aligné avec la Force Brute.")
         else:
             for tf in TIMEFRAMES:
                 tf_sigs = [s for s in signals if s.timeframe == tf]
@@ -323,12 +349,19 @@ def main():
                     data = []
                     for s in tf_sigs:
                         icon = "🟢" if s.action == "BUY" else "🔴"
+                        
+                        # Affichage de la FORCE RAW (%)
+                        force_str = f"{s.raw_strength_diff:+.2f}%"
+                        
                         data.append({
-                            "Time": s.timestamp.strftime("%H:%M"), "Pair": s.pair.replace("_","/"),
+                            "Heure": s.timestamp.strftime("%H:%M"), 
+                            "Paire": s.pair.replace("_","/"),
                             "Signal": f"{icon} {s.action}", 
-                            "Price": smart_format(s.pair, s.entry_price),
-                            "SL": smart_format(s.pair, s.stop_loss), "TP": smart_format(s.pair, s.take_profit),
-                            "Score": s.score, "Confluences": ", ".join(s.confluences)
+                            "Prix": smart_format(s.pair, s.entry_price),
+                            "SL": smart_format(s.pair, s.stop_loss), 
+                            "TP": smart_format(s.pair, s.take_profit),
+                            "Force (Raw %)": force_str,
+                            "Confirmations": ", ".join(s.confluences)
                         })
                     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
