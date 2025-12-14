@@ -9,65 +9,82 @@ import logging
 from typing import Optional, Dict, List
 
 # ==========================================
-# CONFIGURATION & LOGGING
+# 1. CONFIGURATION & STYLE (FINTECH PRO)
 # ==========================================
-st.set_page_config(page_title="Bluestar Hybrid M15", layout="centered", page_icon="⚡")
+st.set_page_config(page_title="Bluestar Hybrid", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.WARNING)
 
-# ==========================================
-# CSS FINTECH PRO
-# ==========================================
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
     * { font-family: 'Roboto', sans-serif; }
     
+    /* FOND & STRUCTURE */
     .stApp {
         background-color: #0f1117;
         background-image: radial-gradient(at 50% 0%, #1f2937 0%, #0f1117 70%);
     }
-    
     .main .block-container { max-width: 900px; padding-top: 2rem; }
 
+    /* TITRES */
     h1 {
         background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        font-weight: 900; font-size: 2.5em; text-align: center;
+        font-weight: 900; font-size: 2.2em; text-align: center; margin-bottom: 0;
     }
+    .subtitle { text-align: center; color: #64748b; font-size: 0.9em; margin-bottom: 2rem; }
     
+    /* BOUTONS */
     .stButton>button {
-        border-radius: 12px; height: 3.5em; font-weight: 700;
+        border-radius: 12px; height: 3.5em; font-weight: 700; letter-spacing: 0.5px;
         background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
         color: white; border: 1px solid rgba(255,255,255,0.1);
-        transition: all 0.2s ease;
+        transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 10px 20px rgba(37, 99, 235, 0.4); }
+    .stButton>button:hover { 
+        transform: translateY(-2px); 
+        box-shadow: 0 8px 20px rgba(37, 99, 235, 0.5);
+        background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+    }
 
+    /* CARTES & INFO */
     .streamlit-expanderHeader {
         background-color: #1e293b !important; border: 1px solid #334155;
-        border-radius: 10px; color: #f8fafc !important; padding: 1.5rem;
+        border-radius: 10px; color: #f8fafc !important; padding: 1.2rem;
+        transition: background 0.2s;
     }
+    .streamlit-expanderHeader:hover { background-color: #263345 !important; }
+    
     .streamlit-expanderContent {
         background-color: #161b22; border: 1px solid #334155; border-top: none;
-        border-bottom-left-radius: 10px; border-bottom-right-radius: 10px;
+        border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; padding: 20px;
     }
     
     .info-box {
-        background: #1e293b; border: 1px solid #334155; border-radius: 8px;
-        padding: 12px; margin-bottom: 8px;
+        background: rgba(255,255,255,0.03); border-radius: 8px;
+        padding: 10px 15px; margin-top: 10px; border: 1px solid rgba(255,255,255,0.05);
     }
     
-    .badge-fvg { background: #8b5cf6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
-    .badge-raw { background: #f59e0b; color: black; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+    /* BADGES INTELLIGENTS */
+    .badge-fvg { 
+        background: linear-gradient(45deg, #7c3aed, #8b5cf6); 
+        color: white; padding: 3px 8px; border-radius: 6px; 
+        font-size: 0.75em; font-weight: 700; border: 1px solid rgba(255,255,255,0.2);
+    }
+    .badge-gps { 
+        background: linear-gradient(45deg, #059669, #10b981); 
+        color: white; padding: 3px 8px; border-radius: 6px; 
+        font-size: 0.75em; font-weight: 700; border: 1px solid rgba(255,255,255,0.2);
+    }
     
-    /* DEBUG STYLE */
-    .debug-row { font-size: 0.8em; color: #64748b; border-bottom: 1px solid #334155; padding: 5px 0; }
+    /* SLIDERS */
+    div[data-baseweb="slider"] { margin-top: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# CONSTANTES & ASSETS
+# 2. DEFINITION DES ACTIFS
 # ==========================================
 ASSETS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD",
@@ -77,30 +94,19 @@ ASSETS = [
     "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY",
     "XAU_USD", "US30_USD", "NAS100_USD"
 ]
-
-FOREX_PAIRS = [x for x in ASSETS if "_" in x and "USD_" in x or "_USD" in x or "EUR" in x or "JPY" in x or "GBP" in x]
+FOREX_PAIRS = [x for x in ASSETS if "_" in x and "USD" in x or "EUR" in x or "JPY" in x or "GBP" in x]
 CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
 
 # ==========================================
-# MOTEUR API (OANDA) - VERSION DEBUG
+# 3. MOTEUR API
 # ==========================================
 class OandaClient:
     def __init__(self):
         try:
-            # Récupération des secrets
-            token = st.secrets["OANDA_ACCESS_TOKEN"]
-            acc_id = st.secrets["OANDA_ACCOUNT_ID"]
-            env = st.secrets.get("OANDA_ENVIRONMENT", "practice")
-            
-            self.client = oandapyV20.API(access_token=token, environment=env)
-            self.account_id = acc_id
+            self.client = oandapyV20.API(access_token=st.secrets["OANDA_ACCESS_TOKEN"], environment=st.secrets.get("OANDA_ENVIRONMENT", "practice"))
             self.req_count = 0
-            # Test simple de connexion
-            r = instruments.InstrumentsCandles(instrument="EUR_USD", params={"count": 1, "granularity": "M15"})
-            self.client.request(r)
-        except Exception as e:
-            st.error(f"❌ Erreur critique API OANDA: {str(e)}")
-            st.error("Vérifiez vos 'Secrets' Streamlit (Token/AccountID).")
+        except:
+            st.error("⚠️ Erreur de connexion API. Vérifiez vos clés.")
             st.stop()
 
     def get_candles(self, instrument, granularity, count=200):
@@ -112,21 +118,14 @@ class OandaClient:
             data = []
             for c in r.response['candles']:
                 if c['complete']:
-                    data.append({
-                        'time': c['time'], 'open': float(c['mid']['o']),
-                        'high': float(c['mid']['h']), 'low': float(c['mid']['l']),
-                        'close': float(c['mid']['c'])
-                    })
+                    data.append({'time': c['time'], 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])})
             df = pd.DataFrame(data)
-            if not df.empty:
-                df['time'] = pd.to_datetime(df['time'])
+            if not df.empty: df['time'] = pd.to_datetime(df['time'])
             return df
-        except Exception as e:
-            # En mode debug, on ne crash pas mais on retourne vide
-            return pd.DataFrame()
+        except: return pd.DataFrame()
 
 # ==========================================
-# INDICATEURS TECHNIQUES
+# 4. CERVEAU DU ROBOT (INDICATEURS)
 # ==========================================
 def calculate_atr(df, period=14):
     high, low, close = df['high'], df['low'], df['close']
@@ -140,19 +139,13 @@ def calculate_hma(series, length=20):
     return raw_hma.rolling(int(np.sqrt(length))).apply(lambda x: np.dot(x, np.arange(1, int(np.sqrt(length))+1)) / np.arange(1, int(np.sqrt(length))+1).sum(), raw=True)
 
 def detect_fvg(df):
+    """Détecte les Fair Value Gaps"""
     fvg_bull = (df['low'] > df['high'].shift(2))
     fvg_bear = (df['high'] < df['low'].shift(2))
     return fvg_bull, fvg_bear
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
 # ==========================================
-# MOTEUR RAW STRENGTH
+# 5. LOGIQUE HYBRIDE (GPS + RAW FLOW)
 # ==========================================
 def get_raw_strength_matrix(api):
     scores = {c: 0.0 for c in CURRENCIES}
@@ -160,211 +153,179 @@ def get_raw_strength_matrix(api):
         if "XAU" in pair or "US30" in pair or "NAS100" in pair: continue
         df = api.get_candles(pair, "D", count=2)
         if len(df) < 2: continue
-        
-        open_p = df['open'].iloc[-1]
-        close_p = df['close'].iloc[-1]
-        pct_change = ((close_p - open_p) / open_p) * 100
+        pct = ((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
         try:
             base, quote = pair.split("_")
-            if base in scores: scores[base] += pct_change
-            if quote in scores: scores[quote] -= pct_change
+            if base in scores: scores[base] += pct
+            if quote in scores: scores[quote] -= pct
         except: continue
     return scores
 
 def get_raw_strength_score(pair, strength_matrix, direction):
-    if "XAU" in pair or "US30" in pair or "NAS100" in pair:
-        return {'score': 0, 'diff': 0, 'details': 'N/A'}
+    if "XAU" in pair or "US30" in pair or "NAS100" in pair: return {'score': 0, 'details': 'N/A'}
     try:
         base, quote = pair.split("_")
-        s_base = strength_matrix.get(base, 0)
-        s_quote = strength_matrix.get(quote, 0)
+        s_base, s_quote = strength_matrix.get(base, 0), strength_matrix.get(quote, 0)
         diff = s_base - s_quote if direction == "BUY" else s_quote - s_base
-        score = 0
-        if diff > 2.0: score = 3
-        elif diff > 1.0: score = 2
-        elif diff > 0.5: score = 1
-        return {'score': score, 'diff': diff, 'details': f"{base}({s_base:.1f}) vs {quote}({s_quote:.1f})"}
-    except:
-        return {'score': 0, 'diff': 0, 'details': 'Error'}
+        score = 3 if diff > 2.0 else (2 if diff > 1.0 else (1 if diff > 0.5 else 0))
+        return {'score': score, 'details': f"{base}({s_base:.1f}) vs {quote}({s_quote:.1f})"}
+    except: return {'score': 0, 'details': 'Err'}
 
-# ==========================================
-# MOTEUR GPS
-# ==========================================
 def analyze_gps(api, symbol):
-    bias = "NEUTRAL"
+    """Vérification Macro Tendance"""
     score = 0
-    # Check H4
-    df_h4 = api.get_candles(symbol, "H4", count=100)
-    if not df_h4.empty:
-        sma50 = df_h4['close'].rolling(50).mean().iloc[-1]
-        if df_h4['close'].iloc[-1] > sma50: score += 1
-        else: score -= 1
-    # Check D1
-    df_d1 = api.get_candles(symbol, "D", count=100)
-    if not df_d1.empty:
-        sma50 = df_d1['close'].rolling(50).mean().iloc[-1]
-        if df_d1['close'].iloc[-1] > sma50: score += 1
-        else: score -= 1
-        
-    if score >= 1: bias = "BULLISH"
-    elif score <= -1: bias = "BEARISH"
-    return bias
+    for tf in ["H4", "D"]:
+        df = api.get_candles(symbol, tf, count=100)
+        if not df.empty:
+            sma = df['close'].rolling(50).mean().iloc[-1]
+            score += 1 if df['close'].iloc[-1] > sma else -1
+    return "BULLISH" if score >= 1 else ("BEARISH" if score <= -1 else "NEUTRAL")
 
 # ==========================================
-# SCANNER HYBRIDE (AVEC DEBUG)
+# 6. MOTEUR DE SCAN
 # ==========================================
-def run_hybrid_scan(api, min_score=6, debug_mode=False):
+def run_scan(api, min_score):
     signals = []
-    debug_logs = []
     
-    st.write("🔄 Calcul des Flux Institutionnels (Raw Strength)...")
-    strength_matrix = get_raw_strength_matrix(api)
-    st.success("✅ Matrice de flux calculée.")
+    # 1. Calcul du Flux Global
+    status_text = st.empty()
+    status_text.caption("🌊 Analyse du flux monétaire institutionnel...")
+    matrix = get_raw_strength_matrix(api)
     
-    progress = st.progress(0)
-    status = st.empty()
-    
+    # 2. Scan M15
+    bar = st.progress(0)
     for i, symbol in enumerate(ASSETS):
-        progress.progress((i + 1) / len(ASSETS))
-        status.text(f"Scanning M15: {symbol}...")
+        bar.progress((i+1)/len(ASSETS))
+        status_text.caption(f"🔭 Scanning {symbol} (M15)...")
         
-        # Récupération données
         df = api.get_candles(symbol, "M15", count=200)
-        
-        if df.empty:
-            debug_logs.append(f"❌ {symbol}: Aucune donnée reçue (Marché fermé ou erreur API)")
-            continue
-        
-        if len(df) < 50:
-            debug_logs.append(f"⚠️ {symbol}: Pas assez de bougies ({len(df)})")
-            continue
+        if df.empty or len(df) < 50: continue
 
         # Calculs
         df['hma'] = calculate_hma(df['close'], 20)
         df['atr'] = calculate_atr(df, 14)
         fvg_bull, fvg_bear = detect_fvg(df)
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
+        curr, prev = df.iloc[-1], df.iloc[-2]
         
-        # GPS
-        gps_bias = analyze_gps(api, symbol)
+        # GPS Bias
+        bias = analyze_gps(api, symbol)
         
-        # BUY Logic
-        score_buy = 0
-        conf_buy = []
-        if curr['hma'] > prev['hma']: score_buy += 2; conf_buy.append("HMA")
-        if gps_bias == "BULLISH": score_buy += 3; conf_buy.append("GPS")
-        if fvg_bull.iloc[-5:].any(): score_buy += 2; conf_buy.append("FVG")
-        raw_buy = get_raw_strength_score(symbol, strength_matrix, "BUY")
-        score_buy += raw_buy['score']
+        # Scoring Logic
+        s_buy, s_sell = 0, 0
+        conf_buy, conf_sell = [], []
         
-        # SELL Logic
-        score_sell = 0
-        conf_sell = []
-        if curr['hma'] < prev['hma']: score_sell += 2; conf_sell.append("HMA")
-        if gps_bias == "BEARISH": score_sell += 3; conf_sell.append("GPS")
-        if fvg_bear.iloc[-5:].any(): score_sell += 2; conf_sell.append("FVG")
-        raw_sell = get_raw_strength_score(symbol, strength_matrix, "SELL")
-        score_sell += raw_sell['score']
+        # BUY
+        if curr['hma'] > prev['hma']: s_buy += 2; conf_buy.append("HMA")
+        if bias == "BULLISH": s_buy += 3; conf_buy.append("GPS")
+        if fvg_bull.iloc[-5:].any(): s_buy += 2; conf_buy.append("FVG")
+        raw_b = get_raw_strength_score(symbol, matrix, "BUY")
+        s_buy += raw_b['score']
+        
+        # SELL
+        if curr['hma'] < prev['hma']: s_sell += 2; conf_sell.append("HMA")
+        if bias == "BEARISH": s_sell += 3; conf_sell.append("GPS")
+        if fvg_bear.iloc[-5:].any(): s_sell += 2; conf_sell.append("FVG")
+        raw_s = get_raw_strength_score(symbol, matrix, "SELL")
+        s_sell += raw_s['score']
         
         # Selection
-        final_signal = None
-        current_score = 0
-        
-        if score_buy > score_sell:
-            current_score = score_buy
-            direction = "BUY"
-            final_conf = conf_buy
-            final_raw = raw_buy
-            final_fvg = fvg_bull.iloc[-5:].any()
-        else:
-            current_score = score_sell
-            direction = "SELL"
-            final_conf = conf_sell
-            final_raw = raw_sell
-            final_fvg = fvg_bear.iloc[-5:].any()
+        best_score = max(s_buy, s_sell)
+        if best_score >= min_score:
+            is_buy = s_buy > s_sell
+            direction = "BUY" if is_buy else "SELL"
             
-        # Debug info
-        debug_logs.append(f"ℹ️ {symbol}: Score {current_score} ({direction}) | Conf: {final_conf}")
-
-        if current_score >= min_score:
-            atr_val = curr['atr']
-            sl = curr['close'] - (atr_val * 1.5) if direction == "BUY" else curr['close'] + (atr_val * 1.5)
-            tp = curr['close'] + (atr_val * 2.0) if direction == "BUY" else curr['close'] - (atr_val * 2.0)
+            # Gestion du risque
+            atr = curr['atr']
+            sl = curr['close'] - (atr*1.5) if is_buy else curr['close'] + (atr*1.5)
+            tp = curr['close'] + (atr*2.0) if is_buy else curr['close'] - (atr*2.0)
             
             signals.append({
                 "symbol": symbol, "type": direction, "price": curr['close'],
-                "score": current_score, "confluences": final_conf,
-                "raw_details": final_raw['details'], "has_fvg": final_fvg,
+                "score": best_score, "conf": conf_buy if is_buy else conf_sell,
+                "raw": raw_b['details'] if is_buy else raw_s['details'],
+                "fvg": fvg_bull.iloc[-5:].any() if is_buy else fvg_bear.iloc[-5:].any(),
                 "sl": sl, "tp": tp, "time": curr['time']
             })
             
-    status.empty()
-    progress.empty()
-    return signals, debug_logs
+    bar.empty()
+    status_text.empty()
+    return signals
 
 # ==========================================
-# UI & EXECUTION
+# 7. INTERFACE UTILISATEUR
 # ==========================================
-st.title("🛡️ BlueStar Hybrid M15")
-st.markdown("<p style='text-align: center; color: #94a3b8;'>Mode: <b>HYBRID</b> (Sniper + Institutional)</p>", unsafe_allow_html=True)
+st.title("Bluestar Hybrid")
+st.markdown("<div class='subtitle'>ARCHITECTURE SNIPER + MOTEUR INSTITUTIONNEL</div>", unsafe_allow_html=True)
 
-# Barre de contrôle
-c1, c2, c3 = st.columns([2, 1, 1])
-with c1:
-    min_score = st.slider("Score Min", 0, 10, 5, help="Mettez 0 pour tester si le marché est fermé")
-with c2:
-    debug_mode = st.checkbox("Mode Debug", value=True, help="Affiche les logs détaillés")
-with c3:
-    scan_btn = st.button("🚀 SCAN", type="primary", use_container_width=True)
+col1, col2 = st.columns([2, 1])
+with col1:
+    min_score = st.slider("Qualité Minimale du Signal", 4, 10, 6, format="%d/10")
+with col2:
+    st.write("") # Spacer
+    scan_btn = st.button("LANCER LE SCAN", type="primary", use_container_width=True)
 
 if scan_btn:
     api = OandaClient()
     start = time.time()
     
-    with st.spinner("Analyse en cours..."):
-        results, logs = run_hybrid_scan(api, min_score, debug_mode)
-        
-    duration = time.time() - start
+    with st.spinner("Synchronisation avec les marchés..."):
+        results = run_scan(api, min_score)
+    
     st.markdown("---")
     
-    # Affichage des logs DEBUG (utile pour comprendre pourquoi rien ne sort)
-    if debug_mode:
-        with st.expander("🔍 Logs du Scanner (Pourquoi c'est vide ?)", expanded=True):
-            for log in logs:
-                if "❌" in log: st.error(log)
-                elif "ℹ️" in log and "Score 0" in log: st.caption(log)
-                else: st.text(log)
-    
     if not results:
-        st.warning(f"Aucun signal qualifié (Score >= {min_score}).")
-        st.info("💡 Conseil : Si nous sommes le week-end, mettez le 'Score Min' à 0 pour voir les dernières données.")
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px; background: rgba(255,255,255,0.05); border-radius: 10px;">
+            <h3>😴 Aucun signal High-Prob détecté</h3>
+            <p style="color: #94a3b8;">Le marché ne présente pas de configuration propre (Score < {min_score}/10).</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.success(f"🎯 {len(results)} Opportunités détectées")
-        results_sorted = sorted(results, key=lambda x: (x['score'], x['has_fvg']), reverse=True)
+        # Tri : Score > FVG > Alphabétique
+        results_sorted = sorted(results, key=lambda x: (x['score'], x['fvg']), reverse=True)
+        
+        st.success(f"⚡ {len(results)} Opportunités Confirmées")
         
         for sig in results_sorted:
             is_buy = sig['type'] == "BUY"
             color = "#10b981" if is_buy else "#ef4444"
-            bg_grad = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
+            grad = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
             icon = "🟢" if is_buy else "🔴"
             
-            badges = ""
-            if sig['has_fvg']: badges += "<span class='badge-fvg'>🏦 FVG</span> "
-            if "GPS" in str(sig['confluences']): badges += "<span class='badge-raw'>🛡️ GPS</span>"
+            # Badges
+            badges_html = ""
+            if sig['fvg']: badges_html += "<span class='badge-fvg'>🏦 SMART MONEY</span> "
+            if "GPS" in sig['conf']: badges_html += "<span class='badge-gps'>🛡️ GPS SECURE</span>"
             
-            with st.expander(f"{icon} {sig['symbol']}  |  Score: {sig['score']}/10  {badges}", expanded=True):
+            with st.expander(f"{icon} {sig['symbol']}  |  Score {sig['score']}/10", expanded=True):
+                # Header Card
                 st.markdown(f"""
-                <div style="background: {bg_grad}; padding: 15px; border-radius: 8px; border: 1px solid {color}; margin-bottom: 10px;">
+                <div style="background: {grad}; padding: 18px; border-radius: 8px; border-left: 5px solid {color}; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.2);">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="font-size: 1.5em; font-weight: 900; color: white;">{sig['type']} @ {sig['price']:.5f}</span>
-                        <span style="color: rgba(255,255,255,0.8);">{sig['time'].strftime('%H:%M')} UTC</span>
+                        <div>
+                            <span style="font-size: 1.6em; font-weight: 900; color: white; letter-spacing: 1px;">{sig['type']}</span>
+                            <div style="color: rgba(255,255,255,0.9); font-weight: 500;">@ {sig['price']:.5f}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 0.9em; color: rgba(255,255,255,0.7);">{sig['time'].strftime('%H:%M')} UTC</div>
+                            <div style="margin-top: 5px;">{badges_html}</div>
+                        </div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
                 
+                # Risk Management
                 c1, c2, c3 = st.columns(3)
-                c1.markdown(f"**SL:** <span style='color: #ef4444'>{sig['sl']:.5f}</span>", unsafe_allow_html=True)
-                c2.markdown(f"**TP:** <span style='color: #10b981'>{sig['tp']:.5f}</span>", unsafe_allow_html=True)
-                c3.markdown(f"**Flux:** {sig['raw_details']}")
-                st.caption(f"Confluences: {', '.join(sig['confluences'])}")
+                c1.markdown(f"<div style='text-align: center'><small style='color:#64748b'>STOP LOSS</small><br><strong style='color:#ef4444; font-size:1.1em'>{sig['sl']:.5f}</strong></div>", unsafe_allow_html=True)
+                c2.markdown(f"<div style='text-align: center'><small style='color:#64748b'>TAKE PROFIT</small><br><strong style='color:#10b981; font-size:1.1em'>{sig['tp']:.5f}</strong></div>", unsafe_allow_html=True)
+                c3.markdown(f"<div style='text-align: center'><small style='color:#64748b'>RR RATIO</small><br><strong style='color:#e2e8f0; font-size:1.1em'>1:1.3</strong></div>", unsafe_allow_html=True)
+                
+                # Technical Details
+                st.markdown(f"""
+                <div class='info-box'>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.9em;">
+                        <span>🌊 <b>Flux:</b> {sig['raw']}</span>
+                        <span>🧩 <b>Confluences:</b> {', '.join(sig['conf'])}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
