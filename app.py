@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import time
 import logging
 from typing import Optional, Dict, List
-from scipy.signal import find_peaks  # NOUVEAU POUR S/R
 
 # ==========================================
 # CONFIGURATION & LOGGING
@@ -410,36 +409,46 @@ def get_colored_hma(df: pd.DataFrame, length: int = 20) -> tuple:
     return hma, trend_series
 
 # ==========================================
-# NEW: SUPPORT & RESISTANCE ENGINE
+# SUPPORT & RESISTANCE (OPTIMISÉ & LÉGER)
 # ==========================================
 
 def get_nearest_sr(df: pd.DataFrame, current_price: float, timeframe: str = 'D') -> Dict:
     """
     Identifie le Support/Résistance le plus proche
-    Basé sur les pivots (Fractales)
+    SANS librairie externe (Utilisation des Fractales Bill Williams)
     """
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 20:
         return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
     
-    # Paramètres de distance adaptatifs
-    distance = 10 if timeframe == 'W' else 5
+    # 1. Détection des Fractales (High > 2 bougies avant/après)
+    # Méthode "Vectorisée" Pandas ultra-rapide
     
-    # Trouver pivots
-    r_indices, _ = find_peaks(df['high'], distance=distance)
-    s_indices, _ = find_peaks(-df['low'], distance=distance)
+    # Résistances (Sommets locaux)
+    is_res = (df['high'] > df['high'].shift(1)) & \
+             (df['high'] > df['high'].shift(2)) & \
+             (df['high'] > df['high'].shift(-1)) & \
+             (df['high'] > df['high'].shift(-2))
+             
+    # Supports (Creux locaux)
+    is_sup = (df['low'] < df['low'].shift(1)) & \
+             (df['low'] < df['low'].shift(2)) & \
+             (df['low'] < df['low'].shift(-1)) & \
+             (df['low'] < df['low'].shift(-2))
     
-    res_levels = df.iloc[r_indices]['high'].values
-    sup_levels = df.iloc[s_indices]['low'].values
+    # On récupère les niveaux
+    res_levels = df[is_res]['high'].values
+    sup_levels = df[is_sup]['low'].values
     
-    # Filtrer les niveaux pertinents (proches du prix actuel)
-    # On ne garde que ceux à +/- 5% pour optimiser
+    # 2. Filtrage : On ne garde que les niveaux proches du prix actuel
+    # On évite de scanner des résistances d'il y a 3 ans trop loin
     relevant_res = res_levels[res_levels > current_price]
     relevant_sup = sup_levels[sup_levels < current_price]
     
+    # 3. Le plus proche
     nearest_res = relevant_res.min() if len(relevant_res) > 0 else None
     nearest_sup = relevant_sup.max() if len(relevant_sup) > 0 else None
     
-    # Calculer distances en %
+    # 4. Calcul distances
     dist_res = ((nearest_res - current_price) / current_price * 100) if nearest_res else 999
     dist_sup = ((current_price - nearest_sup) / current_price * 100) if nearest_sup else 999
     
