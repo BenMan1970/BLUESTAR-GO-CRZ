@@ -397,7 +397,7 @@ def get_colored_hma(df: pd.DataFrame, length: int = 20) -> tuple:
     return hma, trend_series
 
 # ==========================================
-# NOUVEAU : FVG DETECTION (Smart Money)
+# FVG DETECTION (Smart Money)
 # ==========================================
 
 def detect_fvg(df: pd.DataFrame) -> tuple:
@@ -421,7 +421,7 @@ def detect_fvg(df: pd.DataFrame) -> tuple:
     return has_bull, has_bear
 
 # ==========================================
-# NOUVEAU : PIPS CALCULATOR
+# PIPS CALCULATOR
 # ==========================================
 
 def get_pips(pair: str, price_diff: float) -> float:
@@ -790,7 +790,7 @@ def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Di
     }
 
 # ==========================================
-# NOUVEAU : RISK MANAGER (SL/TP AUTO)
+# RISK MANAGER (SL/TP AUTO)
 # ==========================================
 
 def calculate_risk_management(price: float, atr: float, direction: str, pair: str, 
@@ -833,7 +833,7 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                    enable_risk_manager: bool = True,
                    sl_atr_mult: float = 1.5,
                    tp_atr_mult: float = 2.0) -> List[Dict]:
-    """Scanner hybride avec toutes les features"""
+    """Scanner hybride avec subtilités de logique"""
     signals = []
     skipped = 0
     
@@ -868,39 +868,56 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
             if hma_trend.empty:
                 continue
             
-            # NOUVEAU : Détection FVG
+            # TWEAK: ADX FILTER (Range detection)
+            adx_series, _, _ = calculate_adx(df_m15, 14)
+            current_adx = adx_series.iloc[-1]
+            
+            # Détection FVG
             has_fvg_bull, has_fvg_bear = detect_fvg(df_m15)
             
             current_price = df_m15['close'].iloc[-1]
             atr_m15 = calculate_atr(df_m15, 14).iloc[-1]
             signal_time_utc = df_m15['time'].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc)
             
-            # Test BUY
+            # === Test BUY ===
             rsi_buy = calculate_rsi_score(rsi_series, 'BUY')
             if rsi_buy['score'] > 0:
                 hma_buy = calculate_hma_score(hma_trend, 'BUY')
                 mtf_buy = calculate_mtf_score_gps(api, symbol, 'BUY')
                 cs_buy = calculate_currency_strength_score(api, symbol, 'BUY')
                 
-                # CORRECTION LOGIQUE : 
-                # Le bonus FVG n'est appliqué que si l'alignement MTF est présent (Score MTF > 0).
-                # Sans alignement MTF, le score total est bridé pour éviter un "7/10" illogique.
+                # TWEAK 1: HMA PRICE CHECK
+                # Si le prix est sous le HMA, le signal vert est moins fiable
+                current_hma_val = hma.iloc[-1]
+                if current_price < current_hma_val:
+                     hma_buy['score'] = max(0, hma_buy['score'] - 1)
+                
+                # Bonus FVG (seulement si MTF positif)
                 raw_fvg_bonus = 2 if has_fvg_bull else 0
                 fvg_bonus = raw_fvg_bonus if mtf_buy['score'] > 0 else 0
                 
                 total_score = rsi_buy['score'] + hma_buy['score'] + mtf_buy['score'] + cs_buy['score'] + fvg_bonus
                 
+                # TWEAK 2: PENALITE DE DIVERGENCE (Currency)
+                # Si divergence devise (Score 0) sur Forex, on pénalise le score total
+                if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
+                    total_score -= 2
+                
+                # TWEAK 3: ADX FILTER (Range)
+                # Si ADX < 20, marché mou, petite pénalité
+                if current_adx < 20:
+                    total_score -= 1
+
                 if total_score >= min_score:
-                    # NOUVEAU : Risk Management
                     risk_data = {}
                     if enable_risk_manager:
                         risk_data = calculate_risk_management(current_price, atr_m15, 'BUY', symbol, 
                                                              sl_atr_mult, tp_atr_mult)
                     
-                    # Qualité
+                    # Logic Qualité (identique)
                     if total_score >= 10 and mtf_buy['quality'] in ['A+', 'A'] and cs_buy['score'] == 2 and has_fvg_bull:
                         quality = "LEGENDARY"
-                        quality_color = "#fbbf24"  # Gold
+                        quality_color = "#fbbf24"
                     elif total_score >= 9 and mtf_buy['quality'] in ['A+', 'A'] and cs_buy['score'] == 2:
                         quality = "PREMIUM"
                         quality_color = "#3b82f6"
@@ -919,11 +936,14 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                     
                     warning = ""
                     if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
-                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT"]:
-                            quality = "FORT"
-                            quality_color = "#34d399"
-                        warning = "⚠️ Divergence devise"
+                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
+                            quality = "BON" # Downgrade visuel forcé si divergence
+                            quality_color = "#fbbf24"
+                        warning = "⚠️ Divergence devise (Pénalité appliquée)"
                     
+                    if current_adx < 20:
+                        warning += " | ⚠️ ADX Faible (Range)"
+
                     signals.append({
                         "symbol": symbol,
                         "type": "BUY",
@@ -938,27 +958,37 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                         "mtf": mtf_buy,
                         "currency_strength": cs_buy,
                         "has_fvg": has_fvg_bull,
-                        "fvg_bonus": fvg_bonus, # On garde la valeur appliquée
+                        "fvg_bonus": fvg_bonus,
                         "risk_management": risk_data,
                         "timestamp_utc": signal_time_utc
                     })
             
-            # Test SELL
+            # === Test SELL ===
             rsi_sell = calculate_rsi_score(rsi_series, 'SELL')
             if rsi_sell['score'] > 0:
                 hma_sell = calculate_hma_score(hma_trend, 'SELL')
                 mtf_sell = calculate_mtf_score_gps(api, symbol, 'SELL')
                 cs_sell = calculate_currency_strength_score(api, symbol, 'SELL')
                 
-                # CORRECTION LOGIQUE : 
-                # Le bonus FVG n'est appliqué que si l'alignement MTF est présent.
+                # TWEAK 1: HMA PRICE CHECK
+                current_hma_val = hma.iloc[-1]
+                if current_price > current_hma_val:
+                     hma_sell['score'] = max(0, hma_sell['score'] - 1)
+                
                 raw_fvg_bonus = 2 if has_fvg_bear else 0
                 fvg_bonus = raw_fvg_bonus if mtf_sell['score'] > 0 else 0
                 
                 total_score = rsi_sell['score'] + hma_sell['score'] + mtf_sell['score'] + cs_sell['score'] + fvg_bonus
                 
+                # TWEAK 2: PENALITE DIVERGENCE
+                if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
+                    total_score -= 2
+                
+                # TWEAK 3: ADX FILTER
+                if current_adx < 20:
+                    total_score -= 1
+
                 if total_score >= min_score:
-                    # NOUVEAU : Risk Management
                     risk_data = {}
                     if enable_risk_manager:
                         risk_data = calculate_risk_management(current_price, atr_m15, 'SELL', symbol,
@@ -985,10 +1015,13 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                     
                     warning = ""
                     if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
-                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT"]:
-                            quality = "FORT"
-                            quality_color = "#f472b6"
-                        warning = "⚠️ Divergence devise"
+                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
+                             quality = "BON" # Downgrade
+                             quality_color = "#fb7185"
+                        warning = "⚠️ Divergence devise (Pénalité appliquée)"
+
+                    if current_adx < 20:
+                        warning += " | ⚠️ ADX Faible (Range)"
                     
                     signals.append({
                         "symbol": symbol,
@@ -1004,7 +1037,7 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                         "mtf": mtf_sell,
                         "currency_strength": cs_sell,
                         "has_fvg": has_fvg_bear,
-                        "fvg_bonus": fvg_bonus, # On garde la valeur appliquée
+                        "fvg_bonus": fvg_bonus,
                         "risk_management": risk_data,
                         "timestamp_utc": signal_time_utc
                     })
@@ -1080,7 +1113,7 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
             st.markdown(f"<div style='text-align: center; margin-bottom: 15px;'>{badges_html}</div>", unsafe_allow_html=True)
 
         if sig.get('warning'):
-            st.warning(f"⚠️ {sig['warning']}")
+            st.warning(f"{sig['warning']}")
 
         # Métriques principales
         c1, c2, c3, c4 = st.columns(4)
@@ -1090,7 +1123,7 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
         atr_fmt = f"{sig['atr_m15']:.4f}" if sig['atr_m15'] < 1 else f"{sig['atr_m15']:.2f}"
         c4.metric("ATR M15", atr_fmt)
 
-        # NOUVEAU : Risk Management Section
+        # Risk Management Section
         if show_risk and sig.get('risk_management'):
             st.divider()
             st.markdown("##### 🎯 Risk Management (ATR-Based)")
