@@ -500,73 +500,124 @@ def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dic
     return currency_scores
 
 def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: str) -> Dict:
-    """Score Currency Strength : 0-2 points"""
+    """
+    Score Currency Strength Hybride :
+    - FOREX : Comparaison relative (Ex: EUR vs USD)
+    - INDICES/MATIERES : Momentum Intraday (Performance depuis l'ouverture D1)
+    """
     
-    if symbol not in FOREX_PAIRS:
+    # === CAS 1 : FOREX (On garde ta logique intacte) ===
+    if symbol in FOREX_PAIRS:
+        parts = symbol.split('_')
+        if len(parts) != 2:
+            return {'score': 0, 'details': 'Format invalide', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+        
+        base, quote = parts[0], parts[1]
+        
+        try:
+            strength_scores = calculate_currency_strength(api)
+        except:
+            return {'score': 0, 'details': 'Erreur calcul', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+        
+        if base not in strength_scores or quote not in strength_scores:
+            return {'score': 0, 'details': 'Données manquantes', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+        
+        base_score = strength_scores[base]
+        quote_score = strength_scores[quote]
+        
+        sorted_currencies = sorted(strength_scores.items(), key=lambda x: x[1], reverse=True)
+        base_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == base)
+        quote_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == quote)
+        total_currencies = len(sorted_currencies)
+        
+        score = 0
+        details = []
+        
+        if direction == 'BUY':
+            if base_rank <= 3 and quote_rank >= total_currencies - 2:
+                score = 2
+                details.append(f"✅ {base} TOP3 (#{base_rank}) & {quote} BOTTOM3 (#{quote_rank})")
+            elif base_score > quote_score:
+                score = 1
+                details.append(f"📊 {base} > {quote} (Δ: {base_score - quote_score:+.2f}%)")
+            else:
+                score = 0
+                details.append(f"⚠️ Divergence : {quote} plus fort que {base}")
+        
+        else:  # SELL
+            if quote_rank <= 3 and base_rank >= total_currencies - 2:
+                score = 2
+                details.append(f"✅ {quote} TOP3 (#{quote_rank}) & {base} BOTTOM3 (#{base_rank})")
+            elif quote_score > base_score:
+                score = 1
+                details.append(f"📊 {quote} > {base} (Δ: {quote_score - base_score:+.2f}%)")
+            else:
+                score = 0
+                details.append(f"⚠️ Divergence : {base} plus fort que {quote}")
+        
+        rank_info = f"{base}:#{base_rank} vs {quote}:#{quote_rank}"
+        
         return {
-            'score': 0,
-            'details': 'Non-Forex',
-            'base_score': 0,
-            'quote_score': 0,
-            'rank_info': 'N/A'
+            'score': score,
+            'details': ' | '.join(details),
+            'base_score': base_score,
+            'quote_score': quote_score,
+            'rank_info': rank_info
         }
-    
-    parts = symbol.split('_')
-    if len(parts) != 2:
-        return {'score': 0, 'details': 'Format invalide', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
-    
-    base, quote = parts[0], parts[1]
-    
-    try:
-        strength_scores = calculate_currency_strength(api)
-    except:
-        return {'score': 0, 'details': 'Erreur calcul', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
-    
-    if base not in strength_scores or quote not in strength_scores:
-        return {'score': 0, 'details': 'Données manquantes', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
-    
-    base_score = strength_scores[base]
-    quote_score = strength_scores[quote]
-    
-    sorted_currencies = sorted(strength_scores.items(), key=lambda x: x[1], reverse=True)
-    base_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == base)
-    quote_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == quote)
-    total_currencies = len(sorted_currencies)
-    
-    score = 0
-    details = []
-    
-    if direction == 'BUY':
-        if base_rank <= 3 and quote_rank >= total_currencies - 2:
-            score = 2
-            details.append(f"✅ {base} TOP3 (#{base_rank}) & {quote} BOTTOM3 (#{quote_rank})")
-        elif base_score > quote_score:
-            score = 1
-            details.append(f"📊 {base} > {quote} (Δ: {base_score - quote_score:+.2f}%)")
-        else:
+
+    # === CAS 2 : INDICES, OR, CRYPTO (Momentum Intraday) ===
+    else:
+        try:
+            # On récupère la bougie Daily pour avoir l'ouverture du jour
+            df_d1 = api.get_candles(symbol, "D", count=2)
+            if df_d1.empty:
+                 return {'score': 0, 'details': 'Pas de data D1', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+            
+            open_price = df_d1['open'].iloc[-1]
+            curr_price = df_d1['close'].iloc[-1]
+            
+            # Performance en % depuis l'ouverture du marché (00:00)
+            perf_pct = ((curr_price - open_price) / open_price) * 100
+            
             score = 0
-            details.append(f"⚠️ Divergence : {quote} plus fort que {base}")
-    
-    else:  # SELL
-        if quote_rank <= 3 and base_rank >= total_currencies - 2:
-            score = 2
-            details.append(f"✅ {quote} TOP3 (#{quote_rank}) & {base} BOTTOM3 (#{base_rank})")
-        elif quote_score > base_score:
-            score = 1
-            details.append(f"📊 {quote} > {base} (Δ: {quote_score - base_score:+.2f}%)")
-        else:
-            score = 0
-            details.append(f"⚠️ Divergence : {base} plus fort que {quote}")
-    
-    rank_info = f"{base}:#{base_rank} vs {quote}:#{quote_rank}"
-    
-    return {
-        'score': score,
-        'details': ' | '.join(details),
-        'base_score': base_score,
-        'quote_score': quote_score,
-        'rank_info': rank_info
-    }
+            details = []
+            
+            # Seuils de volatilité (0.3% pour indices est un mouvement significatif)
+            THRESHOLD_STRONG = 0.30 
+            
+            if direction == 'BUY':
+                if perf_pct > THRESHOLD_STRONG:
+                    score = 2
+                    details.append(f"🚀 Grosse impulsion Haussière (+{perf_pct:.2f}%)")
+                elif perf_pct > 0:
+                    score = 1
+                    details.append(f"📈 Journée Verte (+{perf_pct:.2f}%)")
+                else:
+                    score = 0
+                    details.append(f"⚠️ Contre-tendance (Journée Rouge: {perf_pct:.2f}%)")
+            
+            else: # SELL
+                if perf_pct < -THRESHOLD_STRONG:
+                    score = 2
+                    details.append(f"☄️ Grosse chute Baissière ({perf_pct:.2f}%)")
+                elif perf_pct < 0:
+                    score = 1
+                    details.append(f"📉 Journée Rouge ({perf_pct:.2f}%)")
+                else:
+                    score = 0
+                    details.append(f"⚠️ Contre-tendance (Journée Verte: +{perf_pct:.2f}%)")
+            
+            # Adaptation pour l'affichage visuel (base_score sera la perf)
+            return {
+                'score': score,
+                'details': ' | '.join(details),
+                'base_score': perf_pct,  # On utilise ce champ pour afficher le %
+                'quote_score': 0,        # Champ inutilisé pour les indices
+                'rank_info': f"Daily: {perf_pct:+.2f}%"
+            }
+            
+        except Exception as e:
+            return {'score': 0, 'details': f'Err: {str(e)}', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
 
 # ==========================================
 # MTF GPS LOGIC
@@ -833,7 +884,7 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                    enable_risk_manager: bool = True,
                    sl_atr_mult: float = 1.5,
                    tp_atr_mult: float = 2.0) -> List[Dict]:
-    """Scanner hybride avec subtilités de logique"""
+    """Scanner hybride avec subtilités de logique et gestion Indices"""
     signals = []
     skipped = 0
     
@@ -887,7 +938,6 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 cs_buy = calculate_currency_strength_score(api, symbol, 'BUY')
                 
                 # TWEAK 1: HMA PRICE CHECK
-                # Si le prix est sous le HMA, le signal vert est moins fiable
                 current_hma_val = hma.iloc[-1]
                 if current_price < current_hma_val:
                      hma_buy['score'] = max(0, hma_buy['score'] - 1)
@@ -898,13 +948,11 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 
                 total_score = rsi_buy['score'] + hma_buy['score'] + mtf_buy['score'] + cs_buy['score'] + fvg_bonus
                 
-                # TWEAK 2: PENALITE DE DIVERGENCE (Currency)
-                # Si divergence devise (Score 0) sur Forex, on pénalise le score total
+                # TWEAK 2: PENALITE DE DIVERGENCE (Uniquement Forex)
                 if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
                     total_score -= 2
                 
                 # TWEAK 3: ADX FILTER (Range)
-                # Si ADX < 20, marché mou, petite pénalité
                 if current_adx < 20:
                     total_score -= 1
 
@@ -914,7 +962,7 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                         risk_data = calculate_risk_management(current_price, atr_m15, 'BUY', symbol, 
                                                              sl_atr_mult, tp_atr_mult)
                     
-                    # Logic Qualité (identique)
+                    # Logic Qualité
                     if total_score >= 10 and mtf_buy['quality'] in ['A+', 'A'] and cs_buy['score'] == 2 and has_fvg_bull:
                         quality = "LEGENDARY"
                         quality_color = "#fbbf24"
@@ -937,10 +985,13 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                     warning = ""
                     if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
                         if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
-                            quality = "BON" # Downgrade visuel forcé si divergence
+                            quality = "BON" 
                             quality_color = "#fbbf24"
                         warning = "⚠️ Divergence devise (Pénalité appliquée)"
-                    
+                    elif cs_buy['score'] == 0 and symbol not in FOREX_PAIRS:
+                        # Warning spécifique Indices si contre-tendance daily
+                         warning = "⚠️ Contre-tendance Daily (Momentum)"
+
                     if current_adx < 20:
                         warning += " | ⚠️ ADX Faible (Range)"
 
@@ -980,7 +1031,7 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 
                 total_score = rsi_sell['score'] + hma_sell['score'] + mtf_sell['score'] + cs_sell['score'] + fvg_bonus
                 
-                # TWEAK 2: PENALITE DIVERGENCE
+                # TWEAK 2: PENALITE DIVERGENCE (Forex)
                 if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
                     total_score -= 2
                 
@@ -1016,9 +1067,11 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                     warning = ""
                     if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
                         if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
-                             quality = "BON" # Downgrade
+                             quality = "BON" 
                              quality_color = "#fb7185"
                         warning = "⚠️ Divergence devise (Pénalité appliquée)"
+                    elif cs_sell['score'] == 0 and symbol not in FOREX_PAIRS:
+                         warning = "⚠️ Contre-tendance Daily (Momentum)"
 
                     if current_adx < 20:
                         warning += " | ⚠️ ADX Faible (Range)"
@@ -1119,7 +1172,11 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Score Total", f"{sig['total_score']}/{max_score}")
         c2.metric("Qualité GPS", sig['mtf']['quality'])
-        c3.metric("Force Devise", f"{sig['currency_strength']['score']}/2")
+        
+        # Format Currency Strength adapté (Forex vs Indices)
+        cs_text = f"{sig['currency_strength']['score']}/2"
+        c3.metric("Force/Momentum", cs_text)
+        
         atr_fmt = f"{sig['atr_m15']:.4f}" if sig['atr_m15'] < 1 else f"{sig['atr_m15']:.2f}"
         c4.metric("ATR M15", atr_fmt)
 
@@ -1200,14 +1257,23 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
             </div>
             """, unsafe_allow_html=True)
             
-            # Currency Strength
+            # Currency Strength / Momentum
             base_score = sig['currency_strength']['base_score']
             quote_score = sig['currency_strength']['quote_score']
+            
+            # Affichage dynamique (si Indices : pas de "vs 0.0%")
+            if sig['symbol'] in FOREX_PAIRS:
+                strength_label = "Currency Strength"
+                strength_val = f"{base_score:.1f}% vs {quote_score:.1f}%"
+            else:
+                strength_label = "Daily Momentum"
+                strength_val = f"{base_score:+.2f}%"
+
             st.markdown(f"""
             <div class="info-box">
                 <div style="display: flex; justify-content: space-between;">
-                    <span style="color: #94a3b8;">Currency Strength</span>
-                    <span style="font-weight: bold; color: white;">{base_score:.1f}% vs {quote_score:.1f}%</span>
+                    <span style="color: #94a3b8;">{strength_label}</span>
+                    <span style="font-weight: bold; color: white;">{strength_val}</span>
                 </div>
                 <div style="font-size: 0.85em; margin-top: 5px;">{sig['currency_strength']['rank_info']}</div>
             </div>
@@ -1251,7 +1317,7 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
             f"RSI({sig['rsi']['score']})",
             f"HMA({sig['hma']['score']})",
             f"GPS({sig['mtf']['score']})",
-            f"Currency({sig['currency_strength']['score']})"
+            f"Force({sig['currency_strength']['score']})"
         ]
         if sig.get('fvg_bonus', 0) > 0:
             breakdown_parts.append(f"FVG(+{sig['fvg_bonus']})")
@@ -1365,3 +1431,4 @@ if scan_btn:
         <span style="font-size: 0.75em;">Trading involves risk • Always use proper risk management</span>
     </div>
     """, unsafe_allow_html=True)
+      
