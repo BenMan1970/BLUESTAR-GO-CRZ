@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import time
 import logging
 from typing import Optional, Dict, List
+from scipy.signal import find_peaks  # NOUVEAU POUR S/R
 
 # ==========================================
 # CONFIGURATION & LOGGING
@@ -148,6 +149,18 @@ st.markdown("""
         display: inline-block;
         margin: 2px;
         box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3);
+    }
+
+    .badge-sr {
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        color: white;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 0.75em;
+        font-weight: 700;
+        display: inline-block;
+        margin: 2px;
+        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
     }
 
     .stAlert {
@@ -397,24 +410,58 @@ def get_colored_hma(df: pd.DataFrame, length: int = 20) -> tuple:
     return hma, trend_series
 
 # ==========================================
-# FVG DETECTION (Smart Money)
+# NEW: SUPPORT & RESISTANCE ENGINE
+# ==========================================
+
+def get_nearest_sr(df: pd.DataFrame, current_price: float, timeframe: str = 'D') -> Dict:
+    """
+    Identifie le Support/Résistance le plus proche
+    Basé sur les pivots (Fractales)
+    """
+    if df.empty or len(df) < 50:
+        return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
+    
+    # Paramètres de distance adaptatifs
+    distance = 10 if timeframe == 'W' else 5
+    
+    # Trouver pivots
+    r_indices, _ = find_peaks(df['high'], distance=distance)
+    s_indices, _ = find_peaks(-df['low'], distance=distance)
+    
+    res_levels = df.iloc[r_indices]['high'].values
+    sup_levels = df.iloc[s_indices]['low'].values
+    
+    # Filtrer les niveaux pertinents (proches du prix actuel)
+    # On ne garde que ceux à +/- 5% pour optimiser
+    relevant_res = res_levels[res_levels > current_price]
+    relevant_sup = sup_levels[sup_levels < current_price]
+    
+    nearest_res = relevant_res.min() if len(relevant_res) > 0 else None
+    nearest_sup = relevant_sup.max() if len(relevant_sup) > 0 else None
+    
+    # Calculer distances en %
+    dist_res = ((nearest_res - current_price) / current_price * 100) if nearest_res else 999
+    dist_sup = ((current_price - nearest_sup) / current_price * 100) if nearest_sup else 999
+    
+    return {
+        'sup': nearest_sup,
+        'res': nearest_res,
+        'dist_sup': dist_sup,
+        'dist_res': dist_res
+    }
+
+# ==========================================
+# FVG DETECTION
 # ==========================================
 
 def detect_fvg(df: pd.DataFrame) -> tuple:
-    """
-    Détection Fair Value Gap (Smart Money)
-    Returns: (has_bull_fvg, has_bear_fvg)
-    """
+    """Détection Fair Value Gap"""
     if len(df) < 5:
         return False, False
     
-    # FVG Bullish : Low actuelle > High d'il y a 2 bougies
     fvg_bull = (df['low'] > df['high'].shift(2))
-    
-    # FVG Bearish : High actuelle < Low d'il y a 2 bougies
     fvg_bear = (df['high'] < df['low'].shift(2))
     
-    # Vérifier les 5 dernières bougies
     has_bull = fvg_bull.iloc[-5:].any()
     has_bear = fvg_bear.iloc[-5:].any()
     
@@ -425,15 +472,10 @@ def detect_fvg(df: pd.DataFrame) -> tuple:
 # ==========================================
 
 def get_pips(pair: str, price_diff: float) -> float:
-    """
-    Calcule la valeur en pips pour Forex
-    Pour indices/or, retourne les points bruts
-    """
-    # Non-Forex : retourner points bruts
+    """Calcule la valeur en pips"""
     if "XAU" in pair or "US30" in pair or "NAS100" in pair or "SPX500" in pair or "XPT" in pair:
         return abs(price_diff)
     
-    # Forex : calculer pips
     multiplier = 100 if "JPY" in pair else 10000
     return abs(price_diff * multiplier)
 
@@ -443,7 +485,6 @@ def get_pips(pair: str, price_diff: float) -> float:
 
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
     """Calcule le score de force pour chaque devise"""
-    
     cache_age = time.time() - st.session_state.currency_strength_time
     if st.session_state.currency_strength_cache and cache_age < CURRENCY_STRENGTH_CACHE_DURATION:
         return st.session_state.currency_strength_cache
@@ -476,44 +517,32 @@ def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dic
         data[quote].append({'pct': -pct, 'other': base})
     
     currency_scores = {}
-    
     for curr, items in data.items():
         score = 0
         valid_items = 0
-        
         for item in items:
             opponent = item['other']
             val = item['pct']
-            
-            # Pondération : USD, EUR, JPY comptent double
             weight = 2.0 if opponent in ['USD', 'EUR', 'JPY'] else 1.0
-            
             score += (val * weight)
             valid_items += weight
-        
         final_score = score / valid_items if valid_items > 0 else 0
         currency_scores[curr] = final_score
     
     st.session_state.currency_strength_cache = currency_scores
     st.session_state.currency_strength_time = time.time()
-    
     return currency_scores
 
 def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: str) -> Dict:
-    """
-    Score Currency Strength Hybride :
-    - FOREX : Comparaison relative (Ex: EUR vs USD)
-    - INDICES/MATIERES : Momentum Intraday (Performance depuis l'ouverture D1)
-    """
+    """Score Currency Strength Hybride"""
     
-    # === CAS 1 : FOREX (On garde ta logique intacte) ===
+    # === CAS 1 : FOREX ===
     if symbol in FOREX_PAIRS:
         parts = symbol.split('_')
         if len(parts) != 2:
             return {'score': 0, 'details': 'Format invalide', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
         
         base, quote = parts[0], parts[1]
-        
         try:
             strength_scores = calculate_currency_strength(api)
         except:
@@ -543,7 +572,6 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
             else:
                 score = 0
                 details.append(f"⚠️ Divergence : {quote} plus fort que {base}")
-        
         else:  # SELL
             if quote_rank <= 3 and base_rank >= total_currencies - 2:
                 score = 2
@@ -556,33 +584,21 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
                 details.append(f"⚠️ Divergence : {base} plus fort que {quote}")
         
         rank_info = f"{base}:#{base_rank} vs {quote}:#{quote_rank}"
-        
-        return {
-            'score': score,
-            'details': ' | '.join(details),
-            'base_score': base_score,
-            'quote_score': quote_score,
-            'rank_info': rank_info
-        }
+        return {'score': score, 'details': ' | '.join(details), 'base_score': base_score, 'quote_score': quote_score, 'rank_info': rank_info}
 
-    # === CAS 2 : INDICES, OR, CRYPTO (Momentum Intraday) ===
+    # === CAS 2 : INDICES/OR ===
     else:
         try:
-            # On récupère la bougie Daily pour avoir l'ouverture du jour
             df_d1 = api.get_candles(symbol, "D", count=2)
             if df_d1.empty:
                  return {'score': 0, 'details': 'Pas de data D1', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
             
             open_price = df_d1['open'].iloc[-1]
             curr_price = df_d1['close'].iloc[-1]
-            
-            # Performance en % depuis l'ouverture du marché (00:00)
             perf_pct = ((curr_price - open_price) / open_price) * 100
             
             score = 0
             details = []
-            
-            # Seuils de volatilité (0.3% pour indices est un mouvement significatif)
             THRESHOLD_STRONG = 0.30 
             
             if direction == 'BUY':
@@ -595,7 +611,6 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
                 else:
                     score = 0
                     details.append(f"⚠️ Contre-tendance (Journée Rouge: {perf_pct:.2f}%)")
-            
             else: # SELL
                 if perf_pct < -THRESHOLD_STRONG:
                     score = 2
@@ -607,15 +622,7 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
                     score = 0
                     details.append(f"⚠️ Contre-tendance (Journée Verte: +{perf_pct:.2f}%)")
             
-            # Adaptation pour l'affichage visuel (base_score sera la perf)
-            return {
-                'score': score,
-                'details': ' | '.join(details),
-                'base_score': perf_pct,  # On utilise ce champ pour afficher le %
-                'quote_score': 0,        # Champ inutilisé pour les indices
-                'rank_info': f"Daily: {perf_pct:+.2f}%"
-            }
-            
+            return {'score': score, 'details': ' | '.join(details), 'base_score': perf_pct, 'quote_score': 0, 'rank_info': f"Daily: {perf_pct:+.2f}%"}
         except Exception as e:
             return {'score': 0, 'details': f'Err: {str(e)}', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
 
@@ -630,13 +637,11 @@ def analyze_timeframe_gps(df: pd.DataFrame, timeframe: str) -> Dict:
     
     close = df['close']
     curr_price = close.iloc[-1]
-    
     atr_val = calculate_atr(df, 14).iloc[-1]
     
     if timeframe in ['H4', 'D1']:
         sma50 = calculate_sma(close, 50)
         sma200 = calculate_sma(close, 200)
-        
         curr_sma50 = sma50.iloc[-1] if len(df) >= 50 else curr_price
         has_200 = len(df) >= 200
         curr_sma200 = sma200.iloc[-1] if has_200 else curr_sma50
@@ -663,21 +668,17 @@ def analyze_timeframe_gps(df: pd.DataFrame, timeframe: str) -> Dict:
                 trend = "Bearish"
                 score = 50
                 details = f"Prix < SMA50 ({curr_sma50:.5f})"
-    
     else:
         zlema_val = calculate_zlema(close, 50)
         baseline = calculate_sma(close, 200)
         adx_val, _, _ = calculate_adx(df, 14)
-        
         curr_zlema = zlema_val.iloc[-1]
         curr_adx = adx_val.iloc[-1]
-        
         has_base = len(df) >= 200
         curr_base = baseline.iloc[-1] if has_base else curr_zlema
         
         trend = "Range"
         score = curr_adx
-        
         if curr_price > curr_zlema:
             if has_base and curr_price > curr_base:
                 trend = "Bullish"
@@ -705,25 +706,17 @@ def analyze_timeframe_gps(df: pd.DataFrame, timeframe: str) -> Dict:
             trend = "Range"
             details = f"ADX faible ({curr_adx:.1f})"
     
-    return {
-        'trend': trend,
-        'score': min(100, score),
-        'details': details,
-        'atr': atr_val
-    }
+    return {'trend': trend, 'score': min(100, score), 'details': details, 'atr': atr_val}
 
 # ==========================================
-# SCORING SYSTEM
+# SCORING SYSTEM (BASE)
 # ==========================================
 
 def calculate_rsi_score(rsi_series: pd.Series, direction: str) -> Dict:
-    """Score RSI : 0-3 points"""
     if len(rsi_series) < 3:
         return {'score': 0, 'details': 'Données insuffisantes'}
-    
     curr_rsi = rsi_series.iloc[-1]
     prev_rsi = rsi_series.iloc[-2]
-    
     score = 0
     details = []
     
@@ -737,7 +730,6 @@ def calculate_rsi_score(rsi_series: pd.Series, direction: str) -> Dict:
         elif curr_rsi < 50 and curr_rsi > prev_rsi:
             score = 1
             details.append("📊 Zone basse, momentum positif")
-    
     else:  # SELL
         if prev_rsi > 50 and curr_rsi < 50:
             score = 3
@@ -748,21 +740,13 @@ def calculate_rsi_score(rsi_series: pd.Series, direction: str) -> Dict:
         elif curr_rsi > 50 and curr_rsi < prev_rsi:
             score = 1
             details.append("📊 Zone haute, momentum négatif")
-    
-    return {
-        'score': score,
-        'value': curr_rsi,
-        'details': ' | '.join(details) if details else 'Pas de signal'
-    }
+    return {'score': score, 'value': curr_rsi, 'details': ' | '.join(details) if details else 'Pas de signal'}
 
 def calculate_hma_score(hma_trend: pd.Series, direction: str) -> Dict:
-    """Score HMA : 0-2 points"""
     if len(hma_trend) < 2:
         return {'score': 0, 'details': 'Données insuffisantes'}
-    
     curr = hma_trend.iloc[-1]
     prev = hma_trend.iloc[-2]
-    
     score = 0
     details = []
     
@@ -773,7 +757,6 @@ def calculate_hma_score(hma_trend: pd.Series, direction: str) -> Dict:
         elif curr == 1:
             score = 1
             details.append("📈 Déjà VERT")
-    
     else:  # SELL
         if prev == 1 and curr == -1:
             score = 2
@@ -781,18 +764,11 @@ def calculate_hma_score(hma_trend: pd.Series, direction: str) -> Dict:
         elif curr == -1:
             score = 1
             details.append("📉 Déjà ROUGE")
-    
-    return {
-        'score': score,
-        'color': 'VERT' if curr == 1 else 'ROUGE',
-        'details': ' | '.join(details) if details else 'Neutre'
-    }
+    return {'score': score, 'color': 'VERT' if curr == 1 else 'ROUGE', 'details': ' | '.join(details) if details else 'Neutre'}
 
 def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Dict:
-    """Score MTF GPS : 0-3 points + Qualité A+/A/B/C"""
     timeframes = {'D1': 'D', 'H4': 'H4', 'H1': 'H1'}
     analysis = {}
-    
     for tf_name, tf_code in timeframes.items():
         df = api.get_candles(symbol, tf_code, count=300)
         if df.empty or len(df) < 50:
@@ -803,14 +779,11 @@ def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Di
     score = 0
     details = []
     expected = 'Bullish' if direction == 'BUY' else 'Bearish'
-    
     weights = {'D1': 2.0, 'H4': 1.0, 'H1': 0.5}
     aligned_weight = 0
-    
     for tf in ['D1', 'H4', 'H1']:
         if analysis[tf]['trend'] == expected:
             aligned_weight += weights[tf]
-    
     total_weight = sum(weights.values())
     alignment_pct = (aligned_weight / total_weight) * 100
     
@@ -832,59 +805,32 @@ def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Di
     if quality == 'A' and analysis['D1']['score'] > 70:
         quality = 'A+'
     
-    return {
-        'score': score,
-        'quality': quality,
-        'analysis': analysis,
-        'alignment': f"{alignment_pct:.0f}%",
-        'details': ' | '.join(details) if details else 'Pas d\'alignement'
-    }
-
-# ==========================================
-# RISK MANAGER (SL/TP AUTO)
-# ==========================================
+    return {'score': score, 'quality': quality, 'analysis': analysis, 'alignment': f"{alignment_pct:.0f}%", 'details': ' | '.join(details) if details else 'Pas d\'alignement'}
 
 def calculate_risk_management(price: float, atr: float, direction: str, pair: str, 
                               sl_multiplier: float = 1.5, tp_multiplier: float = 2.0) -> Dict:
-    """
-    Calcule SL/TP basé sur ATR
-    """
     sl_distance = atr * sl_multiplier
     tp_distance = atr * tp_multiplier
-    
     if direction == 'BUY':
         sl = price - sl_distance
         tp = price + tp_distance
     else:  # SELL
         sl = price + sl_distance
         tp = price - tp_distance
-    
-    # Convertir en pips
     sl_pips = get_pips(pair, sl_distance)
     tp_pips = get_pips(pair, tp_distance)
-    
-    # Ratio R:R
     rr_ratio = tp_multiplier / sl_multiplier
-    
-    return {
-        'sl': sl,
-        'tp': tp,
-        'sl_pips': sl_pips,
-        'tp_pips': tp_pips,
-        'rr_ratio': rr_ratio,
-        'sl_distance': sl_distance,
-        'tp_distance': tp_distance
-    }
+    return {'sl': sl, 'tp': tp, 'sl_pips': sl_pips, 'tp_pips': tp_pips, 'rr_ratio': rr_ratio}
 
 # ==========================================
-# SCANNER HYBRIDE ULTIME
+# SCANNER HYBRIDE ULTIME + S/R OVERLAY
 # ==========================================
 
 def run_hybrid_scan(api: OandaClient, min_score: int = 4, 
                    enable_risk_manager: bool = True,
                    sl_atr_mult: float = 1.5,
                    tp_atr_mult: float = 2.0) -> List[Dict]:
-    """Scanner hybride avec subtilités de logique et gestion Indices"""
+    """Scanner Hybride avec Overlay Support/Résistance"""
     signals = []
     skipped = 0
     
@@ -912,23 +858,22 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 continue
 
             rsi_series = get_rsi_ohlc4(df_m15)
-            if rsi_series.empty:
-                continue
+            if rsi_series.empty: continue
             
             hma, hma_trend = get_colored_hma(df_m15)
-            if hma_trend.empty:
-                continue
+            if hma_trend.empty: continue
             
-            # TWEAK: ADX FILTER (Range detection)
             adx_series, _, _ = calculate_adx(df_m15, 14)
             current_adx = adx_series.iloc[-1]
-            
-            # Détection FVG
             has_fvg_bull, has_fvg_bear = detect_fvg(df_m15)
             
             current_price = df_m15['close'].iloc[-1]
             atr_m15 = calculate_atr(df_m15, 14).iloc[-1]
             signal_time_utc = df_m15['time'].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+            
+            # === OVERLAY S/R (Chargement Lazy) ===
+            # On ne charge les S/R que si on a un potentiel signal pour économiser API
+            sr_context = None
             
             # === Test BUY ===
             rsi_buy = calculate_rsi_score(rsi_series, 'BUY')
@@ -942,75 +887,60 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 if current_price < current_hma_val:
                      hma_buy['score'] = max(0, hma_buy['score'] - 1)
                 
-                # Bonus FVG (seulement si MTF positif)
+                # Bonus FVG
                 raw_fvg_bonus = 2 if has_fvg_bull else 0
                 fvg_bonus = raw_fvg_bonus if mtf_buy['score'] > 0 else 0
                 
                 total_score = rsi_buy['score'] + hma_buy['score'] + mtf_buy['score'] + cs_buy['score'] + fvg_bonus
                 
-                # TWEAK 2: PENALITE DE DIVERGENCE (Uniquement Forex)
-                if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
-                    total_score -= 2
+                # Penalties
+                if cs_buy['score'] == 0 and symbol in FOREX_PAIRS: total_score -= 2
+                if current_adx < 20: total_score -= 1
                 
-                # TWEAK 3: ADX FILTER (Range)
-                if current_adx < 20:
-                    total_score -= 1
-
+                # --- S/R SAFETY CHECK (VETO) ---
+                sr_warning = ""
+                sr_badge = ""
+                
+                # On ne lance l'analyse S/R que si le score est prometteur
+                if total_score >= min_score - 2:
+                    df_d1_sr = api.get_candles(symbol, "D", 250)
+                    sr_data = get_nearest_sr(df_d1_sr, current_price, 'D')
+                    
+                    # Danger: Résistance proche (< 0.25%)
+                    if sr_data['dist_res'] < 0.25:
+                        total_score -= 2 # PENALITE
+                        sr_warning = f"⚠️ DANGER: Résistance Daily à {sr_data['res']:.5f} ({sr_data['dist_res']:.2f}%)"
+                    
+                    # Bonus: Rebond Support (< 0.3%)
+                    elif sr_data['dist_sup'] < 0.30:
+                        sr_badge = "🛡️ REBOND SUPPORT D1"
+                
                 if total_score >= min_score:
                     risk_data = {}
                     if enable_risk_manager:
-                        risk_data = calculate_risk_management(current_price, atr_m15, 'BUY', symbol, 
-                                                             sl_atr_mult, tp_atr_mult)
+                        risk_data = calculate_risk_management(current_price, atr_m15, 'BUY', symbol, sl_atr_mult, tp_atr_mult)
                     
-                    # Logic Qualité
-                    if total_score >= 10 and mtf_buy['quality'] in ['A+', 'A'] and cs_buy['score'] == 2 and has_fvg_bull:
-                        quality = "LEGENDARY"
-                        quality_color = "#fbbf24"
-                    elif total_score >= 9 and mtf_buy['quality'] in ['A+', 'A'] and cs_buy['score'] == 2:
-                        quality = "PREMIUM"
-                        quality_color = "#3b82f6"
-                    elif total_score >= 8 and mtf_buy['quality'] in ['A+', 'A']:
-                        quality = "EXCELLENT"
-                        quality_color = "#10b981"
-                    elif total_score >= 6:
-                        quality = "FORT"
-                        quality_color = "#34d399"
-                    elif total_score >= 5:
-                        quality = "BON"
-                        quality_color = "#fbbf24"
-                    else:
-                        quality = "MOYEN"
-                        quality_color = "#94a3b8"
+                    quality = "MOYEN"
+                    quality_color = "#94a3b8"
+                    if total_score >= 10: quality, quality_color = "LEGENDARY", "#fbbf24"
+                    elif total_score >= 8: quality, quality_color = "EXCELLENT", "#10b981"
+                    elif total_score >= 6: quality, quality_color = "FORT", "#34d399"
                     
                     warning = ""
-                    if cs_buy['score'] == 0 and symbol in FOREX_PAIRS:
-                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
-                            quality = "BON" 
-                            quality_color = "#fbbf24"
-                        warning = "⚠️ Divergence devise (Pénalité appliquée)"
-                    elif cs_buy['score'] == 0 and symbol not in FOREX_PAIRS:
-                        # Warning spécifique Indices si contre-tendance daily
-                         warning = "⚠️ Contre-tendance Daily (Momentum)"
-
-                    if current_adx < 20:
-                        warning += " | ⚠️ ADX Faible (Range)"
+                    if cs_buy['score'] == 0: warning = "⚠️ Divergence/Contre-tendance"
+                    if current_adx < 20: warning += " | ⚠️ Range"
+                    if sr_warning: warning += f" | {sr_warning}"
+                    
+                    # Downgrade visuel si warning majeur
+                    if "DANGER" in warning: 
+                        quality, quality_color = "RISQUE", "#f59e0b"
 
                     signals.append({
-                        "symbol": symbol,
-                        "type": "BUY",
-                        "price": current_price,
-                        "atr_m15": atr_m15,
-                        "total_score": total_score,
-                        "quality": quality,
-                        "quality_color": quality_color,
-                        "warning": warning,
-                        "rsi": rsi_buy,
-                        "hma": hma_buy,
-                        "mtf": mtf_buy,
-                        "currency_strength": cs_buy,
-                        "has_fvg": has_fvg_bull,
-                        "fvg_bonus": fvg_bonus,
-                        "risk_management": risk_data,
+                        "symbol": symbol, "type": "BUY", "price": current_price, "atr_m15": atr_m15,
+                        "total_score": total_score, "quality": quality, "quality_color": quality_color,
+                        "warning": warning, "sr_badge": sr_badge,
+                        "rsi": rsi_buy, "hma": hma_buy, "mtf": mtf_buy, "currency_strength": cs_buy,
+                        "has_fvg": has_fvg_bull, "fvg_bonus": fvg_bonus, "risk_management": risk_data,
                         "timestamp_utc": signal_time_utc
                     })
             
@@ -1021,7 +951,6 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 mtf_sell = calculate_mtf_score_gps(api, symbol, 'SELL')
                 cs_sell = calculate_currency_strength_score(api, symbol, 'SELL')
                 
-                # TWEAK 1: HMA PRICE CHECK
                 current_hma_val = hma.iloc[-1]
                 if current_price > current_hma_val:
                      hma_sell['score'] = max(0, hma_sell['score'] - 1)
@@ -1031,67 +960,51 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
                 
                 total_score = rsi_sell['score'] + hma_sell['score'] + mtf_sell['score'] + cs_sell['score'] + fvg_bonus
                 
-                # TWEAK 2: PENALITE DIVERGENCE (Forex)
-                if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
-                    total_score -= 2
+                if cs_sell['score'] == 0 and symbol in FOREX_PAIRS: total_score -= 2
+                if current_adx < 20: total_score -= 1
                 
-                # TWEAK 3: ADX FILTER
-                if current_adx < 20:
-                    total_score -= 1
+                # --- S/R SAFETY CHECK (VETO) ---
+                sr_warning = ""
+                sr_badge = ""
+                
+                if total_score >= min_score - 2:
+                    df_d1_sr = api.get_candles(symbol, "D", 250)
+                    sr_data = get_nearest_sr(df_d1_sr, current_price, 'D')
+                    
+                    # Danger: Support proche (pour un Sell)
+                    if sr_data['dist_sup'] < 0.25:
+                        total_score -= 2
+                        sr_warning = f"⚠️ DANGER: Support Daily à {sr_data['sup']:.5f} ({sr_data['dist_sup']:.2f}%)"
+                    
+                    # Bonus: Rejet Résistance
+                    elif sr_data['dist_res'] < 0.30:
+                        sr_badge = "🛡️ REJET RESISTANCE D1"
 
                 if total_score >= min_score:
                     risk_data = {}
                     if enable_risk_manager:
-                        risk_data = calculate_risk_management(current_price, atr_m15, 'SELL', symbol,
-                                                             sl_atr_mult, tp_atr_mult)
+                        risk_data = calculate_risk_management(current_price, atr_m15, 'SELL', symbol, sl_atr_mult, tp_atr_mult)
                     
-                    if total_score >= 10 and mtf_sell['quality'] in ['A+', 'A'] and cs_sell['score'] == 2 and has_fvg_bear:
-                        quality = "LEGENDARY"
-                        quality_color = "#fbbf24"
-                    elif total_score >= 9 and mtf_sell['quality'] in ['A+', 'A'] and cs_sell['score'] == 2:
-                        quality = "PREMIUM"
-                        quality_color = "#a855f7"
-                    elif total_score >= 8 and mtf_sell['quality'] in ['A+', 'A']:
-                        quality = "EXCELLENT"
-                        quality_color = "#ec4899"
-                    elif total_score >= 6:
-                        quality = "FORT"
-                        quality_color = "#f472b6"
-                    elif total_score >= 5:
-                        quality = "BON"
-                        quality_color = "#fb7185"
-                    else:
-                        quality = "MOYEN"
-                        quality_color = "#94a3b8"
+                    quality = "MOYEN"
+                    quality_color = "#94a3b8"
+                    if total_score >= 10: quality, quality_color = "LEGENDARY", "#fbbf24"
+                    elif total_score >= 8: quality, quality_color = "EXCELLENT", "#ec4899"
+                    elif total_score >= 6: quality, quality_color = "FORT", "#f472b6"
                     
                     warning = ""
-                    if cs_sell['score'] == 0 and symbol in FOREX_PAIRS:
-                        if quality in ["LEGENDARY", "PREMIUM", "EXCELLENT", "FORT"]:
-                             quality = "BON" 
-                             quality_color = "#fb7185"
-                        warning = "⚠️ Divergence devise (Pénalité appliquée)"
-                    elif cs_sell['score'] == 0 and symbol not in FOREX_PAIRS:
-                         warning = "⚠️ Contre-tendance Daily (Momentum)"
-
-                    if current_adx < 20:
-                        warning += " | ⚠️ ADX Faible (Range)"
+                    if cs_sell['score'] == 0: warning = "⚠️ Divergence/Contre-tendance"
+                    if current_adx < 20: warning += " | ⚠️ Range"
+                    if sr_warning: warning += f" | {sr_warning}"
+                    
+                    if "DANGER" in warning: 
+                        quality, quality_color = "RISQUE", "#f59e0b"
                     
                     signals.append({
-                        "symbol": symbol,
-                        "type": "SELL",
-                        "price": current_price,
-                        "atr_m15": atr_m15,
-                        "total_score": total_score,
-                        "quality": quality,
-                        "quality_color": quality_color,
-                        "warning": warning,
-                        "rsi": rsi_sell,
-                        "hma": hma_sell,
-                        "mtf": mtf_sell,
-                        "currency_strength": cs_sell,
-                        "has_fvg": has_fvg_bear,
-                        "fvg_bonus": fvg_bonus,
-                        "risk_management": risk_data,
+                        "symbol": symbol, "type": "SELL", "price": current_price, "atr_m15": atr_m15,
+                        "total_score": total_score, "quality": quality, "quality_color": quality_color,
+                        "warning": warning, "sr_badge": sr_badge,
+                        "rsi": rsi_sell, "hma": hma_sell, "mtf": mtf_sell, "currency_strength": cs_sell,
+                        "has_fvg": has_fvg_bear, "fvg_bonus": fvg_bonus, "risk_management": risk_data,
                         "timestamp_utc": signal_time_utc
                     })
         
@@ -1101,19 +1014,14 @@ def run_hybrid_scan(api: OandaClient, min_score: int = 4,
     
     progress_bar.empty()
     status_text.empty()
-    
-    if skipped > 0:
-        st.caption(f"ℹ️ {skipped} actifs ignorés")
-    
+    if skipped > 0: st.caption(f"ℹ️ {skipped} actifs ignorés")
     return signals
 
 # ==========================================
-# AFFICHAGE UI HYBRIDE
+# AFFICHAGE UI
 # ==========================================
 
 def display_hybrid_signal(sig: Dict, show_risk: bool = True):
-    """Affichage signal avec toutes les features"""
-    
     is_buy = sig['type'] == 'BUY'
     
     if is_buy:
@@ -1128,27 +1036,23 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
         border = "2px solid #dc2626"
 
     signal_utc = sig['timestamp_utc']
-    time_str = signal_utc.strftime("%H:%M")
     elapsed_sec = int((datetime.now(timezone.utc) - signal_utc).total_seconds())
-    
     fresh_txt = f"{elapsed_sec//60} min ago" if elapsed_sec >= 60 else f"{elapsed_sec} sec ago"
     
     # Badges
     badges_html = ""
-    # On affiche le badge FVG seulement si le bonus a été effectivement appliqué
     if sig.get('has_fvg') and sig.get('fvg_bonus', 0) > 0:
         badges_html += "<span class='badge-fvg'>🦅 SMART MONEY</span> "
     if sig['mtf']['quality'] in ['A+', 'A']:
-        badges_html += "<span class='badge-gps'>🛡️ GPS SECURE</span>"
+        badges_html += "<span class='badge-gps'>🛡️ GPS SECURE</span> "
+    if sig.get('sr_badge'):
+        badges_html += f"<span class='badge-sr'>{sig['sr_badge']}</span>"
     
-    # Score Max (dynamique selon si FVG est appliqué)
     max_score = 12 if sig.get('fvg_bonus', 0) > 0 else 10
     
     header_title = f"{sig['symbol']}  |  {arrow}  |  Score {sig['total_score']}/{max_score}  [{sig['quality']}]"
     
     with st.expander(header_title, expanded=True):
-        
-        # En-tête
         st.markdown(f"""
         <div style="background: {bg_gradient}; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: {border}; display: flex; justify-content: space-between; align-items: center;">
             <div>
@@ -1168,267 +1072,99 @@ def display_hybrid_signal(sig: Dict, show_risk: bool = True):
         if sig.get('warning'):
             st.warning(f"{sig['warning']}")
 
-        # Métriques principales
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Score Total", f"{sig['total_score']}/{max_score}")
         c2.metric("Qualité GPS", sig['mtf']['quality'])
-        
-        # Format Currency Strength adapté (Forex vs Indices)
-        cs_text = f"{sig['currency_strength']['score']}/2"
-        c3.metric("Force/Momentum", cs_text)
-        
-        atr_fmt = f"{sig['atr_m15']:.4f}" if sig['atr_m15'] < 1 else f"{sig['atr_m15']:.2f}"
-        c4.metric("ATR M15", atr_fmt)
+        cs_text = f"{sig['currency_strength']['score']}/2" if sig['symbol'] in FOREX_PAIRS else f"{sig['currency_strength']['score']}/2 (Mom)"
+        c3.metric("Force/Mom.", cs_text)
+        c4.metric("ATR M15", f"{sig['atr_m15']:.4f}" if sig['atr_m15'] < 1 else f"{sig['atr_m15']:.2f}")
 
-        # Risk Management Section
         if show_risk and sig.get('risk_management'):
             st.divider()
             st.markdown("##### 🎯 Risk Management (ATR-Based)")
-            
             rm = sig['risk_management']
             r1, r2, r3 = st.columns(3)
-            
-            # Format PIPS
             sl_pips_str = f"{int(rm['sl_pips'])} pips" if "XAU" not in sig['symbol'] and "US30" not in sig['symbol'] else f"{rm['sl_pips']:.1f} pts"
             tp_pips_str = f"{int(rm['tp_pips'])} pips" if "XAU" not in sig['symbol'] and "US30" not in sig['symbol'] else f"{rm['tp_pips']:.1f} pts"
             
-            r1.markdown(f"""<div class='risk-box'>
-                <div style='color: #94a3b8; font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px;'>Stop Loss</div>
-                <div style='font-size: 1.2em; font-weight: bold; color: #ef4444; margin: 5px 0;'>{rm['sl']:.5f}</div>
-                <div style='font-size: 0.85em; color: #ef4444;'>-{sl_pips_str}</div>
-            </div>""", unsafe_allow_html=True)
-            
-            r2.markdown(f"""<div class='risk-box'>
-                <div style='color: #94a3b8; font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px;'>Take Profit</div>
-                <div style='font-size: 1.2em; font-weight: bold; color: #10b981; margin: 5px 0;'>{rm['tp']:.5f}</div>
-                <div style='font-size: 0.85em; color: #10b981;'>+{tp_pips_str}</div>
-            </div>""", unsafe_allow_html=True)
-            
-            r3.markdown(f"""<div class='risk-box'>
-                <div style='color: #94a3b8; font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px;'>Ratio R:R</div>
-                <div style='font-size: 1.2em; font-weight: bold; color: #f1f5f9; margin: 5px 0;'>1:{rm['rr_ratio']:.2f}</div>
-                <div style='font-size: 0.85em; color: #94a3b8;'>Risque Fixe</div>
-            </div>""", unsafe_allow_html=True)
+            r1.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>STOP LOSS</div><div style='font-size: 1.2em; font-weight: bold; color: #ef4444;'>{rm['sl']:.5f}</div><div style='font-size: 0.85em; color: #ef4444;'>-{sl_pips_str}</div></div>""", unsafe_allow_html=True)
+            r2.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>TAKE PROFIT</div><div style='font-size: 1.2em; font-weight: bold; color: #10b981;'>{rm['tp']:.5f}</div><div style='font-size: 0.85em; color: #10b981;'>+{tp_pips_str}</div></div>""", unsafe_allow_html=True)
+            r3.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>RATIO R:R</div><div style='font-size: 1.2em; font-weight: bold; color: #f1f5f9;'>1:{rm['rr_ratio']:.2f}</div><div style='font-size: 0.85em; color: #94a3b8;'>Risque Fixe</div></div>""", unsafe_allow_html=True)
 
         st.divider()
-
-        # Section Indicateurs
         col_left, col_right = st.columns(2)
-        
         with col_left:
             st.markdown("##### 🛠️ Technique")
-            
-            # RSI
             rsi_val = sig['rsi']['value']
             rsi_col = "#10b981" if (is_buy and rsi_val > 50) or (not is_buy and rsi_val < 50) else "#94a3b8"
-            st.markdown(f"""
-            <div class="info-box">
-                <div style="display: flex; justify-content: space-between;">
-                    <span style="color: #94a3b8;">RSI (7)</span>
-                    <span style="font-weight: bold; color: {rsi_col};">{rsi_val:.1f}</span>
-                </div>
-                <div style="font-size: 0.85em; margin-top: 5px;">{sig['rsi']['details']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # HMA
+            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">RSI (7)</span><span style="font-weight: bold; color: {rsi_col};">{rsi_val:.1f}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['rsi']['details']}</div></div>""", unsafe_allow_html=True)
             hma_col = "#10b981" if sig['hma']['color'] == 'VERT' else "#ef4444"
-            st.markdown(f"""
-            <div class="info-box">
-                <div style="display: flex; justify-content: space-between;">
-                    <span style="color: #94a3b8;">HMA Trend</span>
-                    <span style="font-weight: bold; color: {hma_col};">{sig['hma']['color']}</span>
-                </div>
-                <div style="font-size: 0.85em; margin-top: 5px;">{sig['hma']['details']}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">HMA Trend</span><span style="font-weight: bold; color: {hma_col};">{sig['hma']['color']}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['hma']['details']}</div></div>""", unsafe_allow_html=True)
 
         with col_right:
             st.markdown("##### 🌍 Macro & Force")
-            
-            # MTF GPS
-            st.markdown(f"""
-            <div class="info-box">
-                <div style="display: flex; justify-content: space-between;">
-                    <span style="color: #94a3b8;">Alignement MTF</span>
-                    <span style="font-weight: bold; color: white;">{sig['mtf']['alignment']}</span>
-                </div>
-                <div style="font-size: 0.85em; margin-top: 5px; color: #cbd5e1;">{sig['mtf']['details']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Currency Strength / Momentum
+            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">Alignement MTF</span><span style="font-weight: bold; color: white;">{sig['mtf']['alignment']}</span></div><div style="font-size: 0.85em; margin-top: 5px; color: #cbd5e1;">{sig['mtf']['details']}</div></div>""", unsafe_allow_html=True)
             base_score = sig['currency_strength']['base_score']
-            quote_score = sig['currency_strength']['quote_score']
-            
-            # Affichage dynamique (si Indices : pas de "vs 0.0%")
-            if sig['symbol'] in FOREX_PAIRS:
-                strength_label = "Currency Strength"
-                strength_val = f"{base_score:.1f}% vs {quote_score:.1f}%"
-            else:
-                strength_label = "Daily Momentum"
-                strength_val = f"{base_score:+.2f}%"
+            strength_val = f"{base_score:.1f}%" if sig['symbol'] in FOREX_PAIRS else f"{base_score:+.2f}%"
+            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">Force/Momentum</span><span style="font-weight: bold; color: white;">{strength_val}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['currency_strength']['rank_info']}</div></div>""", unsafe_allow_html=True)
 
-            st.markdown(f"""
-            <div class="info-box">
-                <div style="display: flex; justify-content: space-between;">
-                    <span style="color: #94a3b8;">{strength_label}</span>
-                    <span style="font-weight: bold; color: white;">{strength_val}</span>
-                </div>
-                <div style="font-size: 0.85em; margin-top: 5px;">{sig['currency_strength']['rank_info']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Tableau MTF
         st.markdown("##### 📅 Analyse Multi-Timeframe")
-        
         mtf_cols = st.columns(3)
-        tfs = ['D1', 'H4', 'H1']
-        
-        for i, tf in enumerate(tfs):
+        for i, tf in enumerate(['D1', 'H4', 'H1']):
             data = sig['mtf']['analysis'][tf]
-            trend = data['trend']
-            
-            if trend == 'Bullish':
-                badge_bg = "rgba(16, 185, 129, 0.2)"
-                badge_col = "#34d399"
-                icon = "↗️"
-            elif trend == 'Bearish':
-                badge_bg = "rgba(239, 68, 68, 0.2)"
-                badge_col = "#f87171"
-                icon = "↘️"
-            else:
-                badge_bg = "rgba(148, 163, 184, 0.2)"
-                badge_col = "#cbd5e1"
-                icon = "➡️"
-
+            badge_col = "#34d399" if data['trend'] == 'Bullish' else "#f87171" if data['trend'] == 'Bearish' else "#cbd5e1"
             with mtf_cols[i]:
-                st.markdown(f"""
-                <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px; text-align: center;">
-                    <div style="color: #94a3b8; font-size: 0.8em; font-weight: bold; margin-bottom: 5px;">{tf}</div>
-                    <div style="background: {badge_bg}; color: {badge_col}; padding: 4px; border-radius: 4px; font-weight: bold; font-size: 0.9em;">
-                        {icon} {trend}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px; text-align: center;"><div style="color: #94a3b8; font-size: 0.8em; font-weight: bold; margin-bottom: 5px;">{tf}</div><div style="color: {badge_col}; font-weight: bold; font-size: 0.9em;">{data['trend']}</div></div>""", unsafe_allow_html=True)
         
-        # Score Breakdown
-        breakdown_parts = [
-            f"RSI({sig['rsi']['score']})",
-            f"HMA({sig['hma']['score']})",
-            f"GPS({sig['mtf']['score']})",
-            f"Force({sig['currency_strength']['score']})"
-        ]
-        if sig.get('fvg_bonus', 0) > 0:
-            breakdown_parts.append(f"FVG(+{sig['fvg_bonus']})")
-        elif sig.get('has_fvg') and sig.get('fvg_bonus', 0) == 0:
-             breakdown_parts.append(f"FVG(0-NoMTF)")
-        
-        breakdown_str = " + ".join(breakdown_parts)
-        
-        st.markdown(f"""
-        <div style='margin-top: 15px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 6px; text-align: center;'>
-            <span style='color: #94a3b8; font-size: 0.8em; text-transform: uppercase;'>Composition du Score :</span><br>
-            <span style='color: white; font-weight: bold; font-size: 0.95em;'>{breakdown_str} = {sig['total_score']}</span>
-        </div>
-        """, unsafe_allow_html=True)
+        breakdown_parts = [f"RSI({sig['rsi']['score']})", f"HMA({sig['hma']['score']})", f"GPS({sig['mtf']['score']})", f"Force({sig['currency_strength']['score']})"]
+        if sig.get('fvg_bonus', 0) > 0: breakdown_parts.append(f"FVG(+{sig['fvg_bonus']})")
+        st.markdown(f"""<div style='margin-top: 15px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 6px; text-align: center;'><span style='color: #94a3b8; font-size: 0.8em;'>Composition du Score :</span><br><span style='color: white; font-weight: bold; font-size: 0.95em;'>{' + '.join(breakdown_parts)} = {sig['total_score']}</span></div>""", unsafe_allow_html=True)
 
 # ==========================================
-# INTERFACE PRINCIPALE
+# MAIN
 # ==========================================
-
 st.title("💎 Bluestar SNP3 Hybrid Pro")
-st.markdown(f"""
-<div style="text-align: center; color: #94a3b8; margin-bottom: 30px; font-family: 'Roboto', sans-serif;">
-    Scanner <span style="color: #3b82f6;">MTF GPS</span> + <span style="color: #8b5cf6;">Currency Strength</span> + <span style="color: #a855f7;">Smart Money</span>
-    <br><span style="font-size: 0.8em;">Surveillance de {len(ASSETS)} actifs • Architecture Hybride Ultimate</span>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(f"""<div style="text-align: center; color: #94a3b8; margin-bottom: 30px;">Scanner MTF GPS + Currency Strength + Smart Money + <span style="color: #f59e0b;">S/R Protection</span></div>""", unsafe_allow_html=True)
 
-# Paramètres Avancés
 with st.expander("⚙️ Paramètres Avancés", expanded=False):
     col_set1, col_set2 = st.columns(2)
-    with col_set1:
-        enable_risk_mgr = st.checkbox("🎯 Risk Manager (SL/TP Auto)", value=True, 
-                                     help="Calcule automatiquement Stop Loss & Take Profit basés sur ATR")
+    with col_set1: enable_risk_mgr = st.checkbox("🎯 Risk Manager (SL/TP Auto)", value=True)
     with col_set2:
         if enable_risk_mgr:
             sl_mult = st.slider("SL Multiplier (× ATR)", 1.0, 3.0, 1.5, 0.1)
             tp_mult = st.slider("TP Multiplier (× ATR)", 1.5, 4.0, 2.0, 0.1)
-        else:
-            sl_mult, tp_mult = 1.5, 2.0
+        else: sl_mult, tp_mult = 1.5, 2.0
 
-# Contrôle Principal
 col1, col2 = st.columns([3, 1])
-with col1:
-    min_score = st.slider("Sensibilité du signal (Score Min)", 4, 12, 6, 
-                        help="Score = RSI(3) + HMA(2) + GPS(3) + Currency(2) + FVG(2)")
+with col1: min_score = st.slider("Sensibilité du signal (Score Min)", 4, 12, 6)
 with col2:
     st.write("")
     st.write("")
-    clear_cache = st.button("🧹 Reset", help="Vider le cache")
-
-scan_btn = st.button("🚀 LANCER LE SCANNER", type="primary")
+    clear_cache = st.button("🧹 Reset")
 
 if clear_cache:
     st.session_state.cache = {}
     st.session_state.cache_time = {}
     st.session_state.currency_strength_cache = None
     st.session_state.currency_strength_time = 0
-    st.toast("Cache vidé avec succès !", icon="🧹")
+    st.toast("Cache vidé !", icon="🧹")
 
-if scan_btn:
+if st.button("🚀 LANCER LE SCANNER", type="primary"):
     api = OandaClient()
     start_time = time.time()
-    
-    with st.spinner("Analyse des marchés en cours..."):
-        results = run_hybrid_scan(api, min_score=min_score, 
-                                enable_risk_manager=enable_risk_mgr,
-                                sl_atr_mult=sl_mult,
-                                tp_atr_mult=tp_mult)
-    
+    with st.spinner("Analyse approfondie (Tech + Macro + S/R)..."):
+        results = run_hybrid_scan(api, min_score=min_score, enable_risk_manager=enable_risk_mgr, sl_atr_mult=sl_mult, tp_atr_mult=tp_mult)
     duration = time.time() - start_time
     
     st.markdown("---")
-    
-    # Dashboard Metrics
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Signaux Trouvés", len(results))
-    m2.metric("Temps de Scan", f"{duration:.1f}s")
-    m3.metric("Requêtes API", api.request_count)
+    m1.metric("Signaux", len(results))
+    m2.metric("Temps", f"{duration:.1f}s")
     legendary_count = sum(1 for s in results if s['quality'] == 'LEGENDARY')
     m4.metric("🏆 Legendary", legendary_count)
-    
     st.markdown("---")
     
-    if not results:
-        st.info(f"Aucun signal détecté avec un score >= {min_score}. Essayez de réduire le score minimum.")
+    if not results: st.info(f"Aucun signal détecté score >= {min_score}.")
     else:
-        # Tri intelligent : Score > Qualité > FVG > Currency Strength
-        results_sorted = sorted(results, 
-                              key=lambda x: (x['total_score'], 
-                                           x['mtf']['quality'], 
-                                           x.get('has_fvg', False),
-                                           x['currency_strength']['score']), 
-                              reverse=True)
-        
-        # Stats rapides
-        quality_counts = {}
-        for sig in results:
-            q = sig['quality']
-            quality_counts[q] = quality_counts.get(q, 0) + 1
-        
-        st.success(f"🎯 **{len(results)} Signaux détectés** • " + 
-                  " | ".join([f"{q}: {c}" for q, c in sorted(quality_counts.items(), 
-                                                            key=lambda x: ['LEGENDARY','PREMIUM','EXCELLENT','FORT','BON','MOYEN'].index(x[0]))]))
-        
-        for sig in results_sorted:
-            display_hybrid_signal(sig, show_risk=enable_risk_mgr)
-            
-    st.markdown("""
-    <div style="text-align: center; margin-top: 50px; opacity: 0.5; font-size: 0.8em;">
-        Bluestar SNP3 Hybrid Pro • MTF GPS + Currency Strength + Smart Money FVG + Risk Manager<br>
-        <span style="font-size: 0.75em;">Trading involves risk • Always use proper risk management</span>
-    </div>
-    """, unsafe_allow_html=True)
-      
+        results_sorted = sorted(results, key=lambda x: (x['total_score'], x['mtf']['quality'], x.get('has_fvg', False)), reverse=True)
+        for sig in results_sorted: display_hybrid_signal(sig, show_risk=enable_risk_mgr)
