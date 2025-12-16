@@ -50,8 +50,6 @@ ASSETS = [
     "XAU_USD", "XPT_USD", "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
 
-FOREX_PAIRS = [x for x in ASSETS if "XAU" not in x and "XPT" not in x and "USD" in x or "EUR" in x or "GBP" in x] 
-# (Simplification liste pour éviter redondance, on prend tout ce qui est forex standard)
 FOREX_PAIRS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD",
     "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_CAD", "EUR_AUD", "EUR_NZD",
@@ -267,21 +265,21 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
         if direction == 'BUY':
             if b_rank <= 3 and q_rank >= 6:
                 score = 2
-                label = "✅ Momentum : Excellent" # Texte neutre
+                label = "Excellent" # Texte neutre
             elif b_score > q_score:
                 score = 1
-                label = "✅ Momentum : Validé"
+                label = "Validé"
             else:
-                label = "⚠️ Momentum : Divergence"
+                label = "Divergence"
         else: # SELL
             if q_rank <= 3 and b_rank >= 6:
                 score = 2
-                label = "✅ Momentum : Excellent"
+                label = "Excellent"
             elif q_score > b_score:
                 score = 1
-                label = "✅ Momentum : Validé"
+                label = "Validé"
             else:
-                label = "⚠️ Momentum : Divergence"
+                label = "Divergence"
                 
         # On renvoie juste les faits, pas d'instruction de trading
         rank_info = f"{base}(#{b_rank}) vs {quote}(#{q_rank})"
@@ -298,13 +296,13 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
             label = "Neutre"
             
             if direction == 'BUY':
-                if chg > 0.3: score = 2; label = "🚀 Impulsion Forte"
-                elif chg > 0: score = 1; label = "📈 Tendance Positive"
-                else: label = "⚠️ Contre-tendance"
+                if chg > 0.3: score = 2; label = "Impulsion"
+                elif chg > 0: score = 1; label = "Positif"
+                else: label = "Contre-tendance"
             else:
-                if chg < -0.3: score = 2; label = "☄️ Chute Forte"
-                elif chg < 0: score = 1; label = "📉 Tendance Négative"
-                else: label = "⚠️ Contre-tendance"
+                if chg < -0.3: score = 2; label = "Chute"
+                elif chg < 0: score = 1; label = "Négatif"
+                else: label = "Contre-tendance"
                 
             return {'score': score, 'details': label, 'base_score': chg, 'rank_info': f"D1: {chg:+.2f}%"}
         except:
@@ -352,15 +350,9 @@ def calculate_risk(price, atr, direction, pair, sl_m, tp_m):
 
 def run_scan(api, min_score, risk, sl_m, tp_m):
     sigs = []
-    st.text("Analyse Market Map Pro & Technique en cours...")
     
-    # Pre-load Strength
-    cs_data = calculate_currency_strength(api)
-    if cs_data:
-        with st.expander("✅ Market Map Pro (Données Live)", expanded=False):
-            cols = st.columns(7)
-            for i, (k, v) in enumerate(sorted(cs_data.items(), key=lambda x:x[1], reverse=True)[:7]):
-                cols[i].markdown(f"**{k}**<br>`{v:+.2f}%`", unsafe_allow_html=True)
+    # CALCUL SILENCIEUX DE LA FORCE (PAS DE TEXTE)
+    calculate_currency_strength(api)
     
     pbar = st.progress(0)
     for i, sym in enumerate(ASSETS):
@@ -383,16 +375,13 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
             
             if typ:
                 sc = 0
-                # RSI/HMA Base
-                sc += 3 # Base momentum
+                sc += 3 # Base
                 
-                # Context
                 mtf = calculate_mtf_score_gps(api, sym, typ)
                 cs = calculate_currency_strength_score(api, sym, typ)
                 sc += mtf['score'] + cs['score']
                 if (typ == 'BUY' and fvg_b) or (typ == 'SELL' and fvg_s): sc += 1
                 
-                # SR Veto
                 sr = get_nearest_sr(api.get_candles(sym, "D", 200), p)
                 warn = ""
                 badge = ""
@@ -440,10 +429,17 @@ def display_sig(s):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Score Total", s['score'])
         c2.metric("Qualité GPS", s['quality'])
-        # AFFICHAGE FORCE NETTOYÉ
-        f_val = s['cs']['base_score']
-        f_str = f"{f_val:+.2f}%" if abs(f_val) > 0.001 else "0.00%"
-        c3.metric("Force (MMP)", f_str) # Juste le %
+        
+        # --- MODIFICATION FORCE/MOMENTUM ---
+        # Affichage du Score "2/2" (la Jauge) avec le texte neutre
+        score_val = s['cs']['score']
+        score_text = f"{score_val}/2"
+        delta_label = s['cs']['details'] # Contient "Excellent", "Validé" ou "Divergence" (pas de Buy/Sell)
+        
+        # Coloration dynamique du delta
+        delta_color = "normal" if score_val > 0 else "off"
+        
+        c3.metric("Momentum (Force)", score_text, delta=delta_label, delta_color=delta_color)
         c4.metric("ATR", f"{s['atr']:.4f}")
         
         if s['rm']:
@@ -458,8 +454,7 @@ def display_sig(s):
         st.divider()
         k1, k2 = st.columns(2)
         k1.info(f"**Technique**: RSI {s['rsi']:.1f} | Alignement {s['mtf']['alignment']}")
-        # DETAILS SANS MENTION BUY/SELL
-        k2.info(f"**Fondamental**: {s['cs']['details']} ({s['cs']['rank_info']})")
+        k2.info(f"**Fondamental**: {s['cs']['rank_info']}")
 
 # ==========================================
 # MAIN
@@ -484,3 +479,4 @@ if st.button("🚀 LANCER", type="primary"):
     st.success(f"Trouvé: {len(res)}")
     for s in sorted(res, key=lambda x: (x['score'], x['quality']), reverse=True):
         display_sig(s)
+      
