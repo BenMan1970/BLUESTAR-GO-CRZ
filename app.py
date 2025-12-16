@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
-import requests  # <--- AJOUTÉ POUR LE CALCUL DE FORCE
 from datetime import datetime, timezone
 import time
 import logging
@@ -90,14 +89,6 @@ st.markdown("""
     div[data-testid="stMetricValue"] { font-size: 1.6rem; color: #f1f5f9; font-weight: 700; }
     div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.9rem; }
 
-    .info-box {
-        background: #1e293b;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        padding: 15px;
-        margin-bottom: 10px;
-    }
-    
     .risk-box {
         background: rgba(255,255,255,0.03);
         border-radius: 8px;
@@ -171,7 +162,7 @@ class OandaClient:
         """Gestion du rate limiting"""
         current_time = time.time()
         elapsed = current_time - self.last_request_time
-        if elapsed < 0.1: # Légère augmentation du délai de sécurité
+        if elapsed < 0.1:
             time.sleep(0.1 - elapsed)
         self.last_request_time = time.time()
 
@@ -275,7 +266,6 @@ def get_colored_hma(df: pd.DataFrame, length: int = 20) -> tuple:
 def get_nearest_sr(df: pd.DataFrame, current_price: float, timeframe: str = 'D') -> Dict:
     if len(df) < 20: return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
     
-    # Fractales Bill Williams (Optimisé)
     highs = df['high']
     lows = df['low']
     is_res = (highs > highs.shift(1)) & (highs > highs.shift(2)) & (highs > highs.shift(-1)) & (highs > highs.shift(-2))
@@ -306,100 +296,62 @@ def get_pips(pair: str, price_diff: float) -> float:
     return abs(price_diff * (100 if "JPY" in pair else 10000))
 
 # ==========================================
-# CURRENCY STRENGTH ENGINE (MOTEUR MARKET MAP PRO DIRECT)
+# CURRENCY STRENGTH ENGINE (CORRIGÉ)
 # ==========================================
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
-    """
-    MOTEUR ORIGINAL DE MARKET MAP PRO (Portage direct via Requests)
-    Remplace la version buggée oandapyV20 pour garantir des données.
-    """
-    # 1. Gestion du Cache pour ne pas ralentir l'app
+    """Calcule le score de force avec protection anti-0%"""
+    
     cache_age = time.time() - st.session_state.currency_strength_time
     if st.session_state.currency_strength_cache and cache_age < CURRENCY_STRENGTH_CACHE_DURATION:
-        # Check intégrité
         total_strength = sum(abs(x) for x in st.session_state.currency_strength_cache.values())
         if total_strength > 0.001:
             return st.session_state.currency_strength_cache
 
-    # 2. Récupération des secrets (Méthode Market Map Pro)
-    try:
-        token = st.secrets["OANDA_ACCESS_TOKEN"]
-        # On détecte si c'est practice ou live selon l'URL
-        env = st.secrets.get("OANDA_ENVIRONMENT", "practice")
-        base_url = "https://api-fxtrade.oanda.com" if env == "live" else "https://api-fxpractice.oanda.com"
-    except:
-        return {} # Pas de clé, pas de calcul
-
-    # 3. Liste des paires EXACTE de Market Map Pro
-    pairs_to_scan = [
-        'EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CHF', 'AUD_USD', 'USD_CAD', 'NZD_USD',
-        'EUR_GBP', 'EUR_JPY', 'EUR_CHF', 'EUR_AUD', 'EUR_CAD', 'EUR_NZD',
-        'GBP_JPY', 'GBP_CHF', 'GBP_AUD', 'GBP_CAD', 'GBP_NZD',
-        'AUD_JPY', 'AUD_CAD', 'AUD_NZD', 'AUD_CHF',
-        'CAD_JPY', 'CAD_CHF', 'NZD_JPY', 'NZD_CHF', 'CHF_JPY'
-    ]
-
     forex_data = {}
-    headers = {"Authorization": f"Bearer {token}"}
     
-    # Scan via requests (plus robuste)
-    for instrument in pairs_to_scan:
+    for pair in FOREX_PAIRS:
         try:
-            url = f"{base_url}/v3/instruments/{instrument}/candles?count={lookback_days+5}&granularity=D"
-            # Timeout court pour enchainer vite
-            resp = requests.get(url, headers=headers, timeout=2)
-            
-            if resp.status_code == 200:
-                candles = resp.json().get('candles', [])
-                if candles and len(candles) > lookback_days:
-                    # Logique de calcul Market Map Pro
-                    c_now = float(candles[-1]['mid']['c'])
-                    # On prend la bougie d'avant (D-1) pour comparer
-                    c_past = float(candles[-(lookback_days+1)]['mid']['c']) 
-                    
-                    pct = (c_now - c_past) / c_past * 100
-                    forex_data[instrument] = pct
+            time.sleep(0.15) # Anti Rate Limit
+            df = api.get_candles(pair, "D", count=lookback_days + 5)
+            if df is not None and len(df) > lookback_days:
+                now = df['close'].iloc[-1]
+                past = df['close'].shift(lookback_days).iloc[-1]
+                if past != 0:
+                    pct = (now - past) / past * 100
+                    forex_data[pair] = pct
         except Exception:
             continue
-
-    # 4. ALGORITHME "SMART WEIGHTED SCORE" (Identique à Market Map Pro)
-    data_struct = {}
+    
+    data = {}
     for symbol, pct in forex_data.items():
         parts = symbol.split('_')
         if len(parts) != 2: continue
         base, quote = parts[0], parts[1]
         
-        if base not in data_struct: data_struct[base] = []
-        if quote not in data_struct: data_struct[quote] = []
+        if base not in data: data[base] = []
+        if quote not in data: data[quote] = []
         
-        data_struct[base].append({'pct': pct, 'other': quote})
-        data_struct[quote].append({'pct': -pct, 'other': base})
+        data[base].append({'pct': pct, 'other': quote})
+        data[quote].append({'pct': -pct, 'other': base})
     
-    final_scores = {}
-    for curr, items in data_struct.items():
+    currency_scores = {}
+    for curr, items in data.items():
         score = 0
-        valid_items = 0
+        weight_sum = 0
         for item in items:
-            opponent = item['other']
-            val = item['pct']
-            
-            # PONDÉRATION MAJEURE
-            weight = 2.0 if opponent in ['USD', 'EUR', 'JPY'] else 1.0
-            score += (val * weight)
-            valid_items += weight
-            
-        final_scores[curr] = score / valid_items if valid_items > 0 else 0
+            w = 2.0 if item['other'] in ['USD', 'EUR', 'JPY'] else 1.0
+            score += (item['pct'] * w)
+            weight_sum += w
+        currency_scores[curr] = score / weight_sum if weight_sum > 0 else 0
     
-    # 5. Sauvegarde Cache seulement si données non nulles
-    total_check = sum(abs(v) for v in final_scores.values())
-    if total_check > 0.001:
-        st.session_state.currency_strength_cache = final_scores
+    total_abs_score = sum(abs(v) for v in currency_scores.values())
+    if total_abs_score > 0.001:
+        st.session_state.currency_strength_cache = currency_scores
         st.session_state.currency_strength_time = time.time()
-        
-    return final_scores
+    
+    return currency_scores
 
 def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: str) -> Dict:
-    # CAS 1: FOREX
     if symbol in FOREX_PAIRS:
         parts = symbol.split('_')
         base, quote = parts[0], parts[1]
@@ -411,7 +363,6 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
         base_score = strength_scores[base]
         quote_score = strength_scores[quote]
         
-        # Ranking
         sorted_curr = sorted(strength_scores.items(), key=lambda x: x[1], reverse=True)
         ranks = {k: i+1 for i, (k, v) in enumerate(sorted_curr)}
         base_rank, quote_rank = ranks.get(base, 8), ranks.get(quote, 8)
@@ -439,13 +390,10 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
                 details.append(f"⚠️ Divergence: {base} > {quote}")
                 
         return {'score': score, 'details': ' | '.join(details), 'base_score': base_score, 'quote_score': quote_score, 'rank_info': f"{base}:#{base_rank} / {quote}:#{quote_rank}"}
-
-    # CAS 2: INDICES/OR
     else:
         try:
             df = api.get_candles(symbol, "D", count=2)
             if df.empty: return {'score': 0, 'details': 'No Data', 'base_score': 0, 'rank_info': 'N/A'}
-            
             change = (df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1] * 100
             score = 0
             details = []
@@ -473,26 +421,21 @@ def analyze_timeframe_gps(df: pd.DataFrame, timeframe: str) -> Dict:
     if timeframe in ['H4', 'D1']:
         sma50 = calculate_sma(close, 50).iloc[-1]
         sma200 = calculate_sma(close, 200).iloc[-1] if len(df) >= 200 else sma50
-        
         trend = "Bullish" if price > sma200 else "Bearish"
         details = f"> SMA200" if trend == "Bullish" else "< SMA200"
         return {'trend': trend, 'score': 100, 'details': details}
     else:
-        # Logic H1/M15 plus fine
         zlema = calculate_zlema(close, 50).iloc[-1]
         adx, _, _ = calculate_adx(df, 14)
         curr_adx = adx.iloc[-1]
-        
         if price > zlema: trend = "Bullish"
         elif price < zlema: trend = "Bearish"
         else: trend = "Range"
-        
         return {'trend': trend, 'score': curr_adx, 'details': f"ADX: {curr_adx:.1f}"}
 
 def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Dict:
     tf_map = {'D1': 'D', 'H4': 'H4', 'H1': 'H1'}
     analysis = {}
-    
     expected = 'Bullish' if direction == 'BUY' else 'Bearish'
     matches = 0
     weights = {'D1': 2, 'H4': 1, 'H1': 0.5}
@@ -512,7 +455,6 @@ def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Di
 
     pct = (curr_w / total_w) * 100
     score = 3 if pct >= 85 else 2 if pct >= 50 else 1 if pct >= 25 else 0
-    
     quality = 'C'
     if analysis['D1']['trend'] == expected and analysis['H4']['trend'] == expected: quality = 'A'
     elif analysis['H4']['trend'] == expected and analysis['H1']['trend'] == expected: quality = 'B'
@@ -522,12 +464,8 @@ def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Di
 def calculate_risk_management(price: float, atr: float, direction: str, pair: str, sl_mult: float, tp_mult: float) -> Dict:
     sl_dist = atr * sl_mult
     tp_dist = atr * tp_mult
-    
-    if direction == 'BUY':
-        sl, tp = price - sl_dist, price + tp_dist
-    else:
-        sl, tp = price + sl_dist, price - tp_dist
-        
+    if direction == 'BUY': sl, tp = price - sl_dist, price + tp_dist
+    else: sl, tp = price + sl_dist, price - tp_dist
     return {
         'sl': sl, 'tp': tp,
         'sl_pips': get_pips(pair, sl_dist),
@@ -541,23 +479,10 @@ def calculate_risk_management(price: float, atr: float, direction: str, pair: st
 def run_hybrid_scan(api: OandaClient, min_score: int, enable_risk: bool, sl_m: float, tp_m: float) -> List[Dict]:
     signals = []
     
-    # Init Currency Strength
     status = st.empty()
-    status.text("🔄 Initialisation Force Devises (Mode Direct HTTP)...")
-    
-    # CALCUL DE LA FORCE AU DÉMARRAGE
-    cs_data = calculate_currency_strength(api)
-    
-    # --- DIAGNOSTIC VISUEL POUR L'UTILISATEUR ---
-    if cs_data:
-        with st.expander("✅ Données Market Map chargées (Cliquez pour voir les %)", expanded=False):
-            cols = st.columns(7)
-            sorted_cs = sorted(cs_data.items(), key=lambda x: x[1], reverse=True)
-            for i, (curr, val) in enumerate(sorted_cs[:7]): # Top 7 affichés
-                cols[i].markdown(f"**{curr}**: `{val:+.2f}%`")
-    else:
-        st.error("⚠️ Erreur Market Map: 0 données récupérées via Requests.")
-    # --------------------------------------------
+    status.text("🔄 Initialisation Force Devises (peut prendre 10s)...")
+    try: calculate_currency_strength(api)
+    except: pass
     
     bar = st.progress(0)
     for i, symbol in enumerate(ASSETS):
@@ -565,103 +490,67 @@ def run_hybrid_scan(api: OandaClient, min_score: int, enable_risk: bool, sl_m: f
         status.text(f"Scanning {symbol}...")
         
         try:
-            # M15 Data
             df = api.get_candles(symbol, "M15", count=150)
             if df.empty or len(df) < 50: continue
             
-            # Indicators
             curr_price = df['close'].iloc[-1]
             atr = calculate_atr(df, 14).iloc[-1]
             rsi = get_rsi_ohlc4(df)
             hma, hma_trend = get_colored_hma(df)
             fvg_bull, fvg_bear = detect_fvg(df)
             
-            # Scores Logic
-            # BUY
             rsi_val = rsi.iloc[-1]
             rsi_prev = rsi.iloc[-2]
             hma_col = hma_trend.iloc[-1]
             
-            # Check BUY
+            # --- LOGIQUE DE SIGNAL (Resumée) ---
+            score = 0
+            signal_type = None
+            details_rsi = ""
+            
+            # CHECK BUY
             if rsi_val > 50 and hma_col == 1:
-                # Basic Score
-                score = 0
-                details_rsi = ""
-                
-                # RSI Logic
+                signal_type = 'BUY'
                 if rsi_prev < 50: score += 3; details_rsi = "Cross UP"
                 elif rsi_val > rsi_prev: score += 2; details_rsi = "Trend UP"
                 else: score += 1
-                
-                # HMA Logic
                 score += 2 if hma_trend.iloc[-2] == -1 else 1
-                
-                # MTF & Force
-                mtf = calculate_mtf_score_gps(api, symbol, 'BUY')
-                cs = calculate_currency_strength_score(api, symbol, 'BUY')
-                
-                score += mtf['score'] + cs['score']
-                if fvg_bull: score += 1
-                
-                # SR Check if score promising
-                sr_badge = ""
-                warning = ""
-                if score >= min_score - 2:
-                    df_d = api.get_candles(symbol, "D", 200)
-                    sr = get_nearest_sr(df_d, curr_price)
-                    if sr['dist_res'] < 0.25: 
-                        score -= 2
-                        warning = f"Résistance D1 proche ({sr['dist_res']:.2f}%)"
-                    elif sr['dist_sup'] < 0.4:
-                        sr_badge = "REBOND SUP"
-
-                if score >= min_score:
-                    rm = calculate_risk_management(curr_price, atr, 'BUY', symbol, sl_m, tp_m) if enable_risk else {}
-                    signals.append({
-                        'symbol': symbol, 'type': 'BUY', 'price': curr_price, 'total_score': score,
-                        'quality': mtf['quality'], 'atr': atr, 'warning': warning, 'sr_badge': sr_badge,
-                        'rsi': {'value': rsi_val, 'details': details_rsi},
-                        'hma': {'color': 'VERT', 'details': 'Bullish'},
-                        'mtf': mtf, 'cs': cs, 'fvg': fvg_bull, 'rm': rm,
-                        'time': df['time'].iloc[-1]
-                    })
-
-            # Check SELL
+            
+            # CHECK SELL
             elif rsi_val < 50 and hma_col == -1:
-                score = 0
-                details_rsi = ""
-                
+                signal_type = 'SELL'
                 if rsi_prev > 50: score += 3; details_rsi = "Cross DOWN"
                 elif rsi_val < rsi_prev: score += 2; details_rsi = "Trend DOWN"
                 else: score += 1
-                
                 score += 2 if hma_trend.iloc[-2] == 1 else 1
-                
-                mtf = calculate_mtf_score_gps(api, symbol, 'SELL')
-                cs = calculate_currency_strength_score(api, symbol, 'SELL')
-                
+
+            if signal_type:
+                mtf = calculate_mtf_score_gps(api, symbol, signal_type)
+                cs = calculate_currency_strength_score(api, symbol, signal_type)
                 score += mtf['score'] + cs['score']
-                if fvg_bear: score += 1
+                if (signal_type == 'BUY' and fvg_bull) or (signal_type == 'SELL' and fvg_bear): score += 1
                 
                 sr_badge = ""
                 warning = ""
+                # SR Check
                 if score >= min_score - 2:
                     df_d = api.get_candles(symbol, "D", 200)
                     sr = get_nearest_sr(df_d, curr_price)
-                    if sr['dist_sup'] < 0.25: 
-                        score -= 2
-                        warning = f"Support D1 proche ({sr['dist_sup']:.2f}%)"
-                    elif sr['dist_res'] < 0.4:
-                        sr_badge = "REJET RES"
+                    if signal_type == 'BUY':
+                        if sr['dist_res'] < 0.25: score -= 2; warning = f"Résistance D1 ({sr['dist_res']:.2f}%)"
+                        elif sr['dist_sup'] < 0.4: sr_badge = "REBOND SUP"
+                    else:
+                        if sr['dist_sup'] < 0.25: score -= 2; warning = f"Support D1 ({sr['dist_sup']:.2f}%)"
+                        elif sr['dist_res'] < 0.4: sr_badge = "REJET RES"
 
                 if score >= min_score:
-                    rm = calculate_risk_management(curr_price, atr, 'SELL', symbol, sl_m, tp_m) if enable_risk else {}
+                    rm = calculate_risk_management(curr_price, atr, signal_type, symbol, sl_m, tp_m) if enable_risk else {}
                     signals.append({
-                        'symbol': symbol, 'type': 'SELL', 'price': curr_price, 'total_score': score,
+                        'symbol': symbol, 'type': signal_type, 'price': curr_price, 'total_score': score,
                         'quality': mtf['quality'], 'atr': atr, 'warning': warning, 'sr_badge': sr_badge,
                         'rsi': {'value': rsi_val, 'details': details_rsi},
-                        'hma': {'color': 'ROUGE', 'details': 'Bearish'},
-                        'mtf': mtf, 'cs': cs, 'fvg': fvg_bear, 'rm': rm,
+                        'hma': {'color': 'VERT' if signal_type=='BUY' else 'ROUGE', 'details': signal_type},
+                        'mtf': mtf, 'cs': cs, 'fvg': fvg_bull if signal_type=='BUY' else fvg_bear, 'rm': rm,
                         'time': df['time'].iloc[-1]
                     })
                     
@@ -672,13 +561,35 @@ def run_hybrid_scan(api: OandaClient, min_score: int, enable_risk: bool, sl_m: f
     return signals
 
 # ==========================================
-# UI & DISPLAY
+# UI & VISUALIZATION (NEW)
 # ==========================================
+def generate_strength_meter(value: float, max_range: float = 0.5) -> str:
+    """Génère la barre visuelle de force segmentée"""
+    clamped_value = max(-max_range, min(max_range, value))
+    position_pct = ((clamped_value + max_range) / (2 * max_range)) * 100
+    
+    colors = ["#ef4444", "#f87171", "#fca5a5", "#fcd34d", "#fde047", "#bef264", "#86efac", "#4ade80", "#22c55e", "#15803d"]
+    segments_html = "".join([f'<div style="flex: 1; background-color: {col}; margin: 0 1px; height: 100%; border-radius: 2px;"></div>' for col in colors])
+    
+    return f"""
+    <div style="width: 100%; margin-top: 5px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+            <span style="font-size: 0.7em; color: #ef4444; font-weight: bold;">SELL</span>
+            <span style="font-size: 0.8em; color: white; font-weight: bold;">{value:+.2f}%</span>
+            <span style="font-size: 0.7em; color: #22c55e; font-weight: bold;">BUY</span>
+        </div>
+        <div style="position: relative; height: 10px; width: 100%; display: flex; background: rgba(255,255,255,0.05); padding: 2px;">
+            {segments_html}
+            <div style="position: absolute; left: {position_pct}%; bottom: -8px; transform: translateX(-50%); width: 0; height: 0; 
+            border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 8px solid white; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5));"></div>
+        </div>
+    </div>
+    """
+
 def display_signal(sig: Dict):
     is_buy = sig['type'] == 'BUY'
     color = "#10b981" if is_buy else "#ef4444"
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
-    
     ago = int((datetime.now(timezone.utc) - sig['time'].to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds() / 60)
     
     with st.expander(f"{sig['symbol']} | {sig['type']} | Score {sig['total_score']}/12 [{sig['quality']}]", expanded=True):
@@ -690,22 +601,23 @@ def display_signal(sig: Dict):
         </div>
         """, unsafe_allow_html=True)
         
-        # Badges
         badges = []
         if sig['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         if sig['quality'] == 'A': badges.append("<span class='badge-gps'>🛡️ GPS A+</span>")
         if sig['sr_badge']: badges.append(f"<span class='badge-sr'>{sig['sr_badge']}</span>")
-        
         if badges: st.markdown(f"<div style='margin-top:10px; text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
+        
         if sig['warning']: st.warning(sig['warning'])
         
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1])
         c1.metric("Score", sig['total_score'])
         c2.metric("Qualité", sig['quality'])
-        # Affichage Force corrigé (évite le -0.0%)
-        force_val = sig['cs']['base_score']
-        force_str = f"{force_val:.2f}%" if abs(force_val) > 0.001 else "0.00%"
-        c3.metric("Force", force_str)
+        
+        # JAUGE VISUELLE FORCE
+        with c3:
+            st.markdown("<div style='color: #94a3b8; font-size: 0.9rem; margin-bottom: -5px;'>Force / Mom.</div>", unsafe_allow_html=True)
+            st.markdown(generate_strength_meter(sig['cs']['base_score']), unsafe_allow_html=True)
+
         c4.metric("ATR", f"{sig['atr']:.4f}")
         
         if sig['rm']:
@@ -746,12 +658,6 @@ if col2.button("🧹 Reset Cache"):
 if st.button("🚀 LANCER LE SCANNER", type="primary"):
     api = OandaClient()
     results = run_hybrid_scan(api, min_score, enable_risk, sl_m, tp_m)
-    
     st.success(f"Scan terminé : {len(results)} opportunités trouvées")
-    
-    # Tri par Score puis Qualité
     results = sorted(results, key=lambda x: (x['total_score'], x['quality']), reverse=True)
-    
-    for sig in results:
-        display_signal(sig)
-    
+    for sig in results: display_signal(sig)
