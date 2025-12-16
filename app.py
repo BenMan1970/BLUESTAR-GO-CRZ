@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
+import requests  # <--- AJOUTÉ POUR LE CALCUL DE FORCE
 from datetime import datetime, timezone
 import time
 import logging
@@ -305,67 +306,97 @@ def get_pips(pair: str, price_diff: float) -> float:
     return abs(price_diff * (100 if "JPY" in pair else 10000))
 
 # ==========================================
-# CURRENCY STRENGTH ENGINE (CORRIGÉ & ROBUSTE)
+# CURRENCY STRENGTH ENGINE (MOTEUR MARKET MAP PRO DIRECT)
 # ==========================================
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
-    """Calcule le score de force avec protection anti-0%"""
-    
-    # 1. Vérification du cache et validité des données
+    """
+    MOTEUR ORIGINAL DE MARKET MAP PRO (Portage direct via Requests)
+    Remplace la version buggée oandapyV20 pour garantir des données.
+    """
+    # 1. Gestion du Cache pour ne pas ralentir l'app
     cache_age = time.time() - st.session_state.currency_strength_time
     if st.session_state.currency_strength_cache and cache_age < CURRENCY_STRENGTH_CACHE_DURATION:
-        # Vérifie si le cache n'est pas corrompu (somme = 0)
+        # Check intégrité
         total_strength = sum(abs(x) for x in st.session_state.currency_strength_cache.values())
         if total_strength > 0.001:
             return st.session_state.currency_strength_cache
 
+    # 2. Récupération des secrets (Méthode Market Map Pro)
+    try:
+        token = st.secrets["OANDA_ACCESS_TOKEN"]
+        # On détecte si c'est practice ou live selon l'URL
+        env = st.secrets.get("OANDA_ENVIRONMENT", "practice")
+        base_url = "https://api-fxtrade.oanda.com" if env == "live" else "https://api-fxpractice.oanda.com"
+    except:
+        return {} # Pas de clé, pas de calcul
+
+    # 3. Liste des paires EXACTE de Market Map Pro
+    pairs_to_scan = [
+        'EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CHF', 'AUD_USD', 'USD_CAD', 'NZD_USD',
+        'EUR_GBP', 'EUR_JPY', 'EUR_CHF', 'EUR_AUD', 'EUR_CAD', 'EUR_NZD',
+        'GBP_JPY', 'GBP_CHF', 'GBP_AUD', 'GBP_CAD', 'GBP_NZD',
+        'AUD_JPY', 'AUD_CAD', 'AUD_NZD', 'AUD_CHF',
+        'CAD_JPY', 'CAD_CHF', 'NZD_JPY', 'NZD_CHF', 'CHF_JPY'
+    ]
+
     forex_data = {}
+    headers = {"Authorization": f"Bearer {token}"}
     
-    # 2. Boucle de récupération avec délais
-    for pair in FOREX_PAIRS:
+    # Scan via requests (plus robuste)
+    for instrument in pairs_to_scan:
         try:
-            # DELAI IMPORTANT POUR EVITER LE RATE LIMIT D'OANDA
-            time.sleep(0.15) 
+            url = f"{base_url}/v3/instruments/{instrument}/candles?count={lookback_days+5}&granularity=D"
+            # Timeout court pour enchainer vite
+            resp = requests.get(url, headers=headers, timeout=2)
             
-            df = api.get_candles(pair, "D", count=lookback_days + 5)
-            if df is not None and len(df) > lookback_days:
-                now = df['close'].iloc[-1]
-                past = df['close'].shift(lookback_days).iloc[-1]
-                if past != 0:
-                    pct = (now - past) / past * 100
-                    forex_data[pair] = pct
+            if resp.status_code == 200:
+                candles = resp.json().get('candles', [])
+                if candles and len(candles) > lookback_days:
+                    # Logique de calcul Market Map Pro
+                    c_now = float(candles[-1]['mid']['c'])
+                    # On prend la bougie d'avant (D-1) pour comparer
+                    c_past = float(candles[-(lookback_days+1)]['mid']['c']) 
+                    
+                    pct = (c_now - c_past) / c_past * 100
+                    forex_data[instrument] = pct
         except Exception:
             continue
-    
-    # 3. Traitement des données
-    data = {}
+
+    # 4. ALGORITHME "SMART WEIGHTED SCORE" (Identique à Market Map Pro)
+    data_struct = {}
     for symbol, pct in forex_data.items():
         parts = symbol.split('_')
         if len(parts) != 2: continue
         base, quote = parts[0], parts[1]
         
-        if base not in data: data[base] = []
-        if quote not in data: data[quote] = []
+        if base not in data_struct: data_struct[base] = []
+        if quote not in data_struct: data_struct[quote] = []
         
-        data[base].append({'pct': pct, 'other': quote})
-        data[quote].append({'pct': -pct, 'other': base})
+        data_struct[base].append({'pct': pct, 'other': quote})
+        data_struct[quote].append({'pct': -pct, 'other': base})
     
-    currency_scores = {}
-    for curr, items in data.items():
+    final_scores = {}
+    for curr, items in data_struct.items():
         score = 0
-        weight_sum = 0
+        valid_items = 0
         for item in items:
-            w = 2.0 if item['other'] in ['USD', 'EUR', 'JPY'] else 1.0
-            score += (item['pct'] * w)
-            weight_sum += w
-        currency_scores[curr] = score / weight_sum if weight_sum > 0 else 0
+            opponent = item['other']
+            val = item['pct']
+            
+            # PONDÉRATION MAJEURE
+            weight = 2.0 if opponent in ['USD', 'EUR', 'JPY'] else 1.0
+            score += (val * weight)
+            valid_items += weight
+            
+        final_scores[curr] = score / valid_items if valid_items > 0 else 0
     
-    # 4. Mise en cache seulement si données valides (non nulles)
-    total_abs_score = sum(abs(v) for v in currency_scores.values())
-    if total_abs_score > 0.001:
-        st.session_state.currency_strength_cache = currency_scores
+    # 5. Sauvegarde Cache seulement si données non nulles
+    total_check = sum(abs(v) for v in final_scores.values())
+    if total_check > 0.001:
+        st.session_state.currency_strength_cache = final_scores
         st.session_state.currency_strength_time = time.time()
-    
-    return currency_scores
+        
+    return final_scores
 
 def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: str) -> Dict:
     # CAS 1: FOREX
@@ -512,10 +543,21 @@ def run_hybrid_scan(api: OandaClient, min_score: int, enable_risk: bool, sl_m: f
     
     # Init Currency Strength
     status = st.empty()
-    status.text("🔄 Initialisation Force Devises (peut prendre 10s)...")
-    try:
-        calculate_currency_strength(api)
-    except: pass
+    status.text("🔄 Initialisation Force Devises (Mode Direct HTTP)...")
+    
+    # CALCUL DE LA FORCE AU DÉMARRAGE
+    cs_data = calculate_currency_strength(api)
+    
+    # --- DIAGNOSTIC VISUEL POUR L'UTILISATEUR ---
+    if cs_data:
+        with st.expander("✅ Données Market Map chargées (Cliquez pour voir les %)", expanded=False):
+            cols = st.columns(7)
+            sorted_cs = sorted(cs_data.items(), key=lambda x: x[1], reverse=True)
+            for i, (curr, val) in enumerate(sorted_cs[:7]): # Top 7 affichés
+                cols[i].markdown(f"**{curr}**: `{val:+.2f}%`")
+    else:
+        st.error("⚠️ Erreur Market Map: 0 données récupérées via Requests.")
+    # --------------------------------------------
     
     bar = st.progress(0)
     for i, symbol in enumerate(ASSETS):
@@ -712,3 +754,4 @@ if st.button("🚀 LANCER LE SCANNER", type="primary"):
     
     for sig in results:
         display_signal(sig)
+    
