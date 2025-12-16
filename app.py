@@ -23,19 +23,14 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
     
-    * {
-        font-family: 'Roboto', sans-serif;
-    }
+    * { font-family: 'Roboto', sans-serif; }
     
     .stApp {
         background-color: #0f1117;
         background-image: radial-gradient(at 50% 0%, #1f2937 0%, #0f1117 70%);
     }
     
-    .main .block-container {
-        max-width: 950px;
-        padding-top: 2rem;
-    }
+    .main .block-container { max-width: 950px; padding-top: 2rem; }
 
     h1 {
         background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
@@ -47,10 +42,7 @@ st.markdown("""
         margin-bottom: 0.2em;
     }
     
-    h2, h3 {
-        color: #e2e8f0;
-        font-weight: 700;
-    }
+    h2, h3 { color: #e2e8f0; font-weight: 700; }
 
     .stButton>button {
         width: 100%;
@@ -94,21 +86,8 @@ st.markdown("""
         padding: 20px;
     }
     
-    .streamlit-expanderHeader p {
-        font-size: 1.4rem !important;
-        font-weight: 700 !important;
-        letter-spacing: 0.5px;
-    }
-
-    div[data-testid="stMetricValue"] {
-        font-size: 1.6rem;
-        color: #f1f5f9;
-        font-weight: 700;
-    }
-    div[data-testid="stMetricLabel"] {
-        color: #94a3b8;
-        font-size: 0.9rem;
-    }
+    div[data-testid="stMetricValue"] { font-size: 1.6rem; color: #f1f5f9; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.9rem; }
 
     .info-box {
         background: #1e293b;
@@ -126,61 +105,16 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.05);
     }
     
-    .badge-fvg {
-        background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
-        color: white;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 0.75em;
-        font-weight: 700;
-        display: inline-block;
-        margin: 2px;
-        box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+    .badge-fvg, .badge-gps, .badge-sr {
+        color: white; padding: 4px 10px; border-radius: 6px;
+        font-size: 0.75em; font-weight: 700; display: inline-block; margin: 2px;
     }
-    
-    .badge-gps {
-        background: linear-gradient(135deg, #059669 0%, #10b981 100%);
-        color: white;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 0.75em;
-        font-weight: 700;
-        display: inline-block;
-        margin: 2px;
-        box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3);
-    }
+    .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3); }
+    .badge-gps { background: linear-gradient(135deg, #059669 0%, #10b981 100%); box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3); }
+    .badge-sr { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3); }
 
-    .badge-sr {
-        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-        color: white;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 0.75em;
-        font-weight: 700;
-        display: inline-block;
-        margin: 2px;
-        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
-    }
-
-    .stAlert {
-        background-color: #1e293b;
-        color: #e2e8f0;
-        border: 1px solid #334155;
-    }
-
-    hr {
-        margin: 1.5em 0;
-        border-color: #334155;
-    }
-    
-    ::-webkit-scrollbar {
-        width: 10px;
-        background: #0f1117;
-    }
-    ::-webkit-scrollbar-thumb {
-        background: #334155;
-        border-radius: 5px;
-    }
+    .stAlert { background-color: #1e293b; color: #e2e8f0; border: 1px solid #334155; }
+    hr { margin: 1.5em 0; border-color: #334155; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -192,11 +126,8 @@ ASSETS = [
     "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_CAD", "EUR_AUD", "EUR_NZD",
     "GBP_JPY", "GBP_CHF", "GBP_CAD", "GBP_AUD", "GBP_NZD",
     "AUD_JPY", "AUD_CAD", "AUD_CHF", "AUD_NZD",
-    "CAD_JPY", "CAD_CHF",
-    "NZD_JPY", "NZD_CAD", "NZD_CHF",
-    "CHF_JPY",
-    "XAU_USD", "XPT_USD",
-    "US30_USD", "NAS100_USD", "SPX500_USD"
+    "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY",
+    "XAU_USD", "XPT_USD", "US30_USD", "NAS100_USD", "SPX500_USD"
 ]
 
 FOREX_PAIRS = [
@@ -204,9 +135,7 @@ FOREX_PAIRS = [
     "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_CAD", "EUR_AUD", "EUR_NZD",
     "GBP_JPY", "GBP_CHF", "GBP_CAD", "GBP_AUD", "GBP_NZD",
     "AUD_JPY", "AUD_CAD", "AUD_CHF", "AUD_NZD",
-    "CAD_JPY", "CAD_CHF",
-    "NZD_JPY", "NZD_CAD", "NZD_CHF",
-    "CHF_JPY"
+    "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
 ]
 
 # Cache système
@@ -217,7 +146,7 @@ if 'cache' not in st.session_state:
     st.session_state.currency_strength_time = 0
 
 CACHE_DURATION = 30
-CURRENCY_STRENGTH_CACHE_DURATION = 300
+CURRENCY_STRENGTH_CACHE_DURATION = 300  # 5 minutes
 
 # ==========================================
 # API CLIENT ROBUSTE
@@ -229,29 +158,24 @@ class OandaClient:
             self.account_id = st.secrets["OANDA_ACCOUNT_ID"]
             self.environment = st.secrets.get("OANDA_ENVIRONMENT", "practice")
             self.client = oandapyV20.API(access_token=self.access_token, environment=self.environment)
-            self.request_count = 0
             self.last_request_time = time.time()
         except KeyError as e:
-            st.error(f"⚠️ Clé manquante dans les secrets: {e}")
+            st.error(f"⚠️ Clé manquante dans secrets.toml: {e}")
             st.stop()
         except Exception as e:
             st.error(f"⚠️ Erreur d'initialisation API: {str(e)}")
             st.stop()
 
     def _rate_limit(self):
-        """Gestion du rate limiting (max 20 req/sec pour OANDA)"""
+        """Gestion du rate limiting"""
         current_time = time.time()
         elapsed = current_time - self.last_request_time
-        
-        if elapsed < 0.05:
-            time.sleep(0.05 - elapsed)
-        
+        if elapsed < 0.1: # Légère augmentation du délai de sécurité
+            time.sleep(0.1 - elapsed)
         self.last_request_time = time.time()
-        self.request_count += 1
 
     def get_candles(self, instrument: str, granularity: str, count: int = 150) -> pd.DataFrame:
         """Récupération des données avec cache"""
-        
         cache_key = f"{instrument}_{granularity}"
         if cache_key in st.session_state.cache:
             cache_age = time.time() - st.session_state.cache_time.get(cache_key, 0)
@@ -259,268 +183,168 @@ class OandaClient:
                 return st.session_state.cache[cache_key].copy()
         
         self._rate_limit()
-        
         params = {"count": count, "granularity": granularity, "price": "M"}
         
-        max_retries = 2
-        for attempt in range(max_retries):
+        for attempt in range(2):
             try:
                 r = instruments.InstrumentsCandles(instrument=instrument, params=params)
                 self.client.request(r)
-                
-                if 'candles' not in r.response:
-                    return pd.DataFrame()
+                if 'candles' not in r.response: return pd.DataFrame()
                 
                 data = []
-                for candle in r.response['candles']:
-                    if candle['complete']:
+                for c in r.response['candles']:
+                    if c['complete']:
                         try:
                             data.append({
-                                'time': candle['time'],
-                                'open': float(candle['mid']['o']),
-                                'high': float(candle['mid']['h']),
-                                'low': float(candle['mid']['l']),
-                                'close': float(candle['mid']['c']),
-                                'volume': int(candle['volume'])
+                                'time': c['time'],
+                                'open': float(c['mid']['o']),
+                                'high': float(c['mid']['h']),
+                                'low': float(c['mid']['l']),
+                                'close': float(c['mid']['c']),
+                                'volume': int(c['volume'])
                             })
-                        except (KeyError, ValueError):
-                            continue
+                        except: continue
                 
-                if not data:
-                    return pd.DataFrame()
-                
+                if not data: return pd.DataFrame()
                 df = pd.DataFrame(data)
                 df['time'] = pd.to_datetime(df['time'])
                 
-                if len(df) < 50:
-                    return pd.DataFrame()
+                if len(df) < 50: return pd.DataFrame()
                 
                 st.session_state.cache[cache_key] = df.copy()
                 st.session_state.cache_time[cache_key] = time.time()
-                
                 return df
-                
             except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(0.3)
-                    continue
-                return pd.DataFrame()
-        
+                if attempt < 1: time.sleep(0.5)
+                else: return pd.DataFrame()
         return pd.DataFrame()
 
 # ==========================================
 # INDICATEURS TECHNIQUES
 # ==========================================
-
 def calculate_wma(series: pd.Series, length: int) -> pd.Series:
-    """WMA optimisé"""
-    if len(series) < length:
-        return pd.Series(index=series.index, dtype=float)
     weights = np.arange(1, length + 1)
-    return series.rolling(length).apply(
-        lambda x: np.dot(x, weights) / weights.sum() if len(x) == length else np.nan, 
-        raw=True
-    )
-
-def calculate_ema(series: pd.Series, length: int) -> pd.Series:
-    """EMA standard"""
-    return series.ewm(span=length, adjust=False).mean()
+    return series.rolling(length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
 
 def calculate_sma(series: pd.Series, length: int) -> pd.Series:
-    """SMA standard"""
     return series.rolling(window=length).mean()
 
 def calculate_zlema(series: pd.Series, length: int) -> pd.Series:
-    """ZLEMA - Zero Lag EMA"""
-    if len(series) < length:
-        return pd.Series(index=series.index, dtype=float)
     lag = int((length - 1) / 2)
     src_adj = series + (series - series.shift(lag))
     return src_adj.ewm(span=length, adjust=False).mean()
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """ATR - Average True Range"""
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    high, low, close = df['high'], df['low'], df['close']
+    tr = pd.concat([high - low, abs(high - close.shift(1)), abs(low - close.shift(1))], axis=1).max(axis=1)
     return tr.ewm(span=period, adjust=False).mean()
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> tuple:
-    """ADX - Average Directional Index"""
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift(1))
-    tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
+    high, low, close = df['high'], df['low'], df['close']
+    tr = calculate_atr(df, 1).ewm(span=period, adjust=False).mean() # Approximate TR smooth
     up = high - high.shift(1)
     down = low.shift(1) - low
     plus_dm = np.where((up > down) & (up > 0), up, 0)
     minus_dm = np.where((down > up) & (down > 0), down, 0)
     
-    plus_dm = pd.Series(plus_dm, index=close.index)
-    minus_dm = pd.Series(minus_dm, index=close.index)
-    
-    atr_s = tr.ewm(span=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, adjust=False).mean() / atr_s)
-    minus_di = 100 * (minus_dm.ewm(span=period, adjust=False).mean() / atr_s)
+    plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / tr)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / tr)
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(span=period, adjust=False).mean()
-    
-    return adx, plus_di, minus_di
+    return dx.ewm(span=period, adjust=False).mean(), plus_di, minus_di
 
 def get_rsi_ohlc4(df: pd.DataFrame, length: int = 7) -> pd.Series:
-    """RSI sur OHLC4"""
-    if len(df) < length + 10:
-        return pd.Series(index=df.index, dtype=float)
-    
     ohlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
     delta = ohlc4.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/length, adjust=False).mean()
-    
     rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
+    return (100 - (100 / (1 + rs))).fillna(50)
 
 def get_colored_hma(df: pd.DataFrame, length: int = 20) -> tuple:
-    """HMA coloré"""
-    if len(df) < length + 10:
-        return pd.Series(index=df.index, dtype=float), pd.Series(index=df.index, dtype=int)
-    
     src = df['close']
     wma1 = calculate_wma(src, int(length / 2))
     wma2 = calculate_wma(src, length)
-    raw_hma = 2 * wma1 - wma2
-    hma = calculate_wma(raw_hma, int(np.round(np.sqrt(length))))
-    
-    hma_prev = hma.shift(1)
-    trend_array = np.where(hma > hma_prev, 1, -1)
-    trend_series = pd.Series(trend_array, index=df.index)
-    
-    return hma, trend_series
+    hma = calculate_wma(2 * wma1 - wma2, int(np.sqrt(length)))
+    trend = pd.Series(np.where(hma > hma.shift(1), 1, -1), index=df.index)
+    return hma, trend
 
 # ==========================================
-# SUPPORT & RESISTANCE (OPTIMISÉ & LÉGER)
+# SUPPORT & RESISTANCE / FVG
 # ==========================================
-
 def get_nearest_sr(df: pd.DataFrame, current_price: float, timeframe: str = 'D') -> Dict:
-    """
-    Identifie le Support/Résistance le plus proche
-    SANS librairie externe (Utilisation des Fractales Bill Williams)
-    """
-    if df.empty or len(df) < 20:
-        return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
+    if len(df) < 20: return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
     
-    # 1. Détection des Fractales (High > 2 bougies avant/après)
-    # Méthode "Vectorisée" Pandas ultra-rapide
+    # Fractales Bill Williams (Optimisé)
+    highs = df['high']
+    lows = df['low']
+    is_res = (highs > highs.shift(1)) & (highs > highs.shift(2)) & (highs > highs.shift(-1)) & (highs > highs.shift(-2))
+    is_sup = (lows < lows.shift(1)) & (lows < lows.shift(2)) & (lows < lows.shift(-1)) & (lows < lows.shift(-2))
     
-    # Résistances (Sommets locaux)
-    is_res = (df['high'] > df['high'].shift(1)) & \
-             (df['high'] > df['high'].shift(2)) & \
-             (df['high'] > df['high'].shift(-1)) & \
-             (df['high'] > df['high'].shift(-2))
-             
-    # Supports (Creux locaux)
-    is_sup = (df['low'] < df['low'].shift(1)) & \
-             (df['low'] < df['low'].shift(2)) & \
-             (df['low'] < df['low'].shift(-1)) & \
-             (df['low'] < df['low'].shift(-2))
-    
-    # On récupère les niveaux
     res_levels = df[is_res]['high'].values
     sup_levels = df[is_sup]['low'].values
     
-    # 2. Filtrage : On ne garde que les niveaux proches du prix actuel
-    # On évite de scanner des résistances d'il y a 3 ans trop loin
     relevant_res = res_levels[res_levels > current_price]
     relevant_sup = sup_levels[sup_levels < current_price]
     
-    # 3. Le plus proche
     nearest_res = relevant_res.min() if len(relevant_res) > 0 else None
     nearest_sup = relevant_sup.max() if len(relevant_sup) > 0 else None
     
-    # 4. Calcul distances
     dist_res = ((nearest_res - current_price) / current_price * 100) if nearest_res else 999
     dist_sup = ((current_price - nearest_sup) / current_price * 100) if nearest_sup else 999
     
-    return {
-        'sup': nearest_sup,
-        'res': nearest_res,
-        'dist_sup': dist_sup,
-        'dist_res': dist_res
-    }
-
-# ==========================================
-# FVG DETECTION
-# ==========================================
+    return {'sup': nearest_sup, 'res': nearest_res, 'dist_sup': dist_sup, 'dist_res': dist_res}
 
 def detect_fvg(df: pd.DataFrame) -> tuple:
-    """Détection Fair Value Gap"""
-    if len(df) < 5:
-        return False, False
-    
+    if len(df) < 5: return False, False
     fvg_bull = (df['low'] > df['high'].shift(2))
     fvg_bear = (df['high'] < df['low'].shift(2))
-    
-    has_bull = fvg_bull.iloc[-5:].any()
-    has_bear = fvg_bear.iloc[-5:].any()
-    
-    return has_bull, has_bear
-
-# ==========================================
-# PIPS CALCULATOR
-# ==========================================
+    return fvg_bull.iloc[-5:].any(), fvg_bear.iloc[-5:].any()
 
 def get_pips(pair: str, price_diff: float) -> float:
-    """Calcule la valeur en pips"""
-    if "XAU" in pair or "US30" in pair or "NAS100" in pair or "SPX500" in pair or "XPT" in pair:
-        return abs(price_diff)
-    
-    multiplier = 100 if "JPY" in pair else 10000
-    return abs(price_diff * multiplier)
+    if any(x in pair for x in ["XAU", "US30", "NAS100", "SPX500", "XPT"]): return abs(price_diff)
+    return abs(price_diff * (100 if "JPY" in pair else 10000))
 
 # ==========================================
-# CURRENCY STRENGTH ENGINE
+# CURRENCY STRENGTH ENGINE (CORRIGÉ & ROBUSTE)
 # ==========================================
-
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
-    """Calcule le score de force pour chaque devise"""
+    """Calcule le score de force avec protection anti-0%"""
+    
+    # 1. Vérification du cache et validité des données
     cache_age = time.time() - st.session_state.currency_strength_time
     if st.session_state.currency_strength_cache and cache_age < CURRENCY_STRENGTH_CACHE_DURATION:
-        return st.session_state.currency_strength_cache
-    
+        # Vérifie si le cache n'est pas corrompu (somme = 0)
+        total_strength = sum(abs(x) for x in st.session_state.currency_strength_cache.values())
+        if total_strength > 0.001:
+            return st.session_state.currency_strength_cache
+
     forex_data = {}
+    
+    # 2. Boucle de récupération avec délais
     for pair in FOREX_PAIRS:
         try:
+            # DELAI IMPORTANT POUR EVITER LE RATE LIMIT D'OANDA
+            time.sleep(0.15) 
+            
             df = api.get_candles(pair, "D", count=lookback_days + 5)
             if df is not None and len(df) > lookback_days:
                 now = df['close'].iloc[-1]
                 past = df['close'].shift(lookback_days).iloc[-1]
-                pct = (now - past) / past * 100
-                forex_data[pair] = pct
-        except:
+                if past != 0:
+                    pct = (now - past) / past * 100
+                    forex_data[pair] = pct
+        except Exception:
             continue
     
+    # 3. Traitement des données
     data = {}
     for symbol, pct in forex_data.items():
         parts = symbol.split('_')
-        if len(parts) != 2:
-            continue
+        if len(parts) != 2: continue
         base, quote = parts[0], parts[1]
         
-        if base not in data:
-            data[base] = []
-        if quote not in data:
-            data[quote] = []
+        if base not in data: data[base] = []
+        if quote not in data: data[quote] = []
         
         data[base].append({'pct': pct, 'other': quote})
         data[quote].append({'pct': -pct, 'other': base})
@@ -528,652 +352,363 @@ def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dic
     currency_scores = {}
     for curr, items in data.items():
         score = 0
-        valid_items = 0
+        weight_sum = 0
         for item in items:
-            opponent = item['other']
-            val = item['pct']
-            weight = 2.0 if opponent in ['USD', 'EUR', 'JPY'] else 1.0
-            score += (val * weight)
-            valid_items += weight
-        final_score = score / valid_items if valid_items > 0 else 0
-        currency_scores[curr] = final_score
+            w = 2.0 if item['other'] in ['USD', 'EUR', 'JPY'] else 1.0
+            score += (item['pct'] * w)
+            weight_sum += w
+        currency_scores[curr] = score / weight_sum if weight_sum > 0 else 0
     
-    st.session_state.currency_strength_cache = currency_scores
-    st.session_state.currency_strength_time = time.time()
+    # 4. Mise en cache seulement si données valides (non nulles)
+    total_abs_score = sum(abs(v) for v in currency_scores.values())
+    if total_abs_score > 0.001:
+        st.session_state.currency_strength_cache = currency_scores
+        st.session_state.currency_strength_time = time.time()
+    
     return currency_scores
 
 def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: str) -> Dict:
-    """Score Currency Strength Hybride"""
-    
-    # === CAS 1 : FOREX ===
+    # CAS 1: FOREX
     if symbol in FOREX_PAIRS:
         parts = symbol.split('_')
-        if len(parts) != 2:
-            return {'score': 0, 'details': 'Format invalide', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
-        
         base, quote = parts[0], parts[1]
-        try:
-            strength_scores = calculate_currency_strength(api)
-        except:
-            return {'score': 0, 'details': 'Erreur calcul', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+        strength_scores = calculate_currency_strength(api)
         
-        if base not in strength_scores or quote not in strength_scores:
-            return {'score': 0, 'details': 'Données manquantes', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+        if base not in strength_scores: 
+            return {'score': 0, 'details': 'Data manquante', 'base_score': 0, 'rank_info': 'N/A'}
         
         base_score = strength_scores[base]
         quote_score = strength_scores[quote]
         
-        sorted_currencies = sorted(strength_scores.items(), key=lambda x: x[1], reverse=True)
-        base_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == base)
-        quote_rank = next(i for i, (curr, _) in enumerate(sorted_currencies, 1) if curr == quote)
-        total_currencies = len(sorted_currencies)
+        # Ranking
+        sorted_curr = sorted(strength_scores.items(), key=lambda x: x[1], reverse=True)
+        ranks = {k: i+1 for i, (k, v) in enumerate(sorted_curr)}
+        base_rank, quote_rank = ranks.get(base, 8), ranks.get(quote, 8)
         
         score = 0
         details = []
         
         if direction == 'BUY':
-            if base_rank <= 3 and quote_rank >= total_currencies - 2:
+            if base_rank <= 3 and quote_rank >= 6:
                 score = 2
-                details.append(f"✅ {base} TOP3 (#{base_rank}) & {quote} BOTTOM3 (#{quote_rank})")
+                details.append(f"✅ {base}(#{base_rank}) vs {quote}(#{quote_rank})")
             elif base_score > quote_score:
                 score = 1
-                details.append(f"📊 {base} > {quote} (Δ: {base_score - quote_score:+.2f}%)")
+                details.append(f"📊 {base} > {quote}")
             else:
-                score = 0
-                details.append(f"⚠️ Divergence : {quote} plus fort que {base}")
-        else:  # SELL
-            if quote_rank <= 3 and base_rank >= total_currencies - 2:
+                details.append(f"⚠️ Divergence: {quote} > {base}")
+        else: # SELL
+            if quote_rank <= 3 and base_rank >= 6:
                 score = 2
-                details.append(f"✅ {quote} TOP3 (#{quote_rank}) & {base} BOTTOM3 (#{base_rank})")
+                details.append(f"✅ {quote}(#{quote_rank}) vs {base}(#{base_rank})")
             elif quote_score > base_score:
                 score = 1
-                details.append(f"📊 {quote} > {base} (Δ: {quote_score - base_score:+.2f}%)")
+                details.append(f"📊 {quote} > {base}")
             else:
-                score = 0
-                details.append(f"⚠️ Divergence : {base} plus fort que {quote}")
-        
-        rank_info = f"{base}:#{base_rank} vs {quote}:#{quote_rank}"
-        return {'score': score, 'details': ' | '.join(details), 'base_score': base_score, 'quote_score': quote_score, 'rank_info': rank_info}
+                details.append(f"⚠️ Divergence: {base} > {quote}")
+                
+        return {'score': score, 'details': ' | '.join(details), 'base_score': base_score, 'quote_score': quote_score, 'rank_info': f"{base}:#{base_rank} / {quote}:#{quote_rank}"}
 
-    # === CAS 2 : INDICES/OR ===
+    # CAS 2: INDICES/OR
     else:
         try:
-            df_d1 = api.get_candles(symbol, "D", count=2)
-            if df_d1.empty:
-                 return {'score': 0, 'details': 'Pas de data D1', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+            df = api.get_candles(symbol, "D", count=2)
+            if df.empty: return {'score': 0, 'details': 'No Data', 'base_score': 0, 'rank_info': 'N/A'}
             
-            open_price = df_d1['open'].iloc[-1]
-            curr_price = df_d1['close'].iloc[-1]
-            perf_pct = ((curr_price - open_price) / open_price) * 100
-            
+            change = (df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1] * 100
             score = 0
             details = []
-            THRESHOLD_STRONG = 0.30 
             
             if direction == 'BUY':
-                if perf_pct > THRESHOLD_STRONG:
-                    score = 2
-                    details.append(f"🚀 Grosse impulsion Haussière (+{perf_pct:.2f}%)")
-                elif perf_pct > 0:
-                    score = 1
-                    details.append(f"📈 Journée Verte (+{perf_pct:.2f}%)")
-                else:
-                    score = 0
-                    details.append(f"⚠️ Contre-tendance (Journée Rouge: {perf_pct:.2f}%)")
-            else: # SELL
-                if perf_pct < -THRESHOLD_STRONG:
-                    score = 2
-                    details.append(f"☄️ Grosse chute Baissière ({perf_pct:.2f}%)")
-                elif perf_pct < 0:
-                    score = 1
-                    details.append(f"📉 Journée Rouge ({perf_pct:.2f}%)")
-                else:
-                    score = 0
-                    details.append(f"⚠️ Contre-tendance (Journée Verte: +{perf_pct:.2f}%)")
-            
-            return {'score': score, 'details': ' | '.join(details), 'base_score': perf_pct, 'quote_score': 0, 'rank_info': f"Daily: {perf_pct:+.2f}%"}
-        except Exception as e:
-            return {'score': 0, 'details': f'Err: {str(e)}', 'base_score': 0, 'quote_score': 0, 'rank_info': 'N/A'}
+                if change > 0.3: score = 2; details.append("🚀 Impulsion Haussière")
+                elif change > 0: score = 1; details.append("📈 Journée Verte")
+                else: details.append("⚠️ Contre-tendance")
+            else:
+                if change < -0.3: score = 2; details.append("☄️ Chute Baissière")
+                elif change < 0: score = 1; details.append("📉 Journée Rouge")
+                else: details.append("⚠️ Contre-tendance")
+                
+            return {'score': score, 'details': ' | '.join(details), 'base_score': change, 'rank_info': f"Daily: {change:+.2f}%"}
+        except:
+            return {'score': 0, 'details': 'Error', 'base_score': 0, 'rank_info': 'N/A'}
 
 # ==========================================
-# MTF GPS LOGIC
+# MTF & SCORING
 # ==========================================
-
 def analyze_timeframe_gps(df: pd.DataFrame, timeframe: str) -> Dict:
-    """Analyse GPS d'un timeframe"""
-    if df.empty or len(df) < 50:
-        return {'trend': 'Neutral', 'score': 0, 'details': 'Données insuffisantes', 'atr': 0}
-    
     close = df['close']
-    curr_price = close.iloc[-1]
-    atr_val = calculate_atr(df, 14).iloc[-1]
+    price = close.iloc[-1]
     
     if timeframe in ['H4', 'D1']:
-        sma50 = calculate_sma(close, 50)
-        sma200 = calculate_sma(close, 200)
-        curr_sma50 = sma50.iloc[-1] if len(df) >= 50 else curr_price
-        has_200 = len(df) >= 200
-        curr_sma200 = sma200.iloc[-1] if has_200 else curr_sma50
+        sma50 = calculate_sma(close, 50).iloc[-1]
+        sma200 = calculate_sma(close, 200).iloc[-1] if len(df) >= 200 else sma50
         
-        if has_200:
-            if curr_price > curr_sma200:
-                trend = "Bullish"
-                score = 60
-                if curr_price > curr_sma50: score += 20
-                if curr_sma50 > curr_sma200: score += 20
-                details = f"Prix > SMA200 ({curr_sma200:.5f})"
-            else:
-                trend = "Bearish"
-                score = 60
-                if curr_price < curr_sma50: score += 20
-                if curr_sma50 < curr_sma200: score += 20
-                details = f"Prix < SMA200 ({curr_sma200:.5f})"
-        else:
-            if curr_price > curr_sma50:
-                trend = "Bullish"
-                score = 50
-                details = f"Prix > SMA50 ({curr_sma50:.5f})"
-            else:
-                trend = "Bearish"
-                score = 50
-                details = f"Prix < SMA50 ({curr_sma50:.5f})"
+        trend = "Bullish" if price > sma200 else "Bearish"
+        details = f"> SMA200" if trend == "Bullish" else "< SMA200"
+        return {'trend': trend, 'score': 100, 'details': details}
     else:
-        zlema_val = calculate_zlema(close, 50)
-        baseline = calculate_sma(close, 200)
-        adx_val, _, _ = calculate_adx(df, 14)
-        curr_zlema = zlema_val.iloc[-1]
-        curr_adx = adx_val.iloc[-1]
-        has_base = len(df) >= 200
-        curr_base = baseline.iloc[-1] if has_base else curr_zlema
+        # Logic H1/M15 plus fine
+        zlema = calculate_zlema(close, 50).iloc[-1]
+        adx, _, _ = calculate_adx(df, 14)
+        curr_adx = adx.iloc[-1]
         
-        trend = "Range"
-        score = curr_adx
-        if curr_price > curr_zlema:
-            if has_base and curr_price > curr_base:
-                trend = "Bullish"
-                details = f"Prix > ZLEMA & Baseline (ADX: {curr_adx:.1f})"
-            elif has_base and curr_price < curr_base:
-                trend = "Retracement"
-                details = f"Hausse sous Baseline (ADX: {curr_adx:.1f})"
-            else:
-                trend = "Bullish"
-                details = f"Prix > ZLEMA (ADX: {curr_adx:.1f})"
-        elif curr_price < curr_zlema:
-            if has_base and curr_price < curr_base:
-                trend = "Bearish"
-                details = f"Prix < ZLEMA & Baseline (ADX: {curr_adx:.1f})"
-            elif has_base and curr_price > curr_base:
-                trend = "Retracement"
-                details = f"Baisse au-dessus Baseline (ADX: {curr_adx:.1f})"
-            else:
-                trend = "Bearish"
-                details = f"Prix < ZLEMA (ADX: {curr_adx:.1f})"
-        else:
-            details = f"Range (ADX: {curr_adx:.1f})"
+        if price > zlema: trend = "Bullish"
+        elif price < zlema: trend = "Bearish"
+        else: trend = "Range"
         
-        if curr_adx < 20 and trend == "Retracement":
-            trend = "Range"
-            details = f"ADX faible ({curr_adx:.1f})"
-    
-    return {'trend': trend, 'score': min(100, score), 'details': details, 'atr': atr_val}
-
-# ==========================================
-# SCORING SYSTEM (BASE)
-# ==========================================
-
-def calculate_rsi_score(rsi_series: pd.Series, direction: str) -> Dict:
-    if len(rsi_series) < 3:
-        return {'score': 0, 'details': 'Données insuffisantes'}
-    curr_rsi = rsi_series.iloc[-1]
-    prev_rsi = rsi_series.iloc[-2]
-    score = 0
-    details = []
-    
-    if direction == 'BUY':
-        if prev_rsi < 50 and curr_rsi > 50:
-            score = 3
-            details.append("✅ Croisement haussier confirmé")
-        elif 45 < curr_rsi < 50 and curr_rsi > prev_rsi:
-            score = 2
-            details.append("⚡ Approche haussière (momentum +)")
-        elif curr_rsi < 50 and curr_rsi > prev_rsi:
-            score = 1
-            details.append("📊 Zone basse, momentum positif")
-    else:  # SELL
-        if prev_rsi > 50 and curr_rsi < 50:
-            score = 3
-            details.append("✅ Croisement baissier confirmé")
-        elif 50 < curr_rsi < 55 and curr_rsi < prev_rsi:
-            score = 2
-            details.append("⚡ Approche baissière (momentum -)")
-        elif curr_rsi > 50 and curr_rsi < prev_rsi:
-            score = 1
-            details.append("📊 Zone haute, momentum négatif")
-    return {'score': score, 'value': curr_rsi, 'details': ' | '.join(details) if details else 'Pas de signal'}
-
-def calculate_hma_score(hma_trend: pd.Series, direction: str) -> Dict:
-    if len(hma_trend) < 2:
-        return {'score': 0, 'details': 'Données insuffisantes'}
-    curr = hma_trend.iloc[-1]
-    prev = hma_trend.iloc[-2]
-    score = 0
-    details = []
-    
-    if direction == 'BUY':
-        if prev == -1 and curr == 1:
-            score = 2
-            details.append("✅ Changement VERT")
-        elif curr == 1:
-            score = 1
-            details.append("📈 Déjà VERT")
-    else:  # SELL
-        if prev == 1 and curr == -1:
-            score = 2
-            details.append("✅ Changement ROUGE")
-        elif curr == -1:
-            score = 1
-            details.append("📉 Déjà ROUGE")
-    return {'score': score, 'color': 'VERT' if curr == 1 else 'ROUGE', 'details': ' | '.join(details) if details else 'Neutre'}
+        return {'trend': trend, 'score': curr_adx, 'details': f"ADX: {curr_adx:.1f}"}
 
 def calculate_mtf_score_gps(api: OandaClient, symbol: str, direction: str) -> Dict:
-    timeframes = {'D1': 'D', 'H4': 'H4', 'H1': 'H1'}
+    tf_map = {'D1': 'D', 'H4': 'H4', 'H1': 'H1'}
     analysis = {}
-    for tf_name, tf_code in timeframes.items():
-        df = api.get_candles(symbol, tf_code, count=300)
-        if df.empty or len(df) < 50:
-            analysis[tf_name] = {'trend': 'Neutral', 'score': 0, 'details': 'N/A', 'atr': 0}
-        else:
-            analysis[tf_name] = analyze_timeframe_gps(df, tf_name)
     
-    score = 0
-    details = []
     expected = 'Bullish' if direction == 'BUY' else 'Bearish'
-    weights = {'D1': 2.0, 'H4': 1.0, 'H1': 0.5}
-    aligned_weight = 0
-    for tf in ['D1', 'H4', 'H1']:
-        if analysis[tf]['trend'] == expected:
-            aligned_weight += weights[tf]
-    total_weight = sum(weights.values())
-    alignment_pct = (aligned_weight / total_weight) * 100
+    matches = 0
+    weights = {'D1': 2, 'H4': 1, 'H1': 0.5}
+    total_w = 3.5
+    curr_w = 0
     
-    if alignment_pct >= 85:
-        score = 3
-        details.append("✅ Alignement FORT")
-    elif alignment_pct >= 57:
-        score = 2
-        details.append("⚡ Alignement MOYEN")
-    elif alignment_pct >= 28:
-        score = 1
-        details.append("📊 Alignement FAIBLE")
+    for name, code in tf_map.items():
+        df = api.get_candles(symbol, code, count=250)
+        if not df.empty:
+            res = analyze_timeframe_gps(df, name)
+            analysis[name] = res
+            if res['trend'] == expected:
+                curr_w += weights[name]
+                matches += 1
+        else:
+            analysis[name] = {'trend': 'Neutral', 'details': 'N/A'}
+
+    pct = (curr_w / total_w) * 100
+    score = 3 if pct >= 85 else 2 if pct >= 50 else 1 if pct >= 25 else 0
     
     quality = 'C'
-    if analysis['D1']['trend'] == analysis['H4']['trend']:
-        quality = 'B'
-    if analysis['D1']['trend'] == analysis['H4']['trend'] == analysis['H1']['trend']:
-        quality = 'A'
-    if quality == 'A' and analysis['D1']['score'] > 70:
-        quality = 'A+'
+    if analysis['D1']['trend'] == expected and analysis['H4']['trend'] == expected: quality = 'A'
+    elif analysis['H4']['trend'] == expected and analysis['H1']['trend'] == expected: quality = 'B'
     
-    return {'score': score, 'quality': quality, 'analysis': analysis, 'alignment': f"{alignment_pct:.0f}%", 'details': ' | '.join(details) if details else 'Pas d\'alignement'}
+    return {'score': score, 'quality': quality, 'analysis': analysis, 'alignment': f"{pct:.0f}%", 'details': f"Match score: {pct:.0f}%"}
 
-def calculate_risk_management(price: float, atr: float, direction: str, pair: str, 
-                              sl_multiplier: float = 1.5, tp_multiplier: float = 2.0) -> Dict:
-    sl_distance = atr * sl_multiplier
-    tp_distance = atr * tp_multiplier
+def calculate_risk_management(price: float, atr: float, direction: str, pair: str, sl_mult: float, tp_mult: float) -> Dict:
+    sl_dist = atr * sl_mult
+    tp_dist = atr * tp_mult
+    
     if direction == 'BUY':
-        sl = price - sl_distance
-        tp = price + tp_distance
-    else:  # SELL
-        sl = price + sl_distance
-        tp = price - tp_distance
-    sl_pips = get_pips(pair, sl_distance)
-    tp_pips = get_pips(pair, tp_distance)
-    rr_ratio = tp_multiplier / sl_multiplier
-    return {'sl': sl, 'tp': tp, 'sl_pips': sl_pips, 'tp_pips': tp_pips, 'rr_ratio': rr_ratio}
+        sl, tp = price - sl_dist, price + tp_dist
+    else:
+        sl, tp = price + sl_dist, price - tp_dist
+        
+    return {
+        'sl': sl, 'tp': tp,
+        'sl_pips': get_pips(pair, sl_dist),
+        'tp_pips': get_pips(pair, tp_dist),
+        'rr_ratio': tp_mult / sl_mult
+    }
 
 # ==========================================
-# SCANNER HYBRIDE ULTIME + S/R OVERLAY
+# SCANNER MAIN
 # ==========================================
-
-def run_hybrid_scan(api: OandaClient, min_score: int = 4, 
-                   enable_risk_manager: bool = True,
-                   sl_atr_mult: float = 1.5,
-                   tp_atr_mult: float = 2.0) -> List[Dict]:
-    """Scanner Hybride avec Overlay Support/Résistance"""
+def run_hybrid_scan(api: OandaClient, min_score: int, enable_risk: bool, sl_m: float, tp_m: float) -> List[Dict]:
     signals = []
-    skipped = 0
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    total = len(ASSETS)
-    
-    status_text.markdown("🔄 **Synchronisation des devises...**")
+    # Init Currency Strength
+    status = st.empty()
+    status.text("🔄 Initialisation Force Devises (peut prendre 10s)...")
     try:
         calculate_currency_strength(api)
-        status_text.text("✅ Currency Strength OK")
-    except:
-        status_text.text("⚠️ Erreur Currency Strength")
+    except: pass
     
-    time.sleep(1)
-    
+    bar = st.progress(0)
     for i, symbol in enumerate(ASSETS):
-        progress_bar.progress((i + 1) / total)
-        status_text.markdown(f"🔍 Scan: **{symbol}** ... ({i+1}/{total})")
+        bar.progress((i+1)/len(ASSETS))
+        status.text(f"Scanning {symbol}...")
         
         try:
-            df_m15 = api.get_candles(symbol, "M15", count=150)
-            if df_m15.empty or len(df_m15) < 50:
-                skipped += 1
-                continue
-
-            rsi_series = get_rsi_ohlc4(df_m15)
-            if rsi_series.empty: continue
+            # M15 Data
+            df = api.get_candles(symbol, "M15", count=150)
+            if df.empty or len(df) < 50: continue
             
-            hma, hma_trend = get_colored_hma(df_m15)
-            if hma_trend.empty: continue
+            # Indicators
+            curr_price = df['close'].iloc[-1]
+            atr = calculate_atr(df, 14).iloc[-1]
+            rsi = get_rsi_ohlc4(df)
+            hma, hma_trend = get_colored_hma(df)
+            fvg_bull, fvg_bear = detect_fvg(df)
             
-            adx_series, _, _ = calculate_adx(df_m15, 14)
-            current_adx = adx_series.iloc[-1]
-            has_fvg_bull, has_fvg_bear = detect_fvg(df_m15)
+            # Scores Logic
+            # BUY
+            rsi_val = rsi.iloc[-1]
+            rsi_prev = rsi.iloc[-2]
+            hma_col = hma_trend.iloc[-1]
             
-            current_price = df_m15['close'].iloc[-1]
-            atr_m15 = calculate_atr(df_m15, 14).iloc[-1]
-            signal_time_utc = df_m15['time'].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc)
-            
-            # === OVERLAY S/R (Chargement Lazy) ===
-            # On ne charge les S/R que si on a un potentiel signal pour économiser API
-            sr_context = None
-            
-            # === Test BUY ===
-            rsi_buy = calculate_rsi_score(rsi_series, 'BUY')
-            if rsi_buy['score'] > 0:
-                hma_buy = calculate_hma_score(hma_trend, 'BUY')
-                mtf_buy = calculate_mtf_score_gps(api, symbol, 'BUY')
-                cs_buy = calculate_currency_strength_score(api, symbol, 'BUY')
+            # Check BUY
+            if rsi_val > 50 and hma_col == 1:
+                # Basic Score
+                score = 0
+                details_rsi = ""
                 
-                # TWEAK 1: HMA PRICE CHECK
-                current_hma_val = hma.iloc[-1]
-                if current_price < current_hma_val:
-                     hma_buy['score'] = max(0, hma_buy['score'] - 1)
+                # RSI Logic
+                if rsi_prev < 50: score += 3; details_rsi = "Cross UP"
+                elif rsi_val > rsi_prev: score += 2; details_rsi = "Trend UP"
+                else: score += 1
                 
-                # Bonus FVG
-                raw_fvg_bonus = 2 if has_fvg_bull else 0
-                fvg_bonus = raw_fvg_bonus if mtf_buy['score'] > 0 else 0
+                # HMA Logic
+                score += 2 if hma_trend.iloc[-2] == -1 else 1
                 
-                total_score = rsi_buy['score'] + hma_buy['score'] + mtf_buy['score'] + cs_buy['score'] + fvg_bonus
+                # MTF & Force
+                mtf = calculate_mtf_score_gps(api, symbol, 'BUY')
+                cs = calculate_currency_strength_score(api, symbol, 'BUY')
                 
-                # Penalties
-                if cs_buy['score'] == 0 and symbol in FOREX_PAIRS: total_score -= 2
-                if current_adx < 20: total_score -= 1
+                score += mtf['score'] + cs['score']
+                if fvg_bull: score += 1
                 
-                # --- S/R SAFETY CHECK (VETO) ---
-                sr_warning = ""
+                # SR Check if score promising
                 sr_badge = ""
-                
-                # On ne lance l'analyse S/R que si le score est prometteur
-                if total_score >= min_score - 2:
-                    df_d1_sr = api.get_candles(symbol, "D", 250)
-                    sr_data = get_nearest_sr(df_d1_sr, current_price, 'D')
-                    
-                    # Danger: Résistance proche (< 0.25%)
-                    if sr_data['dist_res'] < 0.25:
-                        total_score -= 2 # PENALITE
-                        sr_warning = f"⚠️ DANGER: Résistance Daily à {sr_data['res']:.5f} ({sr_data['dist_res']:.2f}%)"
-                    
-                    # Bonus: Rebond Support (< 0.3%)
-                    elif sr_data['dist_sup'] < 0.30:
-                        sr_badge = "🛡️ REBOND SUPPORT D1"
-                
-                if total_score >= min_score:
-                    risk_data = {}
-                    if enable_risk_manager:
-                        risk_data = calculate_risk_management(current_price, atr_m15, 'BUY', symbol, sl_atr_mult, tp_atr_mult)
-                    
-                    quality = "MOYEN"
-                    quality_color = "#94a3b8"
-                    if total_score >= 10: quality, quality_color = "LEGENDARY", "#fbbf24"
-                    elif total_score >= 8: quality, quality_color = "EXCELLENT", "#10b981"
-                    elif total_score >= 6: quality, quality_color = "FORT", "#34d399"
-                    
-                    warning = ""
-                    if cs_buy['score'] == 0: warning = "⚠️ Divergence/Contre-tendance"
-                    if current_adx < 20: warning += " | ⚠️ Range"
-                    if sr_warning: warning += f" | {sr_warning}"
-                    
-                    # Downgrade visuel si warning majeur
-                    if "DANGER" in warning: 
-                        quality, quality_color = "RISQUE", "#f59e0b"
+                warning = ""
+                if score >= min_score - 2:
+                    df_d = api.get_candles(symbol, "D", 200)
+                    sr = get_nearest_sr(df_d, curr_price)
+                    if sr['dist_res'] < 0.25: 
+                        score -= 2
+                        warning = f"Résistance D1 proche ({sr['dist_res']:.2f}%)"
+                    elif sr['dist_sup'] < 0.4:
+                        sr_badge = "REBOND SUP"
 
+                if score >= min_score:
+                    rm = calculate_risk_management(curr_price, atr, 'BUY', symbol, sl_m, tp_m) if enable_risk else {}
                     signals.append({
-                        "symbol": symbol, "type": "BUY", "price": current_price, "atr_m15": atr_m15,
-                        "total_score": total_score, "quality": quality, "quality_color": quality_color,
-                        "warning": warning, "sr_badge": sr_badge,
-                        "rsi": rsi_buy, "hma": hma_buy, "mtf": mtf_buy, "currency_strength": cs_buy,
-                        "has_fvg": has_fvg_bull, "fvg_bonus": fvg_bonus, "risk_management": risk_data,
-                        "timestamp_utc": signal_time_utc
+                        'symbol': symbol, 'type': 'BUY', 'price': curr_price, 'total_score': score,
+                        'quality': mtf['quality'], 'atr': atr, 'warning': warning, 'sr_badge': sr_badge,
+                        'rsi': {'value': rsi_val, 'details': details_rsi},
+                        'hma': {'color': 'VERT', 'details': 'Bullish'},
+                        'mtf': mtf, 'cs': cs, 'fvg': fvg_bull, 'rm': rm,
+                        'time': df['time'].iloc[-1]
                     })
-            
-            # === Test SELL ===
-            rsi_sell = calculate_rsi_score(rsi_series, 'SELL')
-            if rsi_sell['score'] > 0:
-                hma_sell = calculate_hma_score(hma_trend, 'SELL')
-                mtf_sell = calculate_mtf_score_gps(api, symbol, 'SELL')
-                cs_sell = calculate_currency_strength_score(api, symbol, 'SELL')
+
+            # Check SELL
+            elif rsi_val < 50 and hma_col == -1:
+                score = 0
+                details_rsi = ""
                 
-                current_hma_val = hma.iloc[-1]
-                if current_price > current_hma_val:
-                     hma_sell['score'] = max(0, hma_sell['score'] - 1)
+                if rsi_prev > 50: score += 3; details_rsi = "Cross DOWN"
+                elif rsi_val < rsi_prev: score += 2; details_rsi = "Trend DOWN"
+                else: score += 1
                 
-                raw_fvg_bonus = 2 if has_fvg_bear else 0
-                fvg_bonus = raw_fvg_bonus if mtf_sell['score'] > 0 else 0
+                score += 2 if hma_trend.iloc[-2] == 1 else 1
                 
-                total_score = rsi_sell['score'] + hma_sell['score'] + mtf_sell['score'] + cs_sell['score'] + fvg_bonus
+                mtf = calculate_mtf_score_gps(api, symbol, 'SELL')
+                cs = calculate_currency_strength_score(api, symbol, 'SELL')
                 
-                if cs_sell['score'] == 0 and symbol in FOREX_PAIRS: total_score -= 2
-                if current_adx < 20: total_score -= 1
+                score += mtf['score'] + cs['score']
+                if fvg_bear: score += 1
                 
-                # --- S/R SAFETY CHECK (VETO) ---
-                sr_warning = ""
                 sr_badge = ""
-                
-                if total_score >= min_score - 2:
-                    df_d1_sr = api.get_candles(symbol, "D", 250)
-                    sr_data = get_nearest_sr(df_d1_sr, current_price, 'D')
-                    
-                    # Danger: Support proche (pour un Sell)
-                    if sr_data['dist_sup'] < 0.25:
-                        total_score -= 2
-                        sr_warning = f"⚠️ DANGER: Support Daily à {sr_data['sup']:.5f} ({sr_data['dist_sup']:.2f}%)"
-                    
-                    # Bonus: Rejet Résistance
-                    elif sr_data['dist_res'] < 0.30:
-                        sr_badge = "🛡️ REJET RESISTANCE D1"
+                warning = ""
+                if score >= min_score - 2:
+                    df_d = api.get_candles(symbol, "D", 200)
+                    sr = get_nearest_sr(df_d, curr_price)
+                    if sr['dist_sup'] < 0.25: 
+                        score -= 2
+                        warning = f"Support D1 proche ({sr['dist_sup']:.2f}%)"
+                    elif sr['dist_res'] < 0.4:
+                        sr_badge = "REJET RES"
 
-                if total_score >= min_score:
-                    risk_data = {}
-                    if enable_risk_manager:
-                        risk_data = calculate_risk_management(current_price, atr_m15, 'SELL', symbol, sl_atr_mult, tp_atr_mult)
-                    
-                    quality = "MOYEN"
-                    quality_color = "#94a3b8"
-                    if total_score >= 10: quality, quality_color = "LEGENDARY", "#fbbf24"
-                    elif total_score >= 8: quality, quality_color = "EXCELLENT", "#ec4899"
-                    elif total_score >= 6: quality, quality_color = "FORT", "#f472b6"
-                    
-                    warning = ""
-                    if cs_sell['score'] == 0: warning = "⚠️ Divergence/Contre-tendance"
-                    if current_adx < 20: warning += " | ⚠️ Range"
-                    if sr_warning: warning += f" | {sr_warning}"
-                    
-                    if "DANGER" in warning: 
-                        quality, quality_color = "RISQUE", "#f59e0b"
-                    
+                if score >= min_score:
+                    rm = calculate_risk_management(curr_price, atr, 'SELL', symbol, sl_m, tp_m) if enable_risk else {}
                     signals.append({
-                        "symbol": symbol, "type": "SELL", "price": current_price, "atr_m15": atr_m15,
-                        "total_score": total_score, "quality": quality, "quality_color": quality_color,
-                        "warning": warning, "sr_badge": sr_badge,
-                        "rsi": rsi_sell, "hma": hma_sell, "mtf": mtf_sell, "currency_strength": cs_sell,
-                        "has_fvg": has_fvg_bear, "fvg_bonus": fvg_bonus, "risk_management": risk_data,
-                        "timestamp_utc": signal_time_utc
+                        'symbol': symbol, 'type': 'SELL', 'price': curr_price, 'total_score': score,
+                        'quality': mtf['quality'], 'atr': atr, 'warning': warning, 'sr_badge': sr_badge,
+                        'rsi': {'value': rsi_val, 'details': details_rsi},
+                        'hma': {'color': 'ROUGE', 'details': 'Bearish'},
+                        'mtf': mtf, 'cs': cs, 'fvg': fvg_bear, 'rm': rm,
+                        'time': df['time'].iloc[-1]
                     })
+                    
+        except Exception: continue
         
-        except Exception:
-            skipped += 1
-            continue
-    
-    progress_bar.empty()
-    status_text.empty()
-    if skipped > 0: st.caption(f"ℹ️ {skipped} actifs ignorés")
+    status.empty()
+    bar.empty()
     return signals
 
 # ==========================================
-# AFFICHAGE UI
+# UI & DISPLAY
 # ==========================================
-
-def display_hybrid_signal(sig: Dict, show_risk: bool = True):
+def display_signal(sig: Dict):
     is_buy = sig['type'] == 'BUY'
+    color = "#10b981" if is_buy else "#ef4444"
+    bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
-    if is_buy:
-        color_theme = "#10b981"
-        bg_gradient = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)"
-        arrow = "🟢 BUY"
-        border = "2px solid #059669"
-    else:
-        color_theme = "#ef4444"
-        bg_gradient = "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
-        arrow = "🔴 SELL"
-        border = "2px solid #dc2626"
-
-    signal_utc = sig['timestamp_utc']
-    elapsed_sec = int((datetime.now(timezone.utc) - signal_utc).total_seconds())
-    fresh_txt = f"{elapsed_sec//60} min ago" if elapsed_sec >= 60 else f"{elapsed_sec} sec ago"
+    ago = int((datetime.now(timezone.utc) - sig['time'].to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds() / 60)
     
-    # Badges
-    badges_html = ""
-    if sig.get('has_fvg') and sig.get('fvg_bonus', 0) > 0:
-        badges_html += "<span class='badge-fvg'>🦅 SMART MONEY</span> "
-    if sig['mtf']['quality'] in ['A+', 'A']:
-        badges_html += "<span class='badge-gps'>🛡️ GPS SECURE</span> "
-    if sig.get('sr_badge'):
-        badges_html += f"<span class='badge-sr'>{sig['sr_badge']}</span>"
-    
-    max_score = 12 if sig.get('fvg_bonus', 0) > 0 else 10
-    
-    header_title = f"{sig['symbol']}  |  {arrow}  |  Score {sig['total_score']}/{max_score}  [{sig['quality']}]"
-    
-    with st.expander(header_title, expanded=True):
+    with st.expander(f"{sig['symbol']} | {sig['type']} | Score {sig['total_score']}/12 [{sig['quality']}]", expanded=True):
         st.markdown(f"""
-        <div style="background: {bg_gradient}; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: {border}; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <span style="font-size: 1.8em; font-weight: 900; color: white;">{sig['symbol']}</span>
-                <span style="background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 4px; font-weight: bold; margin-left: 10px; color: white;">{sig['type']}</span>
-            </div>
-            <div style="text-align: right;">
-                <div style="color: rgba(255,255,255,0.8); font-size: 0.9em;">{fresh_txt}</div>
-                <div style="font-size: 1.4em; font-weight: bold; color: white;">{sig['price']:.5f}</div>
-            </div>
+        <div style="background: {bg}; padding: 15px; border-radius: 8px; border: 2px solid {color}; display: flex; justify-content: space-between; align-items: center;">
+            <div><span style="font-size: 1.8em; font-weight: 900; color: white;">{sig['symbol']}</span>
+            <span style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; color: white; margin-left: 10px;">{sig['type']}</span></div>
+            <div style="text-align: right;"><div style="color: #cbd5e1;">{ago} min ago</div><div style="font-size: 1.4em; font-weight: bold; color: white;">{sig['price']:.5f}</div></div>
         </div>
         """, unsafe_allow_html=True)
         
-        if badges_html:
-            st.markdown(f"<div style='text-align: center; margin-bottom: 15px;'>{badges_html}</div>", unsafe_allow_html=True)
-
-        if sig.get('warning'):
-            st.warning(f"{sig['warning']}")
-
+        # Badges
+        badges = []
+        if sig['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
+        if sig['quality'] == 'A': badges.append("<span class='badge-gps'>🛡️ GPS A+</span>")
+        if sig['sr_badge']: badges.append(f"<span class='badge-sr'>{sig['sr_badge']}</span>")
+        
+        if badges: st.markdown(f"<div style='margin-top:10px; text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
+        if sig['warning']: st.warning(sig['warning'])
+        
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Score Total", f"{sig['total_score']}/{max_score}")
-        c2.metric("Qualité GPS", sig['mtf']['quality'])
-        cs_text = f"{sig['currency_strength']['score']}/2" if sig['symbol'] in FOREX_PAIRS else f"{sig['currency_strength']['score']}/2 (Mom)"
-        c3.metric("Force/Mom.", cs_text)
-        c4.metric("ATR M15", f"{sig['atr_m15']:.4f}" if sig['atr_m15'] < 1 else f"{sig['atr_m15']:.2f}")
-
-        if show_risk and sig.get('risk_management'):
+        c1.metric("Score", sig['total_score'])
+        c2.metric("Qualité", sig['quality'])
+        # Affichage Force corrigé (évite le -0.0%)
+        force_val = sig['cs']['base_score']
+        force_str = f"{force_val:.2f}%" if abs(force_val) > 0.001 else "0.00%"
+        c3.metric("Force", force_str)
+        c4.metric("ATR", f"{sig['atr']:.4f}")
+        
+        if sig['rm']:
             st.divider()
-            st.markdown("##### 🎯 Risk Management (ATR-Based)")
-            rm = sig['risk_management']
             r1, r2, r3 = st.columns(3)
-            sl_pips_str = f"{int(rm['sl_pips'])} pips" if "XAU" not in sig['symbol'] and "US30" not in sig['symbol'] else f"{rm['sl_pips']:.1f} pts"
-            tp_pips_str = f"{int(rm['tp_pips'])} pips" if "XAU" not in sig['symbol'] and "US30" not in sig['symbol'] else f"{rm['tp_pips']:.1f} pts"
+            sl_pips = int(sig['rm']['sl_pips']) if "XAU" not in sig['symbol'] else f"{sig['rm']['sl_pips']:.1f}"
+            tp_pips = int(sig['rm']['tp_pips']) if "XAU" not in sig['symbol'] else f"{sig['rm']['tp_pips']:.1f}"
             
-            r1.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>STOP LOSS</div><div style='font-size: 1.2em; font-weight: bold; color: #ef4444;'>{rm['sl']:.5f}</div><div style='font-size: 0.85em; color: #ef4444;'>-{sl_pips_str}</div></div>""", unsafe_allow_html=True)
-            r2.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>TAKE PROFIT</div><div style='font-size: 1.2em; font-weight: bold; color: #10b981;'>{rm['tp']:.5f}</div><div style='font-size: 0.85em; color: #10b981;'>+{tp_pips_str}</div></div>""", unsafe_allow_html=True)
-            r3.markdown(f"""<div class='risk-box'><div style='color: #94a3b8; font-size: 0.8em;'>RATIO R:R</div><div style='font-size: 1.2em; font-weight: bold; color: #f1f5f9;'>1:{rm['rr_ratio']:.2f}</div><div style='font-size: 0.85em; color: #94a3b8;'>Risque Fixe</div></div>""", unsafe_allow_html=True)
+            r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold'>{sig['rm']['sl']:.5f}</div><small>-{sl_pips} pips</small></div>", unsafe_allow_html=True)
+            r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold'>{sig['rm']['tp']:.5f}</div><small>+{tp_pips} pips</small></div>", unsafe_allow_html=True)
+            r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8'>RATIO</div><div style='color:white;font-weight:bold'>1:{sig['rm']['rr_ratio']:.2f}</div></div>", unsafe_allow_html=True)
 
         st.divider()
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown("##### 🛠️ Technique")
-            rsi_val = sig['rsi']['value']
-            rsi_col = "#10b981" if (is_buy and rsi_val > 50) or (not is_buy and rsi_val < 50) else "#94a3b8"
-            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">RSI (7)</span><span style="font-weight: bold; color: {rsi_col};">{rsi_val:.1f}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['rsi']['details']}</div></div>""", unsafe_allow_html=True)
-            hma_col = "#10b981" if sig['hma']['color'] == 'VERT' else "#ef4444"
-            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">HMA Trend</span><span style="font-weight: bold; color: {hma_col};">{sig['hma']['color']}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['hma']['details']}</div></div>""", unsafe_allow_html=True)
-
-        with col_right:
-            st.markdown("##### 🌍 Macro & Force")
-            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">Alignement MTF</span><span style="font-weight: bold; color: white;">{sig['mtf']['alignment']}</span></div><div style="font-size: 0.85em; margin-top: 5px; color: #cbd5e1;">{sig['mtf']['details']}</div></div>""", unsafe_allow_html=True)
-            base_score = sig['currency_strength']['base_score']
-            strength_val = f"{base_score:.1f}%" if sig['symbol'] in FOREX_PAIRS else f"{base_score:+.2f}%"
-            st.markdown(f"""<div class="info-box"><div style="display: flex; justify-content: space-between;"><span style="color: #94a3b8;">Force/Momentum</span><span style="font-weight: bold; color: white;">{strength_val}</span></div><div style="font-size: 0.85em; margin-top: 5px;">{sig['currency_strength']['rank_info']}</div></div>""", unsafe_allow_html=True)
-
-        st.markdown("##### 📅 Analyse Multi-Timeframe")
-        mtf_cols = st.columns(3)
-        for i, tf in enumerate(['D1', 'H4', 'H1']):
-            data = sig['mtf']['analysis'][tf]
-            badge_col = "#34d399" if data['trend'] == 'Bullish' else "#f87171" if data['trend'] == 'Bearish' else "#cbd5e1"
-            with mtf_cols[i]:
-                st.markdown(f"""<div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px; text-align: center;"><div style="color: #94a3b8; font-size: 0.8em; font-weight: bold; margin-bottom: 5px;">{tf}</div><div style="color: {badge_col}; font-weight: bold; font-size: 0.9em;">{data['trend']}</div></div>""", unsafe_allow_html=True)
-        
-        breakdown_parts = [f"RSI({sig['rsi']['score']})", f"HMA({sig['hma']['score']})", f"GPS({sig['mtf']['score']})", f"Force({sig['currency_strength']['score']})"]
-        if sig.get('fvg_bonus', 0) > 0: breakdown_parts.append(f"FVG(+{sig['fvg_bonus']})")
-        st.markdown(f"""<div style='margin-top: 15px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 6px; text-align: center;'><span style='color: #94a3b8; font-size: 0.8em;'>Composition du Score :</span><br><span style='color: white; font-weight: bold; font-size: 0.95em;'>{' + '.join(breakdown_parts)} = {sig['total_score']}</span></div>""", unsafe_allow_html=True)
+        k1, k2 = st.columns(2)
+        k1.info(f"**Technique**: RSI {sig['rsi']['value']:.1f} ({sig['rsi']['details']}) | HMA {sig['hma']['color']}")
+        k2.info(f"**Macro**: Alignement {sig['mtf']['alignment']} | {sig['cs']['details']}")
 
 # ==========================================
-# MAIN
+# APP MAIN
 # ==========================================
 st.title("💎 Bluestar SNP3 Hybrid Pro")
-st.markdown(f"""<div style="text-align: center; color: #94a3b8; margin-bottom: 30px;">Scanner MTF GPS + Currency Strength + Smart Money + <span style="color: #f59e0b;">S/R Protection</span></div>""", unsafe_allow_html=True)
+st.markdown("Scanner MTF GPS + Currency Strength Fix + Smart Money")
 
-with st.expander("⚙️ Paramètres Avancés", expanded=False):
-    col_set1, col_set2 = st.columns(2)
-    with col_set1: enable_risk_mgr = st.checkbox("🎯 Risk Manager (SL/TP Auto)", value=True)
-    with col_set2:
-        if enable_risk_mgr:
-            sl_mult = st.slider("SL Multiplier (× ATR)", 1.0, 3.0, 1.5, 0.1)
-            tp_mult = st.slider("TP Multiplier (× ATR)", 1.5, 4.0, 2.0, 0.1)
-        else: sl_mult, tp_mult = 1.5, 2.0
+with st.expander("⚙️ Paramètres", expanded=False):
+    c_risk, c_sets = st.columns(2)
+    enable_risk = c_risk.checkbox("Risk Manager Auto", value=True)
+    sl_m = c_sets.slider("SL Multiplier", 1.0, 3.0, 1.5)
+    tp_m = c_sets.slider("TP Multiplier", 1.5, 5.0, 2.0)
 
 col1, col2 = st.columns([3, 1])
-with col1: min_score = st.slider("Sensibilité du signal (Score Min)", 4, 12, 6)
-with col2:
-    st.write("")
-    st.write("")
-    clear_cache = st.button("🧹 Reset")
+min_score = col1.slider("Score Min", 4, 12, 6)
 
-if clear_cache:
+if col2.button("🧹 Reset Cache"):
     st.session_state.cache = {}
-    st.session_state.cache_time = {}
     st.session_state.currency_strength_cache = None
-    st.session_state.currency_strength_time = 0
     st.toast("Cache vidé !", icon="🧹")
 
 if st.button("🚀 LANCER LE SCANNER", type="primary"):
     api = OandaClient()
-    start_time = time.time()
-    with st.spinner("Analyse approfondie (Tech + Macro + S/R)..."):
-        results = run_hybrid_scan(api, min_score=min_score, enable_risk_manager=enable_risk_mgr, sl_atr_mult=sl_mult, tp_atr_mult=tp_mult)
-    duration = time.time() - start_time
+    results = run_hybrid_scan(api, min_score, enable_risk, sl_m, tp_m)
     
-    st.markdown("---")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Signaux", len(results))
-    m2.metric("Temps", f"{duration:.1f}s")
-    legendary_count = sum(1 for s in results if s['quality'] == 'LEGENDARY')
-    m4.metric("🏆 Legendary", legendary_count)
-    st.markdown("---")
+    st.success(f"Scan terminé : {len(results)} opportunités trouvées")
     
-    if not results: st.info(f"Aucun signal détecté score >= {min_score}.")
-    else:
-        results_sorted = sorted(results, key=lambda x: (x['total_score'], x['mtf']['quality'], x.get('has_fvg', False)), reverse=True)
-        for sig in results_sorted: display_hybrid_signal(sig, show_risk=enable_risk_mgr)
+    # Tri par Score puis Qualité
+    results = sorted(results, key=lambda x: (x['total_score'], x['quality']), reverse=True)
+    
+    for sig in results:
+        display_signal(sig)
