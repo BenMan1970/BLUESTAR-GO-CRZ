@@ -10,9 +10,9 @@ import logging
 from typing import Optional, Dict, List
 
 # ==========================================
-# 1. CONFIGURATION & STYLE
+# 1. CONFIGURATION & STYLE (DESIGN BLEU ORIGINAL)
 # ==========================================
-st.set_page_config(page_title="Bluestar Sniper M5 Ultimate", layout="centered", page_icon="🦅")
+st.set_page_config(page_title="Bluestar SNP3 Hybrid Pro", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.WARNING)
 
 st.markdown("""
@@ -28,8 +28,9 @@ st.markdown("""
     
     .main .block-container { max-width: 950px; padding-top: 2rem; }
 
+    /* LE TITRE BLEU ORIGINAL */
     h1 {
-        background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
+        background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 900;
@@ -38,6 +39,7 @@ st.markdown("""
         margin-bottom: 0.2em;
     }
     
+    /* LE BOUTON BLEU ORIGINAL */
     .stButton>button {
         width: 100%;
         border-radius: 12px;
@@ -45,7 +47,7 @@ st.markdown("""
         font-weight: 700;
         font-size: 1.1em;
         border: 1px solid rgba(255,255,255,0.1);
-        background: linear-gradient(180deg, #d97706 0%, #b45309 100%); /* Orange Sniper */
+        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
         color: white;
         transition: all 0.2s ease;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
@@ -187,42 +189,30 @@ class OandaClient:
         return pd.DataFrame()
 
 # ==========================================
-# 4. MODULE NEWS & SESSIONS (NOUVEAU)
+# 4. MODULE NEWS & SESSIONS (PROFESSIONNEL)
 # ==========================================
 class NewsManager:
     """Gère les filtres de temps et de nouvelles économiques"""
     
     @staticmethod
     def is_session_open() -> bool:
-        """
-        Filtre de liquidité M5:
-        Autorise le trading uniquement pendant Londres (08h-16h GMT) et New York (13h-21h GMT).
-        Évite l'Asie et les heures creuses où le M5 est erratique.
-        """
+        """Filtre de liquidité M5: Londres et New York uniquement."""
         now = datetime.now(timezone.utc).time()
-        # Londres ouvre ~07:00/08:00 UTC, NY ferme ~21:00 UTC
-        # On prend une plage large de liquidité : 07:00 UTC à 20:00 UTC
+        # 07:00 UTC à 20:00 UTC (Couvre Londres et majorité de NY)
         start_time = dtime(7, 0)
         end_time = dtime(20, 0)
-        
         return start_time <= now <= end_time
 
     @staticmethod
     def check_impact_news(symbol: str) -> tuple[bool, str]:
-        """
-        Vérifie si une news est imminente.
-        Note: Sans API payante, on utilise ici une logique de 'Heures à Risque'
-        et de détection de volatilité anormale.
-        """
-        # 1. Vérification des heures fixes de news majeures (USD)
-        # NFP/CPI tombent souvent à 13:30 UTC ou 12:30 UTC selon l'heure d'hiver/été
+        """Zones de Danger fixes pour les news USD (NFP/CPI/FOMC)"""
         now = datetime.now(timezone.utc)
         
         # Liste simplifiée des heures "Danger Zone" USD (UTC)
         danger_zones = [
             (dtime(12, 25), dtime(12, 45)), # US Open data / CPI / NFP early
             (dtime(13, 25), dtime(13, 45)), # US Open data standard
-            (dtime(18, 55), dtime(19, 15))  # FOMC / Minutes (souvent 19h UTC)
+            (dtime(18, 55), dtime(19, 15))  # FOMC / Minutes
         ]
         
         if "USD" in symbol or "XAU" in symbol or "US30" in symbol:
@@ -294,7 +284,7 @@ def get_pips(pair, diff):
     return abs(diff * (100 if "JPY" in pair else 10000))
 
 # ==========================================
-# 6. MOTEUR MARKET MAP PRO
+# 6. MOTEUR MARKET MAP PRO (FUNDAMENTAL)
 # ==========================================
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
     cache_age = time.time() - st.session_state.currency_strength_time
@@ -561,7 +551,7 @@ def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
     # 1. Calcul silencieux de la force
     calculate_currency_strength(api)
     
-    # 2. Vérification Session (Liquidité)
+    # 2. Vérification Session
     session_open = NewsManager.is_session_open()
     if use_session_filter and not session_open:
         st.warning("⚠️ Session de liquidité fermée (Hors Londres/NY). Le scan M5 peut être erratique.")
@@ -570,14 +560,14 @@ def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
     for i, sym in enumerate(ASSETS):
         pbar.progress((i+1)/len(ASSETS))
         
-        # 3. Filtre News & Session immédiat (Gain de temps)
+        # 3. Filtre News Immédiat
         is_news, news_msg = NewsManager.check_impact_news(sym)
         if is_news: 
-            # On continue mais on marquera le signal comme DANGEREUX
+            # On continue pour afficher l'alerte
             pass
         
         try:
-            # 4. CHANGEMENT MAJEUR: Scan en M5 (Sniper)
+            # 4. TARGET M5 (SNIPER)
             df = api.get_candles(sym, "M5", count=150)
             if df.empty or len(df) < 50: continue
             
@@ -596,7 +586,7 @@ def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
                 sc = 0
                 sc += 3 # Base technique
                 
-                # Context MTF (Institutionnel)
+                # Context MTF Institutionnel
                 mtf = calculate_mtf_score_gps(api, sym, typ)
                 cs = calculate_currency_strength_score(api, sym, typ)
                 sc += mtf['score'] + cs['score']
@@ -617,7 +607,7 @@ def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
                 # Penalité News / Session
                 news_badge = ""
                 if is_news:
-                    sc -= 10 # Veto News (Tue le score)
+                    sc -= 10 # Veto News
                     warn = f"⛔ NEWS IMMINENTE : {news_msg}"
                     news_badge = "NEWS DANGER"
                 elif use_session_filter and not session_open:
@@ -638,7 +628,7 @@ def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
     return sigs
 
 # ==========================================
-# 9. AFFICHAGE DES SIGNAUX
+# 9. AFFICHAGE DES SIGNAUX (DESIGN BLEU)
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -647,9 +637,9 @@ def display_sig(s):
     ago = int((datetime.now(timezone.utc) - s['time'].to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds()/60)
     
     sc = s['score']
-    if sc >= 10: label = "💎 SNIPER ELITE"
+    if sc >= 10: label = "💎 LEGENDARY"
     elif sc >= 8: label = "⭐ EXCELLENT"
-    elif sc >= 6: label = "✅ VALIDE"
+    elif sc >= 6: label = "✅ BON"
     else: label = "⚠️ MOYEN"
 
     header_txt = f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc}/10]"
@@ -700,7 +690,7 @@ def display_sig(s):
             
             r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;font-size:1.1em'>{s['rm']['sl']:.5f}</div><div style='color:#ef4444;font-size:0.8em'>-{sl_pip} pips</div></div>", unsafe_allow_html=True)
             r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;font-size:1.1em'>{s['rm']['tp']:.5f}</div><div style='color:#10b981;font-size:0.8em'>+{tp_pip} pips</div></div>", unsafe_allow_html=True)
-            r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>R:R</div><div style='color:white;font-weight:bold;font-size:1.1em'>1:{s['rm']['rr']:.2f}</div><div style='color:#94a3b8;font-size:0.8em'>Optimisé M5</div></div>", unsafe_allow_html=True)
+            r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>R:R</div><div style='color:white;font-weight:bold;font-size:1.1em'>1:{s['rm']['rr']:.2f}</div><div style='color:#94a3b8;font-size:0.8em'>Fixe</div></div>", unsafe_allow_html=True)
             
         st.markdown("---")
         k1, k2 = st.columns(2)
@@ -711,13 +701,13 @@ def display_sig(s):
 # ==========================================
 # 10. MAIN APP
 # ==========================================
-st.title("🦅 Bluestar Sniper M5 Ultimate")
+st.title("💎 Bluestar SNP3 Hybrid Pro")
 with st.expander("⚙️ Paramètres & Sécurité"):
     c1, c2 = st.columns(2)
     risk = c1.checkbox("Risk Manager Auto", True)
-    session_filt = c1.checkbox("Session Filter (Londres/NY uniquement)", True, help="Bloque les signaux hors des heures liquides")
-    # Paramètres M5 optimisés (plus larges pour le bruit)
-    sl = c2.slider("SL Multiplier (xATR)", 1.5, 4.0, 2.0) 
+    session_filt = c1.checkbox("Session Filter (Londres/NY uniquement)", True)
+    # Paramètres M5 adaptés
+    sl = c2.slider("SL Multiplier (xATR)", 1.5, 4.0, 2.0)
     tp = c2.slider("TP Multiplier (xATR)", 2.0, 6.0, 3.0)
 
 co1, co2 = st.columns([3,1])
@@ -728,7 +718,7 @@ if co2.button("🧹 Reset"):
     st.session_state.currency_strength_cache = None
     st.toast("Cache vidé")
 
-if st.button("🚀 LANCER SCAN SNIPER M5", type="primary"):
+if st.button("🚀 LANCER LE SCANNER", type="primary"):
     api = OandaClient()
     results = run_scan(api, min_sc, risk, sl, tp, session_filt)
     
