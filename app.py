@@ -10,7 +10,7 @@ import logging
 from typing import Optional, Dict, List
 
 # ==========================================
-# 1. CONFIGURATION & STYLE
+# 1. CONFIGURATION & STYLE (INCHANGÉ)
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 Hybrid Pro", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.WARNING)
@@ -229,23 +229,16 @@ def detect_fvg(df):
 
 def get_nearest_sr(df, current_price):
     if len(df) < 20: return {'sup': None, 'res': None, 'dist_sup': 999, 'dist_res': 999}
-    
-    # Fractales Bill Williams
     h = df['high']
     l = df['low']
     is_res = (h > h.shift(1)) & (h > h.shift(2)) & (h > h.shift(-1)) & (h > h.shift(-2))
     is_sup = (l < l.shift(1)) & (l < l.shift(2)) & (l < l.shift(-1)) & (l < l.shift(-2))
-    
     res_levels = df[is_res]['high'].values
     sup_levels = df[is_sup]['low'].values
-    
-    # Plus proche
     nr = res_levels[res_levels > current_price].min() if any(res_levels > current_price) else None
     ns = sup_levels[sup_levels < current_price].max() if any(sup_levels < current_price) else None
-    
     dr = ((nr - current_price) / current_price * 100) if nr else 999
     ds = ((current_price - ns) / current_price * 100) if ns else 999
-    
     return {'sup': ns, 'res': nr, 'dist_sup': ds, 'dist_res': dr}
 
 def get_pips(pair, diff):
@@ -256,7 +249,6 @@ def get_pips(pair, diff):
 # 5. MOTEUR MARKET MAP PRO (DIRECT)
 # ==========================================
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
-    """Calcul via requests direct pour fiabilité maximale"""
     cache_age = time.time() - st.session_state.currency_strength_time
     if st.session_state.currency_strength_cache and cache_age < CURRENCY_STRENGTH_CACHE_DURATION:
         if sum(abs(x) for x in st.session_state.currency_strength_cache.values()) > 0.001:
@@ -282,7 +274,6 @@ def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dic
     for inst in pairs:
         try:
             url = f"{base_url}/v3/instruments/{inst}/candles?count={lookback_days+5}&granularity=D"
-            # Timeout court pour enchainer vite les 28 paires
             resp = requests.get(url, headers=headers, timeout=2)
             if resp.status_code == 200:
                 c = resp.json().get('candles', [])
@@ -292,7 +283,6 @@ def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dic
                     forex_data[inst] = (now - past) / past * 100
         except: continue
 
-    # Logique Smart Weighted Score (x2 pour majeurs)
     data = {}
     for s, p in forex_data.items():
         b, q = s.split('_')
@@ -327,48 +317,28 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
         
         b_score = scores[base]
         q_score = scores[quote]
-        
-        # Ranking
         sorted_s = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         ranks = {k: i+1 for i, (k, v) in enumerate(sorted_s)}
         b_rank, q_rank = ranks.get(base, 8), ranks.get(quote, 8)
         
         score = 0
         label = "Neutre"
-        
-        # Logique de Momentum (Sans texte Buy/Sell)
         if direction == 'BUY':
-            if b_rank <= 3 and q_rank >= 6:
-                score = 2
-                label = "Excellent"
-            elif b_score > q_score:
-                score = 1
-                label = "Validé"
-            else:
-                label = "Divergence"
-        else: # SELL
-            if q_rank <= 3 and b_rank >= 6:
-                score = 2
-                label = "Excellent"
-            elif q_score > b_score:
-                score = 1
-                label = "Validé"
-            else:
-                label = "Divergence"
-                
-        rank_info = f"{base}(#{b_rank}) vs {quote}(#{q_rank})"
-        return {'score': score, 'details': label, 'base_score': b_score, 'quote_score': q_score, 'rank_info': rank_info}
-
+            if b_rank <= 3 and q_rank >= 6: score = 2; label = "Excellent"
+            elif b_score > q_score: score = 1; label = "Validé"
+            else: label = "Divergence"
+        else:
+            if q_rank <= 3 and b_rank >= 6: score = 2; label = "Excellent"
+            elif q_score > b_score: score = 1; label = "Validé"
+            else: label = "Divergence"
+        return {'score': score, 'details': label, 'base_score': b_score, 'quote_score': q_score, 'rank_info': f"{base}(#{b_rank}) vs {quote}(#{q_rank})"}
     else:
-        # Indices et Or
         try:
             df = api.get_candles(symbol, "D", count=2)
             if df.empty: return {'score': 0, 'details': 'N/A', 'base_score': 0, 'label': 'Neutre'}
-            
             chg = (df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1] * 100
             score = 0
             label = "Neutre"
-            
             if direction == 'BUY':
                 if chg > 0.3: score = 2; label = "Impulsion"
                 elif chg > 0: score = 1; label = "Positif"
@@ -377,43 +347,157 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
                 if chg < -0.3: score = 2; label = "Chute"
                 elif chg < 0: score = 1; label = "Négatif"
                 else: label = "Contre-tendance"
-                
             return {'score': score, 'details': label, 'base_score': chg, 'rank_info': f"D1: {chg:+.2f}%"}
         except:
             return {'score': 0, 'details': 'Err', 'base_score': 0, 'label': 'Err'}
 
 # ==========================================
-# 6. ANALYSE MTF & RISQUE
+# 6. ANALYSE MTF INSTITUTIONNELLE (REMPLACEMENT)
 # ==========================================
-def calculate_mtf_score_gps(api, symbol, direction):
-    map_tf = {'D1': 'D', 'H4': 'H4', 'H1': 'H1'}
-    expected = 'Bullish' if direction == 'BUY' else 'Bearish'
-    matches = 0
-    w_tot = 0
-    weights = {'D1': 2, 'H4': 1, 'H1': 0.5}
-    analysis = {}
+MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
+TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
+
+def ema(series, length): return series.ewm(span=length, adjust=False).mean()
+def sma_local(series, length): return series.rolling(window=length).mean()
+
+def calc_institutional_trend_macro(df):
+    if len(df) < 50: return 'Range', 0
+    close = df['close']
+    curr = close.iloc[-1]
+    sma200 = sma_local(close, 200).iloc[-1] if len(df) >= 200 else sma_local(close, 50).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
     
-    for name, code in map_tf.items():
-        df = api.get_candles(symbol, code, count=250)
-        trend = 'Neutral'
-        if not df.empty:
-            c = df['close']
-            p = c.iloc[-1]
-            if name in ['D1', 'H4']:
-                ma = calculate_sma(c, 200).iloc[-1] if len(c)>200 else calculate_sma(c, 50).iloc[-1]
-                trend = 'Bullish' if p > ma else 'Bearish'
-            else:
-                z = calculate_zlema(c, 50).iloc[-1]
-                trend = 'Bullish' if p > z else 'Bearish'
-            
-            if trend == expected: matches += weights[name]
-        w_tot += weights[name]
-        analysis[name] = trend
+    if curr > sma200 and ema50 > sma200: return "Bullish", 85
+    if curr < sma200 and ema50 < sma200: return "Bearish", 85
+    if curr > sma200: return "Bullish", 65
+    if curr < sma200: return "Bearish", 65
+    return "Range", 40
+
+def calc_institutional_trend_daily(df):
+    if len(df) < 200: return 'Range', 0
+    close = df['close']
+    curr = close.iloc[-1]
+    sma200 = sma_local(close, 200).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
+    ema21 = ema(close, 21).iloc[-1]
+    
+    if curr > sma200 and ema50 > sma200 and ema21 > ema50 and curr > ema21: return "Bullish", 90
+    if curr < sma200 and ema50 < sma200 and ema21 < ema50 and curr < ema21: return "Bearish", 90
+    
+    if curr < sma200 and ema50 > sma200: return "Retracement Bull", 55
+    if curr > sma200 and ema50 < sma200: return "Retracement Bear", 55
+    
+    if curr > sma200: return "Bullish", 50
+    if curr < sma200: return "Bearish", 50
+    return "Range", 35
+
+def calc_institutional_trend_4h(df):
+    if len(df) < 200: return 'Range', 0
+    close = df['close']
+    curr = close.iloc[-1]
+    sma200 = sma_local(close, 200).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
+    ema21 = ema(close, 21).iloc[-1]
+    
+    if curr > sma200 and ema21 > ema50 and ema50 > sma200: return "Bullish", 80
+    if curr < sma200 and ema21 < ema50 and ema50 < sma200: return "Bearish", 80
+    
+    if curr < sma200 and ema50 > sma200: return "Retracement Bull", 50
+    if curr > sma200 and ema50 < sma200: return "Retracement Bear", 50
+    
+    if curr > sma200: return "Bullish", 60
+    if curr < sma200: return "Bearish", 60
+    return "Range", 40
+
+def calc_institutional_trend_intraday(df):
+    if len(df) < 50: return 'Range', 0
+    close = df['close']
+    curr = close.iloc[-1]
+    lag = 24
+    src_adj = close + (close - close.shift(lag))
+    zlema = src_adj.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema21 = ema(close, 21).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
+    
+    if curr > zlema and ema21 > ema50: return "Bullish", 75
+    if curr < zlema and ema21 < ema50: return "Bearish", 75
+    return "Range", 30
+
+def calculate_mtf_score_gps(api, symbol, direction):
+    # Récupération des données étendues pour l'analyse MTF
+    df_d = api.get_candles(symbol, "D", count=500)
+    df_h4 = api.get_candles(symbol, "H4", count=200)
+    df_h1 = api.get_candles(symbol, "H1", count=200)
+    
+    if df_d.empty or df_h4.empty or df_h1.empty:
+        return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
+
+    d_res = df_d.copy()
+    d_res.set_index('time', inplace=True)
+    
+    # Resampling Macro (avec logique compatible pandas récents/anciens via agg)
+    try:
+        # Tente la méthode moderne Pandas 2.0+
+        df_m = d_res.resample('ME').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
+    except:
+        # Fallback méthode ancienne
+        df_m = d_res.resample('M').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
         
-    pct = (matches/w_tot)*100
-    score = 3 if pct >= 85 else 2 if pct >= 50 else 1 if pct >= 25 else 0
-    qual = 'A' if pct >= 85 else 'B' if pct >= 50 else 'C'
-    return {'score': score, 'quality': qual, 'alignment': f"{pct:.0f}%", 'analysis': analysis}
+    df_w = d_res.resample('W-FRI').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
+
+    trends = {}
+    scores = {}
+    
+    trends['M'], scores['M'] = calc_institutional_trend_macro(df_m)
+    trends['W'], scores['W'] = calc_institutional_trend_macro(df_w)
+    trends['D'], scores['D'] = calc_institutional_trend_daily(df_d)
+    trends['H4'], scores['H4'] = calc_institutional_trend_4h(df_h4)
+    trends['H1'], scores['H1'] = calc_institutional_trend_intraday(df_h1)
+    
+    target = 'Bullish' if direction == 'BUY' else 'Bearish'
+    retrace_target = 'Retracement Bull' if direction == 'BUY' else 'Retracement Bear'
+    
+    w_score = 0
+    for tf, trend in trends.items():
+        weight = MTF_WEIGHTS.get(tf, 1.0)
+        if trend == target:
+            w_score += weight * (scores[tf] / 100)
+        elif trend == retrace_target:
+            w_score += weight * 0.3
+            
+    alignment_pct = (w_score / TOTAL_WEIGHT) * 100 * 2.5
+    alignment_pct = min(100, alignment_pct)
+
+    quality = 'C'
+    if trends['D'] == target and trends['W'] == target:
+        if trends['M'] == target: quality = 'A+' if alignment_pct > 80 else 'A'
+        else: quality = 'B+'
+    elif trends['D'] == target: quality = 'B'
+    elif trends['D'] == retrace_target: quality = 'B-'
+    
+    final_score = 0
+    if quality in ['A+', 'A']: final_score = 3
+    elif quality in ['B+', 'B']: final_score = 2
+    elif quality == 'B-': final_score = 1
+    
+    if trends['H4'] == target and final_score < 3:
+        final_score += 0.5
+        
+    final_score = min(3, int(final_score))
+
+    analysis_display = {
+        'M': trends['M'], 
+        'W': trends['W'], 
+        'D': trends['D'],
+        'H4': trends['H4']
+    }
+
+    return {
+        'score': final_score, 
+        'quality': quality, 
+        'alignment': f"{alignment_pct:.0f}%", 
+        'analysis': analysis_display
+    }
 
 def calculate_risk(price, atr, direction, pair, sl_m, tp_m):
     sl_dist = atr * sl_m
@@ -428,7 +512,6 @@ def calculate_risk(price, atr, direction, pair, sl_m, tp_m):
 def run_scan(api, min_score, risk, sl_m, tp_m):
     sigs = []
     
-    # Calcul silencieux de la force (pas d'affichage)
     calculate_currency_strength(api)
     
     pbar = st.progress(0)
@@ -445,7 +528,6 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
             hma_val = trend.iloc[-1]
             fvg_b, fvg_s = detect_fvg(df)
             
-            # Trigger Technique
             typ = None
             if rsi > 50 and hma_val == 1: typ = 'BUY'
             elif rsi < 50 and hma_val == -1: typ = 'SELL'
@@ -454,13 +536,12 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
                 sc = 0
                 sc += 3 # Base technique
                 
-                # Context
+                # Context MTF (NOUVELLE LOGIQUE)
                 mtf = calculate_mtf_score_gps(api, sym, typ)
                 cs = calculate_currency_strength_score(api, sym, typ)
                 sc += mtf['score'] + cs['score']
                 if (typ == 'BUY' and fvg_b) or (typ == 'SELL' and fvg_s): sc += 1
                 
-                # S/R Veto
                 sr = get_nearest_sr(api.get_candles(sym, "D", 200), p)
                 warn = ""
                 badge = ""
@@ -493,7 +574,6 @@ def display_sig(s):
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     ago = int((datetime.now(timezone.utc) - s['time'].to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds()/60)
     
-    # Label Visuel (Grading)
     sc = s['score']
     if sc >= 10: label = "💎 LEGENDARY"
     elif sc >= 8: label = "⭐ EXCELLENT"
@@ -517,7 +597,9 @@ def display_sig(s):
         
         badges = []
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
-        if s['quality'] == 'A': badges.append("<span class='badge-gps'>🛡️ GPS A+</span>")
+        # Quality badge dynamique selon le grade
+        q_badge_color = "#10b981" if s['quality'] in ['A+', 'A'] else "#f59e0b" if 'B' in s['quality'] else "#94a3b8"
+        badges.append(f"<span class='badge-gps' style='background:{q_badge_color}'>🛡️ GPS {s['quality']}</span>")
         if s['badge']: badges.append(f"<span class='badge-sr'>{s['badge']}</span>")
         
         if badges: st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
@@ -525,14 +607,9 @@ def display_sig(s):
         
         st.write("")
         c1, c2, c3, c4 = st.columns(4)
-        
-        # Métrique 1: Score avec Label
         c1.metric("Score Total", f"{sc}/10", delta=label, delta_color="off")
+        c2.metric("Alignement MTF", s['mtf']['alignment'])
         
-        # Métrique 2: Qualité
-        c2.metric("Qualité GPS", s['quality'])
-        
-        # Métrique 3: Force/Momentum (Clean)
         f_val = s['cs']['base_score']
         f_str = f"{f_val:+.2f}%" if abs(f_val) > 0.001 else "0.00%"
         score_mmp = s['cs']['score']
@@ -540,8 +617,6 @@ def display_sig(s):
         delta_col = "normal" if score_mmp > 0 else "off"
         
         c3.metric("Momentum", f"{score_mmp}/2", delta=label_mmp, delta_color=delta_col)
-        
-        # Métrique 4: ATR
         c4.metric("ATR", f"{s['atr']:.4f}")
         
         if s['rm']:
@@ -556,7 +631,10 @@ def display_sig(s):
             
         st.markdown("---")
         k1, k2 = st.columns(2)
-        k1.info(f"**Technique**\nRSI : {s['rsi']:.1f}\nAlignement MTF : {s['mtf']['alignment']}")
+        
+        # Affichage technique détaillé
+        mtf_str = " | ".join([f"{k}:{v}" for k,v in s['mtf']['analysis'].items()])
+        k1.info(f"**Technique**\nRSI : {s['rsi']:.1f}\nStructure : {mtf_str}")
         k2.info(f"**Fondamental**\nForce : {f_str}\n{s['cs']['rank_info']}")
 
 # ==========================================
@@ -583,5 +661,6 @@ if st.button("🚀 LANCER LE SCANNER", type="primary"):
     
     st.success(f"Scan terminé : {len(results)} opportunités trouvées")
     
+    # Tri intelligent : Score > Qualité MTF > Time
     for s in sorted(results, key=lambda x: (x['score'], x['quality']), reverse=True):
         display_sig(s)
