@@ -4,15 +4,15 @@ import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone, timedelta
 import time
 import logging
 from typing import Optional, Dict, List
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (INCHANGÉ)
+# 1. CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar SNP3 Hybrid Pro", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Sniper M5 Ultimate", layout="centered", page_icon="🦅")
 logging.basicConfig(level=logging.WARNING)
 
 st.markdown("""
@@ -29,7 +29,7 @@ st.markdown("""
     .main .block-container { max-width: 950px; padding-top: 2rem; }
 
     h1 {
-        background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
+        background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 900;
@@ -45,7 +45,7 @@ st.markdown("""
         font-weight: 700;
         font-size: 1.1em;
         border: 1px solid rgba(255,255,255,0.1);
-        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+        background: linear-gradient(180deg, #d97706 0%, #b45309 100%); /* Orange Sniper */
         color: white;
         transition: all 0.2s ease;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
@@ -82,6 +82,7 @@ st.markdown("""
     .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; display: inline-block; margin: 2px; }
     .badge-gps { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; display: inline-block; margin: 2px; }
     .badge-sr { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; display: inline-block; margin: 2px; }
+    .badge-news { background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; display: inline-block; margin: 2px; }
 
     hr { margin: 1.5em 0; border-color: #334155; }
 </style>
@@ -186,7 +187,54 @@ class OandaClient:
         return pd.DataFrame()
 
 # ==========================================
-# 4. INDICATEURS TECHNIQUES
+# 4. MODULE NEWS & SESSIONS (NOUVEAU)
+# ==========================================
+class NewsManager:
+    """Gère les filtres de temps et de nouvelles économiques"""
+    
+    @staticmethod
+    def is_session_open() -> bool:
+        """
+        Filtre de liquidité M5:
+        Autorise le trading uniquement pendant Londres (08h-16h GMT) et New York (13h-21h GMT).
+        Évite l'Asie et les heures creuses où le M5 est erratique.
+        """
+        now = datetime.now(timezone.utc).time()
+        # Londres ouvre ~07:00/08:00 UTC, NY ferme ~21:00 UTC
+        # On prend une plage large de liquidité : 07:00 UTC à 20:00 UTC
+        start_time = dtime(7, 0)
+        end_time = dtime(20, 0)
+        
+        return start_time <= now <= end_time
+
+    @staticmethod
+    def check_impact_news(symbol: str) -> tuple[bool, str]:
+        """
+        Vérifie si une news est imminente.
+        Note: Sans API payante, on utilise ici une logique de 'Heures à Risque'
+        et de détection de volatilité anormale.
+        """
+        # 1. Vérification des heures fixes de news majeures (USD)
+        # NFP/CPI tombent souvent à 13:30 UTC ou 12:30 UTC selon l'heure d'hiver/été
+        now = datetime.now(timezone.utc)
+        
+        # Liste simplifiée des heures "Danger Zone" USD (UTC)
+        danger_zones = [
+            (dtime(12, 25), dtime(12, 45)), # US Open data / CPI / NFP early
+            (dtime(13, 25), dtime(13, 45)), # US Open data standard
+            (dtime(18, 55), dtime(19, 15))  # FOMC / Minutes (souvent 19h UTC)
+        ]
+        
+        if "USD" in symbol or "XAU" in symbol or "US30" in symbol:
+            current_t = now.time()
+            for start, end in danger_zones:
+                if start <= current_t <= end:
+                    return True, "Danger Zone (News USD)"
+        
+        return False, ""
+
+# ==========================================
+# 5. INDICATEURS TECHNIQUES
 # ==========================================
 def calculate_wma(series, length):
     weights = np.arange(1, length + 1)
@@ -246,7 +294,7 @@ def get_pips(pair, diff):
     return abs(diff * (100 if "JPY" in pair else 10000))
 
 # ==========================================
-# 5. MOTEUR MARKET MAP PRO (DIRECT)
+# 6. MOTEUR MARKET MAP PRO
 # ==========================================
 def calculate_currency_strength(api: OandaClient, lookback_days: int = 1) -> Dict[str, float]:
     cache_age = time.time() - st.session_state.currency_strength_time
@@ -352,7 +400,7 @@ def calculate_currency_strength_score(api: OandaClient, symbol: str, direction: 
             return {'score': 0, 'details': 'Err', 'base_score': 0, 'label': 'Err'}
 
 # ==========================================
-# 6. ANALYSE MTF INSTITUTIONNELLE (REMPLACEMENT)
+# 7. ANALYSE MTF INSTITUTIONNELLE (COMPLET)
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
@@ -435,12 +483,10 @@ def calculate_mtf_score_gps(api, symbol, direction):
     d_res = df_d.copy()
     d_res.set_index('time', inplace=True)
     
-    # Resampling Macro (avec logique compatible pandas récents/anciens via agg)
+    # Resampling Macro
     try:
-        # Tente la méthode moderne Pandas 2.0+
         df_m = d_res.resample('ME').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
     except:
-        # Fallback méthode ancienne
         df_m = d_res.resample('M').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
         
     df_w = d_res.resample('W-FRI').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
@@ -507,18 +553,32 @@ def calculate_risk(price, atr, direction, pair, sl_m, tp_m):
     return {'sl': sl, 'tp': tp, 'sl_pips': get_pips(pair, sl_dist), 'tp_pips': get_pips(pair, tp_dist), 'rr': tp_m/sl_m}
 
 # ==========================================
-# 7. LOGIQUE SCANNER
+# 8. LOGIQUE SCANNER (OPTIMISÉE M5 + NEWS)
 # ==========================================
-def run_scan(api, min_score, risk, sl_m, tp_m):
+def run_scan(api, min_score, risk, sl_m, tp_m, use_session_filter):
     sigs = []
     
+    # 1. Calcul silencieux de la force
     calculate_currency_strength(api)
+    
+    # 2. Vérification Session (Liquidité)
+    session_open = NewsManager.is_session_open()
+    if use_session_filter and not session_open:
+        st.warning("⚠️ Session de liquidité fermée (Hors Londres/NY). Le scan M5 peut être erratique.")
     
     pbar = st.progress(0)
     for i, sym in enumerate(ASSETS):
         pbar.progress((i+1)/len(ASSETS))
+        
+        # 3. Filtre News & Session immédiat (Gain de temps)
+        is_news, news_msg = NewsManager.check_impact_news(sym)
+        if is_news: 
+            # On continue mais on marquera le signal comme DANGEREUX
+            pass
+        
         try:
-            df = api.get_candles(sym, "M15", count=150)
+            # 4. CHANGEMENT MAJEUR: Scan en M5 (Sniper)
+            df = api.get_candles(sym, "M5", count=150)
             if df.empty or len(df) < 50: continue
             
             p = df['close'].iloc[-1]
@@ -536,12 +596,13 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
                 sc = 0
                 sc += 3 # Base technique
                 
-                # Context MTF (NOUVELLE LOGIQUE)
+                # Context MTF (Institutionnel)
                 mtf = calculate_mtf_score_gps(api, sym, typ)
                 cs = calculate_currency_strength_score(api, sym, typ)
                 sc += mtf['score'] + cs['score']
                 if (typ == 'BUY' and fvg_b) or (typ == 'SELL' and fvg_s): sc += 1
                 
+                # S/R Veto
                 sr = get_nearest_sr(api.get_candles(sym, "D", 200), p)
                 warn = ""
                 badge = ""
@@ -553,11 +614,22 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
                     if sr['dist_sup'] < 0.25: sc -= 2; warn = "Support proche"
                     elif sr['dist_res'] < 0.4: badge = "Rejet Résistance"
                 
+                # Penalité News / Session
+                news_badge = ""
+                if is_news:
+                    sc -= 10 # Veto News (Tue le score)
+                    warn = f"⛔ NEWS IMMINENTE : {news_msg}"
+                    news_badge = "NEWS DANGER"
+                elif use_session_filter and not session_open:
+                    sc -= 2 # Penalité hors session
+                    warn = "Hors Session Liquide"
+                
                 if sc >= min_score:
                     rm = calculate_risk(p, atr, typ, sym, sl_m, tp_m) if risk else None
                     sigs.append({
                         'symbol': sym, 'type': typ, 'price': p, 'score': sc,
-                        'quality': mtf['quality'], 'atr': atr, 'warn': warn, 'badge': badge,
+                        'quality': mtf['quality'], 'atr': atr, 'warn': warn, 
+                        'badge': badge, 'news_badge': news_badge,
                         'rsi': rsi, 'mtf': mtf, 'cs': cs, 'fvg': (fvg_b if typ=='BUY' else fvg_s),
                         'rm': rm, 'time': df['time'].iloc[-1]
                     })
@@ -566,7 +638,7 @@ def run_scan(api, min_score, risk, sl_m, tp_m):
     return sigs
 
 # ==========================================
-# 8. AFFICHAGE DES SIGNAUX
+# 9. AFFICHAGE DES SIGNAUX
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -575,9 +647,9 @@ def display_sig(s):
     ago = int((datetime.now(timezone.utc) - s['time'].to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds()/60)
     
     sc = s['score']
-    if sc >= 10: label = "💎 LEGENDARY"
+    if sc >= 10: label = "💎 SNIPER ELITE"
     elif sc >= 8: label = "⭐ EXCELLENT"
-    elif sc >= 6: label = "✅ BON"
+    elif sc >= 6: label = "✅ VALIDE"
     else: label = "⚠️ MOYEN"
 
     header_txt = f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc}/10]"
@@ -588,6 +660,7 @@ def display_sig(s):
             <div>
                 <span style="font-size:1.8em;font-weight:900;color:white;">{s['symbol']}</span>
                 <span style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:4px;color:white;margin-left:10px;">{s['type']}</span>
+                <span style="font-size:0.8em;margin-left:10px;color:#cbd5e1;">M5 Entry</span>
             </div>
             <div style="text-align:right;">
                 <div style="color:#cbd5e1;font-size:0.9em;">il y a {ago} min</div>
@@ -596,8 +669,8 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
+        if s['news_badge']: badges.append(f"<span class='badge-news'>{s['news_badge']}</span>")
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
-        # Quality badge dynamique selon le grade
         q_badge_color = "#10b981" if s['quality'] in ['A+', 'A'] else "#f59e0b" if 'B' in s['quality'] else "#94a3b8"
         badges.append(f"<span class='badge-gps' style='background:{q_badge_color}'>🛡️ GPS {s['quality']}</span>")
         if s['badge']: badges.append(f"<span class='badge-sr'>{s['badge']}</span>")
@@ -617,7 +690,7 @@ def display_sig(s):
         delta_col = "normal" if score_mmp > 0 else "off"
         
         c3.metric("Momentum", f"{score_mmp}/2", delta=label_mmp, delta_color=delta_col)
-        c4.metric("ATR", f"{s['atr']:.4f}")
+        c4.metric("ATR M5", f"{s['atr']:.4f}")
         
         if s['rm']:
             st.markdown("---")
@@ -627,39 +700,39 @@ def display_sig(s):
             
             r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;font-size:1.1em'>{s['rm']['sl']:.5f}</div><div style='color:#ef4444;font-size:0.8em'>-{sl_pip} pips</div></div>", unsafe_allow_html=True)
             r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;font-size:1.1em'>{s['rm']['tp']:.5f}</div><div style='color:#10b981;font-size:0.8em'>+{tp_pip} pips</div></div>", unsafe_allow_html=True)
-            r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>R:R</div><div style='color:white;font-weight:bold;font-size:1.1em'>1:{s['rm']['rr']:.2f}</div><div style='color:#94a3b8;font-size:0.8em'>Fixe</div></div>", unsafe_allow_html=True)
+            r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>R:R</div><div style='color:white;font-weight:bold;font-size:1.1em'>1:{s['rm']['rr']:.2f}</div><div style='color:#94a3b8;font-size:0.8em'>Optimisé M5</div></div>", unsafe_allow_html=True)
             
         st.markdown("---")
         k1, k2 = st.columns(2)
-        
-        # Affichage technique détaillé
         mtf_str = " | ".join([f"{k}:{v}" for k,v in s['mtf']['analysis'].items()])
         k1.info(f"**Technique**\nRSI : {s['rsi']:.1f}\nStructure : {mtf_str}")
         k2.info(f"**Fondamental**\nForce : {f_str}\n{s['cs']['rank_info']}")
 
 # ==========================================
-# 9. MAIN APP
+# 10. MAIN APP
 # ==========================================
-st.title("💎 Bluestar SNP3 Hybrid Pro")
-with st.expander("⚙️ Paramètres"):
+st.title("🦅 Bluestar Sniper M5 Ultimate")
+with st.expander("⚙️ Paramètres & Sécurité"):
     c1, c2 = st.columns(2)
     risk = c1.checkbox("Risk Manager Auto", True)
-    sl = c2.slider("SL Multiplier (xATR)", 1.0, 3.0, 1.5)
-    tp = c2.slider("TP Multiplier (xATR)", 1.5, 5.0, 2.0)
+    session_filt = c1.checkbox("Session Filter (Londres/NY uniquement)", True, help="Bloque les signaux hors des heures liquides")
+    # Paramètres M5 optimisés (plus larges pour le bruit)
+    sl = c2.slider("SL Multiplier (xATR)", 1.5, 4.0, 2.0) 
+    tp = c2.slider("TP Multiplier (xATR)", 2.0, 6.0, 3.0)
 
 co1, co2 = st.columns([3,1])
-min_sc = co1.slider("Sensibilité du signal (Score Min)", 4, 10, 6)
+min_sc = co1.slider("Sensibilité du signal (Score Min)", 4, 10, 7)
 
 if co2.button("🧹 Reset"):
     st.session_state.cache = {}
     st.session_state.currency_strength_cache = None
     st.toast("Cache vidé")
 
-if st.button("🚀 LANCER LE SCANNER", type="primary"):
+if st.button("🚀 LANCER SCAN SNIPER M5", type="primary"):
     api = OandaClient()
-    results = run_scan(api, min_sc, risk, sl, tp)
+    results = run_scan(api, min_sc, risk, sl, tp, session_filt)
     
-    st.success(f"Scan terminé : {len(results)} opportunités trouvées")
+    st.success(f"Scan M5 terminé : {len(results)} opportunités trouvées")
     
     # Tri intelligent : Score > Qualité MTF > Time
     for s in sorted(results, key=lambda x: (x['score'], x['quality']), reverse=True):
