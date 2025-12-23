@@ -135,10 +135,10 @@ SCORING_CONFIG = {
     'gps_weight': 0.40,      # 40% GPS MTF
     'fundamental_weight': 0.35,  # 35% Force devises
     'technical_weight': 0.25,    # 25% Technique M5
-    'min_gps_quality': 'B',      # Qualité GPS minimale
-    'min_fundamental_gap': 1.0,  # Gap minimal de force
-    'rsi_overbought': 70,        # Zone de surachat
-    'rsi_oversold': 30           # Zone de survente
+    'min_gps_quality': 'C',      # Qualité GPS minimale (abaissé de B à C)
+    'min_fundamental_gap': 0.5,  # Gap minimal de force (abaissé de 1.0 à 0.5)
+    'rsi_overbought': 75,        # Zone de surachat (augmenté de 70 à 75)
+    'rsi_oversold': 25           # Zone de survente (abaissé de 30 à 25)
 }
 
 # ==========================================
@@ -800,16 +800,19 @@ def run_scan(api, min_score, strict_mode):
         return []
     
     signals = []
+    debug_info = {'total': 0, 'filtered': {}}
     pbar = st.progress(0)
     scan_start = datetime.now(timezone.utc)
     
     for i, sym in enumerate(ASSETS):
         pbar.progress((i+1)/len(ASSETS))
+        debug_info['total'] += 1
         
         try:
             # 2. Données M5 pour l'entrée
             df = api.get_candles(sym, "M5", 150)
             if df.empty or len(df) < 50:
+                debug_info['filtered']['data_insufficient'] = debug_info['filtered'].get('data_insufficient', 0) + 1
                 logger.debug(f"Données insuffisantes pour {sym}")
                 continue
             
@@ -823,8 +826,9 @@ def run_scan(api, min_score, strict_mode):
             fvg_present, fvg_type = detect_fvg(df)
             vol_ok, atr_pct = check_volatility_filter(df)
             
-            # Filtre volatilité
-            if not vol_ok:
+            # Filtre volatilité (plus permissif)
+            if not vol_ok and strict_mode:
+                debug_info['filtered']['volatility'] = debug_info['filtered'].get('volatility', 0) + 1
                 logger.debug(f"{sym} filtré: volatilité anormale ({atr_pct:.2f}%)")
                 continue
             
@@ -833,31 +837,34 @@ def run_scan(api, min_score, strict_mode):
             rsi_quality = 'normal'
             
             if hma_val == 1:  # HMA haussier
-                if 30 < rsi < 70:  # Zone saine
+                if 25 < rsi < 75:  # Zone élargie
                     signal_type = 'BUY'
                     if 40 < rsi < 60:
                         rsi_quality = 'optimal'
-                elif rsi <= 30:  # Survente = forte opportunité
+                elif rsi <= 25:  # Survente
                     signal_type = 'BUY'
                     rsi_quality = 'oversold'
                     
             elif hma_val == -1:  # HMA baissier
-                if 30 < rsi < 70:  # Zone saine
+                if 25 < rsi < 75:  # Zone élargie
                     signal_type = 'SELL'
                     if 40 < rsi < 60:
                         rsi_quality = 'optimal'
-                elif rsi >= 70:  # Surachat = forte opportunité
+                elif rsi >= 75:  # Surachat
                     signal_type = 'SELL'
                     rsi_quality = 'overbought'
             
             if not signal_type:
+                debug_info['filtered']['no_signal_m5'] = debug_info['filtered'].get('no_signal_m5', 0) + 1
+                logger.debug(f"{sym} - Pas de signal M5 (RSI:{rsi:.1f}, HMA:{hma_val})")
                 continue
             
             # 5. Analyse GPS MTF (critique)
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
             
             # Filtre GPS en mode strict
-            if strict_mode and mtf['score'] < 1.5:
+            if strict_mode and mtf['score'] < 1.0:  # Abaissé de 1.5 à 1.0
+                debug_info['filtered']['gps_weak'] = debug_info['filtered'].get('gps_weak', 0) + 1
                 logger.debug(f"{sym} filtré: GPS insuffisant ({mtf['quality']})")
                 continue
             
@@ -878,24 +885,29 @@ def run_scan(api, min_score, strict_mode):
                     'quote': quote
                 }
                 
-                # Scoring fondamental amélioré
+                # Scoring fondamental amélioré (plus permissif)
                 if signal_type == 'BUY':
                     if sb >= 6.5 and sq <= 3.5 and gap >= 3.0:
                         fundamental_score = 3.0  # Alignement parfait
                     elif sb >= 5.5 and sq <= 4.5 and gap >= 1.0:
                         fundamental_score = 2.0  # Bon alignement
+                    elif sb >= 5.0 and gap >= 0.5:  # Critère assoupli
+                        fundamental_score = 1.5  # Alignement faible
                     elif gap > 0:
-                        fundamental_score = 1.0  # Alignement faible
+                        fundamental_score = 1.0  # Minimal
                 else:  # SELL
                     if sq >= 6.5 and sb <= 3.5 and gap <= -3.0:
                         fundamental_score = 3.0
                     elif sq >= 5.5 and sb <= 4.5 and gap <= -1.0:
                         fundamental_score = 2.0
+                    elif sq >= 5.0 and gap <= -0.5:  # Critère assoupli
+                        fundamental_score = 1.5
                     elif gap < 0:
                         fundamental_score = 1.0
                 
-                # Filtre strict fondamental
-                if strict_mode and fundamental_score < 1.5:
+                # Filtre strict fondamental (assoupli)
+                if strict_mode and fundamental_score < 1.0:  # Abaissé de 1.5 à 1.0
+                    debug_info['filtered']['fundamental_weak'] = debug_info['filtered'].get('fundamental_weak', 0) + 1
                     logger.debug(f"{sym} filtré: fondamental faible (gap={gap:.2f})")
                     continue
             else:
@@ -925,15 +937,17 @@ def run_scan(api, min_score, strict_mode):
             
             # Filtre score minimum
             if final_score < min_score:
+                debug_info['filtered']['score_low'] = debug_info['filtered'].get('score_low', 0) + 1
+                logger.debug(f"{sym} - Score insuffisant: {final_score:.1f}/{min_score}")
                 continue
             
             # 9. Calcul du Risk Management
             atr = calculate_atr(df)
             price = df['close'].iloc[-1]
             
-            # Stop Loss : 1.8x ATR (plus serré)
+            # Stop Loss : 1.8x ATR
             sl_dist = atr * 1.8
-            # Take Profit : 3x ATR (ratio 1:1.67)
+            # Take Profit : 3x ATR
             tp_dist = atr * 3.0
             
             if signal_type == 'BUY':
@@ -969,15 +983,22 @@ def run_scan(api, min_score, strict_mode):
                 'scan_time': scan_start
             })
             
-            logger.info(f"Signal validé: {sym} {signal_type} @ {price:.5f} (Score: {final_score:.1f})")
+            logger.info(f"✅ Signal validé: {sym} {signal_type} @ {price:.5f} (Score: {final_score:.1f})")
             
         except Exception as e:
+            debug_info['filtered']['error'] = debug_info['filtered'].get('error', 0) + 1
             logger.error(f"Erreur lors de l'analyse de {sym}: {e}")
             continue
     
     pbar.empty()
-    logger.info(f"Scan terminé: {len(signals)} signaux trouvés")
-    return signals
+    
+    # Log des statistiques de filtrage
+    logger.info(f"📊 Scan terminé: {len(signals)} signaux trouvés")
+    logger.info(f"📊 Assets analysés: {debug_info['total']}")
+    for reason, count in debug_info['filtered'].items():
+        logger.info(f"   - Filtré ({reason}): {count}")
+    
+    return signals, debug_info
 
 # ==========================================
 # 8. AFFICHAGE (DESIGN CONSERVÉ + AMÉLIORATIONS)
@@ -1254,11 +1275,29 @@ def main():
             
             # Exécution du scan
             with st.spinner("🔍 Analyse en cours..."):
-                results = run_scan(api, min_score, strict_mode)
+                results, debug_info = run_scan(api, min_score, strict_mode)
             
             # Affichage des résultats
             if not results:
-                st.warning("⚠️ Aucune opportunité Sniper trouvée avec les critères actuels.")
+                st.warning("⚠️ Aucune opportunité trouvée avec les critères actuels.")
+                
+                # Affichage des statistiques de filtrage
+                with st.expander("🔍 Détails du Filtrage", expanded=True):
+                    st.markdown(f"**Total d'assets analysés**: {debug_info['total']}")
+                    st.markdown("**Raisons de filtrage**:")
+                    for reason, count in sorted(debug_info['filtered'].items(), key=lambda x: x[1], reverse=True):
+                        reason_labels = {
+                            'data_insufficient': 'Données insuffisantes',
+                            'volatility': 'Volatilité anormale',
+                            'no_signal_m5': 'Pas de signal M5 (RSI/HMA)',
+                            'gps_weak': 'GPS trop faible',
+                            'fundamental_weak': 'Fondamental trop faible',
+                            'score_low': 'Score final < minimum',
+                            'error': 'Erreurs techniques'
+                        }
+                        label = reason_labels.get(reason, reason)
+                        st.write(f"- **{label}**: {count} assets")
+                
                 st.info("💡 Essayez de réduire le score minimum ou désactiver le mode strict.")
             else:
                 st.success(f"✅ {len(results)} Signal{'s' if len(results) > 1 else ''} Validé{'s' if len(results) > 1 else ''}")
