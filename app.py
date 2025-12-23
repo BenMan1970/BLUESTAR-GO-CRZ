@@ -430,41 +430,48 @@ class CurrencyStrengthSystem:
         """Scraping depuis currencystrengthmeter.org"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
             }
             
             url = "https://currencystrengthmeter.org/"
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             scores = {}
             
-            # Recherche des éléments contenant les forces
-            # Structure typique: divs avec classes comme "currency-item" ou similaire
-            currency_elements = soup.find_all('div', class_=re.compile(r'currency|strength'))
+            # Méthode 1: Recherche dans tous les éléments textuels
+            all_text = soup.get_text()
+            currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
             
-            for elem in currency_elements:
-                text = elem.get_text().strip()
-                # Extraction pattern: "USD: 7.5" ou similaire
-                match = re.search(r'(USD|EUR|GBP|JPY|AUD|CAD|CHF|NZD).*?(\d+\.?\d*)', text)
-                if match:
-                    currency = match.group(1)
-                    value = float(match.group(2))
-                    # Normalisation si nécessaire (certains sites utilisent 0-10, d'autres 0-100)
-                    if value > 10:
-                        value = value / 10
-                    scores[currency] = value
+            for currency in currencies:
+                # Patterns possibles: "USD: 7.5", "USD 7.5", "USD - 7.5", etc.
+                patterns = [
+                    rf'{currency}[\s:=-]+(\d+\.?\d*)',
+                    rf'{currency.lower()}[\s:=-]+(\d+\.?\d*)',
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, all_text, re.IGNORECASE)
+                    if match:
+                        value = float(match.group(1))
+                        if value > 10:
+                            value = value / 10
+                        scores[currency] = value
+                        break
             
-            if len(scores) >= 4:  # Au moins 4 devises trouvées
-                logger.info(f"CurrencyStrengthMeter: {len(scores)} devises scrapées")
+            if len(scores) >= 4:
+                logger.info(f"✅ CurrencyStrengthMeter: {len(scores)} devises scrapées")
                 return scores, 'currencystrengthmeter'
             
-            logger.warning("CurrencyStrengthMeter: données insuffisantes")
+            logger.warning("⚠️ CurrencyStrengthMeter: données insuffisantes")
             return None, None
             
         except Exception as e:
-            logger.error(f"Erreur scraping CurrencyStrengthMeter: {e}")
+            logger.error(f"❌ Erreur scraping CurrencyStrengthMeter: {e}")
             return None, None
     
     @staticmethod
@@ -472,53 +479,52 @@ class CurrencyStrengthSystem:
         """Scraping depuis barchart.com/forex/market-map"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
             }
             
-            url = "https://www.barchart.com/forex/market-map"
-            response = requests.get(url, headers=headers, timeout=10)
+            url = "https://www.barchart.com/forex/performance"
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             scores = {}
             
-            # Barchart utilise souvent des tables ou des divs avec data-attributes
-            # Recherche de patterns de performance (% change)
-            currency_data = soup.find_all(['tr', 'div'], attrs={'data-symbol': True})
+            # Recherche dans le texte complet
+            all_text = soup.get_text()
             
-            for elem in currency_data:
-                symbol = elem.get('data-symbol', '')
-                # Extraction des symboles forex (ex: "EURUSD")
-                if len(symbol) == 6 and symbol[:3] in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']:
-                    base = symbol[:3]
-                    quote = symbol[3:]
-                    
-                    # Recherche du % change
-                    change_elem = elem.find(['span', 'td'], class_=re.compile(r'change|percent'))
-                    if change_elem:
-                        change_text = change_elem.get_text().strip()
-                        match = re.search(r'(-?\d+\.?\d*)', change_text)
-                        if match:
-                            pct = float(match.group(1))
-                            scores[base] = scores.get(base, 0) + pct
-                            scores[quote] = scores.get(quote, 0) - pct
+            # Extraction des paires forex et leurs variations
+            forex_pairs = [
+                ('EUR', 'USD'), ('GBP', 'USD'), ('USD', 'JPY'), 
+                ('USD', 'CHF'), ('AUD', 'USD'), ('USD', 'CAD'), 
+                ('NZD', 'USD')
+            ]
+            
+            for base, quote in forex_pairs:
+                pair_pattern = rf'{base}/{quote}.*?([+-]?\d+\.?\d*)%'
+                match = re.search(pair_pattern, all_text)
+                if match:
+                    pct = float(match.group(1))
+                    scores[base] = scores.get(base, 0) + pct
+                    scores[quote] = scores.get(quote, 0) - pct
             
             # Normalisation 0-10
-            if scores:
+            if len(scores) >= 4:
                 vals = list(scores.values())
                 min_v, max_v = min(vals), max(vals)
                 if max_v != min_v:
                     for k in scores:
                         scores[k] = ((scores[k] - min_v) / (max_v - min_v)) * 10.0
                 
-                logger.info(f"Barchart: {len(scores)} devises scrapées")
+                logger.info(f"✅ Barchart: {len(scores)} devises scrapées")
                 return scores, 'barchart'
             
-            logger.warning("Barchart: données insuffisantes")
+            logger.warning("⚠️ Barchart: données insuffisantes")
             return None, None
             
         except Exception as e:
-            logger.error(f"Erreur scraping Barchart: {e}")
+            logger.error(f"❌ Erreur scraping Barchart: {e}")
             return None, None
     
     @staticmethod
@@ -593,18 +599,23 @@ class CurrencyStrengthSystem:
     @staticmethod
     def calculate_matrix_fallback(api: OandaClient):
         """Calcul manuel en fallback si scraping échoue"""
-        logger.info("Fallback: calcul manuel de la force des devises")
+        logger.info("🔧 Fallback: calcul manuel de la force des devises")
         
         scores = {c: 0.0 for c in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']}
         details = {c: [] for c in scores.keys()}
         count = 0
+        failed = 0
         
         for pair in ALL_CROSSES:
             try:
-                df = api.get_candles(pair, "D", 2)
+                # Récupérer 5 bougies Daily au lieu de 2 pour plus de fiabilité
+                df = api.get_candles(pair, "D", 5)
                 if not df.empty and len(df) >= 2:
+                    # Utiliser la dernière bougie complète
                     op = df['open'].iloc[-1]
                     cl = df['close'].iloc[-1]
+                    
+                    # Calcul du % de variation
                     pct = ((cl - op) / op) * 100
                     
                     base, quote = pair.split('_')
@@ -614,16 +625,28 @@ class CurrencyStrengthSystem:
                     details[base].append({'vs': quote, 'val': pct})
                     details[quote].append({'vs': base, 'val': -pct})
                     count += 1
+                else:
+                    failed += 1
+                    logger.debug(f"Données insuffisantes pour {pair}")
+                    
             except Exception as e:
-                logger.error(f"Erreur calcul force pour {pair}: {e}")
+                failed += 1
+                logger.debug(f"Erreur pour {pair}: {e}")
                 continue
         
-        if count < len(ALL_CROSSES) * 0.3:
-            logger.error("Fallback échoué: données insuffisantes")
+        logger.info(f"📊 Fallback: {count} paires analysées, {failed} échecs")
+        
+        # Validation: au moins 20 paires (70% de 28 paires)
+        if count < 20:
+            logger.error(f"❌ Fallback échoué: seulement {count}/28 paires valides")
             return None
         
         # Normalisation 0-10
         vals = list(scores.values())
+        if not vals or all(v == 0 for v in vals):
+            logger.error("❌ Toutes les valeurs sont nulles")
+            return None
+            
         min_v, max_v = min(vals), max(vals)
         
         final = {}
@@ -639,13 +662,14 @@ class CurrencyStrengthSystem:
             'scores': final,
             'details': details,
             'timestamp': now,
-            'sources': ['manual_fallback']
+            'sources': ['manual_fallback'],
+            'pairs_analyzed': count
         }
         
         st.session_state.matrix_cache = result
         st.session_state.matrix_timestamp = now
         
-        logger.info(f"Fallback: {count} paires analysées")
+        logger.info(f"✅ Fallback réussi: {count} paires analysées")
         return result
 
     @staticmethod
