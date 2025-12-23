@@ -805,7 +805,7 @@ def run_scan(api, min_score, strict_mode):
         return [], {}
     
     signals = []
-    debug_info = {'total': 0, 'filtered': {}}
+    debug_info = {'total': 0, 'filtered': {}, 'near_misses': []}  # ✅ Ajout near_misses
     pbar = st.progress(0)
     scan_start = datetime.now(timezone.utc)
     
@@ -909,6 +909,17 @@ def run_scan(api, min_score, strict_mode):
             
             if final_score < min_score:
                 debug_info['filtered']['score_low'] = debug_info['filtered'].get('score_low', 0) + 1
+                # ✅ Capturer les "presque signaux" pour debug
+                if final_score >= min_score - 1.0:  # À moins de 1 point du seuil
+                    debug_info['near_misses'].append({
+                        'symbol': sym,
+                        'type': signal_type,
+                        'score': final_score,
+                        'rsi': rsi,
+                        'rsi_quality': rsi_quality,
+                        'gps_quality': mtf['quality'],
+                        'gap': cs_data.get('gap', 0) if cs_data else 0
+                    })
                 continue
             
             # Risk Management
@@ -1174,15 +1185,20 @@ def main():
     st.title("💎 Bluestar SNP3 GPS")
     st.markdown("**Scanner Institutionnel**: GPS MTF + Force Fondamentale + Sniper M5")
     
+    # ✅ Info box avec recommandations
+    st.info("🎯 **Recommandations**: Score Min 6.0 + Mode Sniper OFF pour commencer. "
+            "Activez le mode strict une fois familiarisé avec les signaux.")
+    
     with st.expander("⚙️ Paramètres", expanded=True):
         col1, col2 = st.columns(2)
         
         with col1:
-            min_score = st.slider("Score Min", 5.0, 10.0, 7.0, 0.5)
+            min_score = st.slider("Score Min", 5.0, 10.0, 6.0, 0.5,
+                help="Score minimum pour afficher un signal (6.0 recommandé)")
         
         with col2:
-            strict_mode = st.checkbox("🔥 Mode Sniper", True,
-                help="GPS ≥ 1.0 + Force alignée + RSI valide (rejette weak)")
+            strict_mode = st.checkbox("🔥 Mode Sniper", False,
+                help="GPS ≥ 1.0 + Force alignée + Rejette RSI faible (désactivé par défaut)")
         
         with st.expander("ℹ️ Scoring", expanded=False):
             st.markdown("""
