@@ -5,19 +5,27 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ==========================================
-# 1. CONFIGURATION & SESSION (CRITIQUE)
+# 1. CONFIGURATION & SESSION
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# --- INITIALISATION DU CACHE AVANT TOUT ---
+# Initialisation du cache avec expiration
 if 'cache' not in st.session_state:
     st.session_state.cache = {}
+if 'cache_timestamps' not in st.session_state:
+    st.session_state.cache_timestamps = {}
 if 'matrix_cache' not in st.session_state:
     st.session_state.matrix_cache = None
+if 'matrix_timestamp' not in st.session_state:
+    st.session_state.matrix_timestamp = None
 
 st.markdown("""
 <style>
@@ -32,7 +40,6 @@ st.markdown("""
     
     .main .block-container { max-width: 950px; padding-top: 2rem; }
 
-    /* TITRE */
     h1 {
         background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
         -webkit-background-clip: text;
@@ -43,7 +50,6 @@ st.markdown("""
         margin-bottom: 0.2em;
     }
     
-    /* BOUTONS */
     .stButton>button {
         width: 100%; border-radius: 12px; height: 3.5em; font-weight: 700; font-size: 1.1em;
         border: 1px solid rgba(255,255,255,0.1);
@@ -52,7 +58,6 @@ st.markdown("""
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
     }
     
-    /* CARTES & EXPANDEUR */
     .streamlit-expanderHeader {
         background-color: #1e293b !important;
         border: 1px solid #334155;
@@ -69,18 +74,25 @@ st.markdown("""
         padding: 20px;
     }
     
-    /* METRICS */
     div[data-testid="stMetricValue"] { font-size: 1.6rem; color: #f1f5f9; font-weight: 700; }
     div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.9rem; }
 
-    /* BADGES */
     .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     .badge-gps { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     
-    /* RISK BOX */
     .risk-box {
         background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px;
         text-align: center; border: 1px solid rgba(255,255,255,0.05);
+    }
+    
+    .timestamp-box {
+        background: rgba(59, 130, 246, 0.1);
+        border-left: 3px solid #3b82f6;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 0.85em;
+        color: #93c5fd;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -105,8 +117,29 @@ ALL_CROSSES = [
     "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
 ]
 
+# Configuration des timeframes avec expiration du cache
+CACHE_EXPIRY = {
+    'M5': 300,    # 5 minutes
+    'H1': 3600,   # 1 heure
+    'H4': 14400,  # 4 heures
+    'D': 86400,   # 24 heures
+    'W': 604800,  # 7 jours
+    'M': 2592000  # 30 jours
+}
+
+# Configuration du scoring amélioré
+SCORING_CONFIG = {
+    'gps_weight': 0.40,      # 40% GPS MTF
+    'fundamental_weight': 0.35,  # 35% Force devises
+    'technical_weight': 0.25,    # 25% Technique M5
+    'min_gps_quality': 'B',      # Qualité GPS minimale
+    'min_fundamental_gap': 1.0,  # Gap minimal de force
+    'rsi_overbought': 70,        # Zone de surachat
+    'rsi_oversold': 30           # Zone de survente
+}
+
 # ==========================================
-# 3. CLIENT API
+# 3. CLIENT API AMÉLIORÉ
 # ==========================================
 class OandaClient:
     def __init__(self):
@@ -115,339 +148,706 @@ class OandaClient:
             self.account_id = st.secrets["OANDA_ACCOUNT_ID"]
             self.environment = st.secrets.get("OANDA_ENVIRONMENT", "practice")
             self.client = oandapyV20.API(access_token=self.access_token, environment=self.environment)
-        except: st.error("⚠️ Config API manquante"); st.stop()
+            logger.info("Client OANDA initialisé avec succès")
+        except Exception as e:
+            logger.error(f"Erreur d'initialisation OANDA: {e}")
+            st.error("⚠️ Configuration API manquante")
+            st.stop()
 
     def get_candles(self, instrument: str, granularity: str, count: int) -> pd.DataFrame:
+        """Récupération des chandeliers avec cache intelligent"""
         key = f"{instrument}_{granularity}"
-        if key in st.session_state.cache: return st.session_state.cache[key]
+        now = datetime.now(timezone.utc)
         
+        # Vérifier le cache avec expiration
+        if key in st.session_state.cache:
+            cache_time = st.session_state.cache_timestamps.get(key)
+            if cache_time:
+                expiry = CACHE_EXPIRY.get(granularity, 300)
+                if (now - cache_time).total_seconds() < expiry:
+                    logger.debug(f"Cache hit: {key}")
+                    return st.session_state.cache[key]
+        
+        # Récupération depuis l'API
         try:
             params = {"count": count, "granularity": granularity, "price": "M"}
             r = instruments.InstrumentsCandles(instrument=instrument, params=params)
             self.client.request(r)
+            
             data = []
             for c in r.response['candles']:
                 if c['complete']:
-                    data.append({'time': pd.to_datetime(c['time']), 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])})
+                    data.append({
+                        'time': pd.to_datetime(c['time']),
+                        'open': float(c['mid']['o']),
+                        'high': float(c['mid']['h']),
+                        'low': float(c['mid']['l']),
+                        'close': float(c['mid']['c'])
+                    })
+            
             df = pd.DataFrame(data)
-            if not df.empty: st.session_state.cache[key] = df
+            if not df.empty:
+                st.session_state.cache[key] = df
+                st.session_state.cache_timestamps[key] = now
+                logger.debug(f"Cache mis à jour: {key}")
+            
             return df
-        except: return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"Erreur API pour {instrument}/{granularity}: {e}")
+            return pd.DataFrame()
 
 # ==========================================
-# 4. LE GPS (MTF INSTITUTIONNEL ORIGINEL)
+# 4. GPS MTF INSTITUTIONNEL (AMÉLIORÉ)
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
 
-def ema(series, length): return series.ewm(span=length, adjust=False).mean()
-def sma_local(series, length): return series.rolling(window=length).mean()
+def ema(series, length):
+    """Moyenne mobile exponentielle"""
+    return series.ewm(span=length, adjust=False).mean()
+
+def sma_local(series, length):
+    """Moyenne mobile simple"""
+    return series.rolling(window=length).mean()
 
 def calc_institutional_trend_macro(df):
-    if len(df) < 50: return 'Range', 0
+    """Analyse macro (Mensuel/Hebdo) - Tendance de fond"""
+    if len(df) < 50:
+        return 'Range', 0
+    
     close = df['close']
     curr = close.iloc[-1]
+    
     sma200 = sma_local(close, 200).iloc[-1] if len(df) >= 200 else sma_local(close, 50).iloc[-1]
     ema50 = ema(close, 50).iloc[-1]
     
-    if curr > sma200 and ema50 > sma200: return "Bullish", 85
-    if curr < sma200 and ema50 < sma200: return "Bearish", 85
-    if curr > sma200: return "Bullish", 65
-    if curr < sma200: return "Bearish", 65
+    if curr > sma200 and ema50 > sma200:
+        return "Bullish", 85
+    if curr < sma200 and ema50 < sma200:
+        return "Bearish", 85
+    if curr > sma200:
+        return "Bullish", 65
+    if curr < sma200:
+        return "Bearish", 65
+    
     return "Range", 40
 
 def calc_institutional_trend_daily(df):
-    if len(df) < 200: return 'Range', 0
+    """Analyse Daily - Tendance primaire"""
+    if len(df) < 200:
+        return 'Range', 0
+    
     close = df['close']
     curr = close.iloc[-1]
+    
     sma200 = sma_local(close, 200).iloc[-1]
     ema50 = ema(close, 50).iloc[-1]
     ema21 = ema(close, 21).iloc[-1]
     
-    if curr > sma200 and ema50 > sma200 and ema21 > ema50 and curr > ema21: return "Bullish", 90
-    if curr < sma200 and ema50 < sma200 and ema21 < ema50 and curr < ema21: return "Bearish", 90
-    if curr < sma200 and ema50 > sma200: return "Retracement Bull", 55
-    if curr > sma200 and ema50 < sma200: return "Retracement Bear", 55
-    if curr > sma200: return "Bullish", 50
-    if curr < sma200: return "Bearish", 50
+    # Tendance forte
+    if curr > sma200 and ema50 > sma200 and ema21 > ema50 and curr > ema21:
+        return "Bullish", 90
+    if curr < sma200 and ema50 < sma200 and ema21 < ema50 and curr < ema21:
+        return "Bearish", 90
+    
+    # Retracement (opportunité)
+    if curr < sma200 and ema50 > sma200:
+        return "Retracement Bull", 55
+    if curr > sma200 and ema50 < sma200:
+        return "Retracement Bear", 55
+    
+    # Tendance moyenne
+    if curr > sma200:
+        return "Bullish", 50
+    if curr < sma200:
+        return "Bearish", 50
+    
     return "Range", 35
 
 def calc_institutional_trend_4h(df):
-    if len(df) < 200: return 'Range', 0
+    """Analyse H4 - Tendance intermédiaire"""
+    if len(df) < 200:
+        return 'Range', 0
+    
     close = df['close']
     curr = close.iloc[-1]
+    
     sma200 = sma_local(close, 200).iloc[-1]
     ema50 = ema(close, 50).iloc[-1]
     ema21 = ema(close, 21).iloc[-1]
-    if curr > sma200 and ema21 > ema50 and ema50 > sma200: return "Bullish", 80
-    if curr < sma200 and ema21 < ema50 and ema50 < sma200: return "Bearish", 80
-    if curr < sma200 and ema50 > sma200: return "Retracement Bull", 50
-    if curr > sma200 and ema50 < sma200: return "Retracement Bear", 50
-    if curr > sma200: return "Bullish", 60
-    if curr < sma200: return "Bearish", 60
+    
+    if curr > sma200 and ema21 > ema50 and ema50 > sma200:
+        return "Bullish", 80
+    if curr < sma200 and ema21 < ema50 and ema50 < sma200:
+        return "Bearish", 80
+    
+    if curr < sma200 and ema50 > sma200:
+        return "Retracement Bull", 50
+    if curr > sma200 and ema50 < sma200:
+        return "Retracement Bear", 50
+    
+    if curr > sma200:
+        return "Bullish", 60
+    if curr < sma200:
+        return "Bearish", 60
+    
     return "Range", 40
 
 def calc_institutional_trend_intraday(df):
-    if len(df) < 50: return 'Range', 0
+    """Analyse H1 - Tendance court terme"""
+    if len(df) < 50:
+        return 'Range', 0
+    
     close = df['close']
     curr = close.iloc[-1]
+    
     lag = 24
     src_adj = close + (close - close.shift(lag))
     zlema = src_adj.ewm(span=50, adjust=False).mean().iloc[-1]
+    
     ema21 = ema(close, 21).iloc[-1]
     ema50 = ema(close, 50).iloc[-1]
-    if curr > zlema and ema21 > ema50: return "Bullish", 75
-    if curr < zlema and ema21 < ema50: return "Bearish", 75
+    
+    if curr > zlema and ema21 > ema50:
+        return "Bullish", 75
+    if curr < zlema and ema21 < ema50:
+        return "Bearish", 75
+    
     return "Range", 30
 
 def calculate_mtf_score_gps(api, symbol, direction):
-    # Récupération des données étendues pour l'analyse MTF
-    df_d = api.get_candles(symbol, "D", count=500)
-    df_h4 = api.get_candles(symbol, "H4", count=200)
-    df_h1 = api.get_candles(symbol, "H1", count=200)
-    
-    if df_d.empty or df_h4.empty or df_h1.empty:
-        return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
-
-    d_res = df_d.copy()
-    d_res.set_index('time', inplace=True)
-    
+    """Calcul du score GPS multi-timeframe amélioré"""
     try:
-        df_m = d_res.resample('ME').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
-    except:
-        df_m = d_res.resample('M').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
+        # Récupération des données
+        df_d = api.get_candles(symbol, "D", count=500)
+        df_h4 = api.get_candles(symbol, "H4", count=200)
+        df_h1 = api.get_candles(symbol, "H1", count=200)
         
-    df_w = d_res.resample('W-FRI').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
+        if df_d.empty or df_h4.empty or df_h1.empty:
+            logger.warning(f"Données MTF incomplètes pour {symbol}")
+            return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}, 'confidence': 0}
 
-    trends = {}
-    scores = {}
-    
-    trends['M'], scores['M'] = calc_institutional_trend_macro(df_m)
-    trends['W'], scores['W'] = calc_institutional_trend_macro(df_w)
-    trends['D'], scores['D'] = calc_institutional_trend_daily(df_d)
-    trends['H4'], scores['H4'] = calc_institutional_trend_4h(df_h4)
-    trends['H1'], scores['H1'] = calc_institutional_trend_intraday(df_h1)
-    
-    target = 'Bullish' if direction == 'BUY' else 'Bearish'
-    retrace_target = 'Retracement Bull' if direction == 'BUY' else 'Retracement Bear'
-    
-    w_score = 0
-    for tf, trend in trends.items():
-        weight = MTF_WEIGHTS.get(tf, 1.0)
-        if trend == target:
-            w_score += weight * (scores[tf] / 100)
-        elif trend == retrace_target:
-            w_score += weight * 0.3
+        d_res = df_d.copy()
+        d_res.set_index('time', inplace=True)
+        
+        # Création des timeframes supérieurs
+        try:
+            df_m = d_res.resample('ME').agg({
+                'open':'first', 'high':'max', 'low':'min', 'close':'last'
+            }).dropna()
+        except:
+            df_m = d_res.resample('M').agg({
+                'open':'first', 'high':'max', 'low':'min', 'close':'last'
+            }).dropna()
             
-    alignment_pct = (w_score / TOTAL_WEIGHT) * 100 * 2.5
-    alignment_pct = min(100, alignment_pct)
+        df_w = d_res.resample('W-FRI').agg({
+            'open':'first', 'high':'max', 'low':'min', 'close':'last'
+        }).dropna()
 
-    quality = 'C'
-    if trends['D'] == target and trends['W'] == target:
-        if trends['M'] == target: quality = 'A+' if alignment_pct > 80 else 'A'
-        else: quality = 'B+'
-    elif trends['D'] == target: quality = 'B'
-    elif trends['D'] == retrace_target: quality = 'B-'
-    
-    final_score = 0
-    if quality in ['A+', 'A']: final_score = 3
-    elif quality in ['B+', 'B']: final_score = 2
-    elif quality == 'B-': final_score = 1
-    
-    if trends['H4'] == target and final_score < 3:
-        final_score += 0.5
+        # Analyse de chaque timeframe
+        trends = {}
+        scores = {}
         
-    final_score = min(3, int(final_score))
-    
-    return {
-        'score': final_score, 'quality': quality, 'alignment': f"{alignment_pct:.0f}%", 
-        'analysis': trends
-    }
+        trends['M'], scores['M'] = calc_institutional_trend_macro(df_m)
+        trends['W'], scores['W'] = calc_institutional_trend_macro(df_w)
+        trends['D'], scores['D'] = calc_institutional_trend_daily(df_d)
+        trends['H4'], scores['H4'] = calc_institutional_trend_4h(df_h4)
+        trends['H1'], scores['H1'] = calc_institutional_trend_intraday(df_h1)
+        
+        # Calcul du score pondéré
+        target = 'Bullish' if direction == 'BUY' else 'Bearish'
+        retrace_target = 'Retracement Bull' if direction == 'BUY' else 'Retracement Bear'
+        
+        w_score = 0
+        perfect_alignment = 0
+        
+        for tf, trend in trends.items():
+            weight = MTF_WEIGHTS.get(tf, 1.0)
+            if trend == target:
+                w_score += weight * (scores[tf] / 100)
+                perfect_alignment += weight
+            elif trend == retrace_target:
+                w_score += weight * 0.3  # Bonus réduit pour retracement
+                
+        # Calcul de l'alignement en pourcentage
+        alignment_pct = (w_score / TOTAL_WEIGHT) * 100
+        confidence = (perfect_alignment / TOTAL_WEIGHT) * 100
+        
+        # Attribution de la qualité GPS
+        quality = 'C'
+        if trends['D'] == target and trends['W'] == target:
+            if trends['M'] == target:
+                quality = 'A+' if alignment_pct > 80 else 'A'
+            else:
+                quality = 'B+'
+        elif trends['D'] == target:
+            quality = 'B'
+        elif trends['D'] == retrace_target:
+            quality = 'B-'
+        
+        # Score final normalisé (0-3)
+        final_score = 0
+        if quality in ['A+', 'A']:
+            final_score = 3
+        elif quality in ['B+', 'B']:
+            final_score = 2
+        elif quality == 'B-':
+            final_score = 1
+        
+        # Bonus si H4 aligné
+        if trends['H4'] == target and final_score < 3:
+            final_score += 0.5
+            
+        final_score = min(3, final_score)
+        
+        return {
+            'score': final_score,
+            'quality': quality,
+            'alignment': f"{alignment_pct:.0f}%",
+            'confidence': confidence,
+            'analysis': trends,
+            'timeframe_scores': scores
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul GPS pour {symbol}: {e}")
+        return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}, 'confidence': 0}
 
 # ==========================================
-# 5. MOTEUR FONDAMENTAL (FORCE 0-10 & MAP)
+# 5. SYSTÈME DE FORCE DES DEVISES (OPTIMISÉ)
 # ==========================================
 class CurrencyStrengthSystem:
     @staticmethod
     def calculate_matrix(api: OandaClient):
-        # Utilisation sécurisée du cache via session_state
-        if st.session_state.matrix_cache: 
-            return st.session_state.matrix_cache
+        """Calcul de la matrice de force avec cache de 15 minutes"""
+        now = datetime.now(timezone.utc)
+        
+        # Vérifier le cache
+        if st.session_state.matrix_cache and st.session_state.matrix_timestamp:
+            age = (now - st.session_state.matrix_timestamp).total_seconds()
+            if age < 900:  # 15 minutes
+                logger.debug("Utilisation du cache de la matrice")
+                return st.session_state.matrix_cache
 
-        with st.spinner("🔄 Scan du marché complet..."):
+        with st.spinner("🔄 Analyse fondamentale du marché..."):
             scores = {c: 0.0 for c in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']}
-            details = {c: [] for c in scores.keys()} 
+            details = {c: [] for c in scores.keys()}
+            count = 0
             
             for pair in ALL_CROSSES:
-                df = api.get_candles(pair, "D", 2)
-                if not df.empty and len(df) >= 2:
-                    op = df['open'].iloc[-1]
-                    cl = df['close'].iloc[-1]
-                    pct = ((cl - op) / op) * 100
-                    base, quote = pair.split('_')
-                    scores[base] += pct
-                    scores[quote] -= pct
-                    details[base].append({'vs': quote, 'val': pct})
-                    details[quote].append({'vs': base, 'val': -pct})
+                try:
+                    df = api.get_candles(pair, "D", 2)
+                    if not df.empty and len(df) >= 2:
+                        op = df['open'].iloc[-1]
+                        cl = df['close'].iloc[-1]
+                        pct = ((cl - op) / op) * 100
+                        
+                        base, quote = pair.split('_')
+                        scores[base] += pct
+                        scores[quote] -= pct
+                        
+                        details[base].append({'vs': quote, 'val': pct})
+                        details[quote].append({'vs': base, 'val': -pct})
+                        count += 1
+                except Exception as e:
+                    logger.error(f"Erreur calcul force pour {pair}: {e}")
+                    continue
             
-            # Normalisation 0-10
+            if count < len(ALL_CROSSES) * 0.5:
+                logger.warning("Moins de 50% des paires analysées pour la force des devises")
+            
+            # Normalisation 0-10 avec protection
             vals = list(scores.values())
-            if not vals: return None
+            if not vals or all(v == 0 for v in vals):
+                logger.error("Aucune donnée valide pour la force des devises")
+                return None
+                
             min_v, max_v = min(vals), max(vals)
             
             final = {}
             for k, v in scores.items():
-                norm = ((v - min_v) / (max_v - min_v)) * 10.0 if max_v != min_v else 5.0
+                if max_v != min_v:
+                    norm = ((v - min_v) / (max_v - min_v)) * 10.0
+                else:
+                    norm = 5.0
                 final[k] = norm
 
-            result = {'scores': final, 'details': details}
+            result = {
+                'scores': final,
+                'details': details,
+                'timestamp': now,
+                'pairs_analyzed': count
+            }
+            
+            # Mise en cache
             st.session_state.matrix_cache = result
+            st.session_state.matrix_timestamp = now
+            
+            logger.info(f"Matrice calculée: {count} paires analysées")
             return result
 
     @staticmethod
     def get_pair_analysis(matrix, base, quote):
-        if not matrix: return 5.0, 5.0, 0.0, []
+        """Analyse de la force relative d'une paire"""
+        if not matrix:
+            return 5.0, 5.0, 0.0, []
+            
         s_b = matrix['scores'].get(base, 5.0)
         s_q = matrix['scores'].get(quote, 5.0)
-        map_data = sorted(matrix['details'].get(base, []), key=lambda x: x['val'], reverse=True)
-        return s_b, s_q, (s_b - s_q), map_data
+        gap = s_b - s_q
+        
+        # Tri de la market map par performance
+        map_data = sorted(
+            matrix['details'].get(base, []),
+            key=lambda x: x['val'],
+            reverse=True
+        )
+        
+        return s_b, s_q, gap, map_data
 
 # ==========================================
-# 6. SCANNER UNIFIÉ (GPS + CSM + TECH)
+# 6. INDICATEURS TECHNIQUES M5 (OPTIMISÉS)
 # ==========================================
 def calculate_atr(df, period=14):
-    h, l, c = df['high'], df['low'], df['close']
-    tr = pd.concat([h - l, abs(h - c.shift(1)), abs(l - c.shift(1))], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean().iloc[-1]
+    """Calcul de l'ATR (Average True Range)"""
+    try:
+        h, l, c = df['high'], df['low'], df['close']
+        tr = pd.concat([
+            h - l,
+            abs(h - c.shift(1)),
+            abs(l - c.shift(1))
+        ], axis=1).max(axis=1)
+        return tr.ewm(span=period, adjust=False).mean().iloc[-1]
+    except Exception as e:
+        logger.error(f"Erreur calcul ATR: {e}")
+        return 0
 
 def get_rsi_ohlc4(df, length=7):
-    ohlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-    delta = ohlc4.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1/length, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
+    """RSI basé sur OHLC/4 pour une meilleure représentation"""
+    try:
+        ohlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+        delta = ohlc4.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1/length, adjust=False).mean()
+        rs = gain / loss.replace(0, np.nan)
+        return (100 - (100 / (1 + rs))).fillna(50)
+    except Exception as e:
+        logger.error(f"Erreur calcul RSI: {e}")
+        return pd.Series([50] * len(df), index=df.index)
 
 def get_colored_hma(df, length=20):
-    src = df['close']
-    wma = lambda s, l: s.rolling(l).apply(lambda x: np.dot(x, np.arange(1, l+1))/np.arange(1, l+1).sum(), raw=True)
-    wma1 = wma(src, int(length / 2))
-    wma2 = wma(src, length)
-    hma = wma(2 * wma1 - wma2, int(np.sqrt(length)))
-    trend = pd.Series(np.where(hma > hma.shift(1), 1, -1), index=df.index)
-    return hma, trend
+    """Hull Moving Average avec détection de tendance"""
+    try:
+        src = df['close']
+        
+        def wma(s, l):
+            weights = np.arange(1, l+1)
+            return s.rolling(l).apply(
+                lambda x: np.dot(x, weights) / weights.sum(),
+                raw=True
+            )
+        
+        wma1 = wma(src, int(length / 2))
+        wma2 = wma(src, length)
+        hma = wma(2 * wma1 - wma2, int(np.sqrt(length)))
+        
+        trend = pd.Series(
+            np.where(hma > hma.shift(1), 1, -1),
+            index=df.index
+        )
+        
+        return hma, trend
+    except Exception as e:
+        logger.error(f"Erreur calcul HMA: {e}")
+        return df['close'], pd.Series([0] * len(df), index=df.index)
 
 def detect_fvg(df):
-    if len(df) < 5: return False
-    fvg_bull = (df['low'] > df['high'].shift(2))
-    fvg_bear = (df['high'] < df['low'].shift(2))
-    return fvg_bull.iloc[-5:].any() or fvg_bear.iloc[-5:].any()
+    """Détection des Fair Value Gaps (zones institutionnelles)"""
+    try:
+        if len(df) < 5:
+            return False, None
+        
+        # FVG haussier : low actuel > high il y a 2 bougies
+        fvg_bull = (df['low'] > df['high'].shift(2))
+        
+        # FVG baissier : high actuel < low il y a 2 bougies
+        fvg_bear = (df['high'] < df['low'].shift(2))
+        
+        recent_bull = fvg_bull.iloc[-5:].any()
+        recent_bear = fvg_bear.iloc[-5:].any()
+        
+        fvg_type = None
+        if recent_bull:
+            fvg_type = 'BULL'
+        elif recent_bear:
+            fvg_type = 'BEAR'
+        
+        return (recent_bull or recent_bear), fvg_type
+    except Exception as e:
+        logger.error(f"Erreur détection FVG: {e}")
+        return False, None
 
+def check_volatility_filter(df, threshold=0.5):
+    """Filtre de volatilité pour éviter les périodes trop calmes ou agitées"""
+    try:
+        atr = calculate_atr(df)
+        price = df['close'].iloc[-1]
+        atr_pct = (atr / price) * 100
+        
+        # ATR entre 0.3% et 2% considéré comme acceptable
+        return 0.3 <= atr_pct <= 2.0, atr_pct
+    except Exception as e:
+        logger.error(f"Erreur filtre volatilité: {e}")
+        return True, 0
+
+# ==========================================
+# 7. SCANNER UNIFIÉ (AMÉLIORÉ)
+# ==========================================
 def run_scan(api, min_score, strict_mode):
-    # 1. Calcul Matrice (Fondamental)
-    matrix = CurrencyStrengthSystem.calculate_matrix(api)
+    """Scanner principal avec logique améliorée"""
+    logger.info(f"Démarrage scan - Score min: {min_score}, Mode strict: {strict_mode}")
     
-    sigs = []
+    # 1. Calcul de la matrice fondamentale
+    matrix = CurrencyStrengthSystem.calculate_matrix(api)
+    if not matrix:
+        st.error("❌ Impossible de calculer la force des devises")
+        return []
+    
+    signals = []
     pbar = st.progress(0)
+    scan_start = datetime.now(timezone.utc)
     
     for i, sym in enumerate(ASSETS):
         pbar.progress((i+1)/len(ASSETS))
         
         try:
-            # 2. Données M5 (Sniper Entry)
+            # 2. Données M5 pour l'entrée
             df = api.get_candles(sym, "M5", 150)
-            if df.empty or len(df) < 50: continue
+            if df.empty or len(df) < 50:
+                logger.debug(f"Données insuffisantes pour {sym}")
+                continue
             
+            # Horodatage du signal
+            signal_time = df['time'].iloc[-1]
+            
+            # 3. Indicateurs techniques M5
             rsi = get_rsi_ohlc4(df).iloc[-1]
             hma, trend = get_colored_hma(df)
             hma_val = trend.iloc[-1]
-            fvg = detect_fvg(df)
+            fvg_present, fvg_type = detect_fvg(df)
+            vol_ok, atr_pct = check_volatility_filter(df)
             
-            typ = None
-            if rsi > 50 and hma_val == 1: typ = 'BUY'
-            elif rsi < 50 and hma_val == -1: typ = 'SELL'
+            # Filtre volatilité
+            if not vol_ok:
+                logger.debug(f"{sym} filtré: volatilité anormale ({atr_pct:.2f}%)")
+                continue
             
-            if typ:
-                sc = 0
-                sc += 3 # Base technique
-                
-                # 3. GPS (MTF Analysis) - PRIORITAIRE
-                mtf = calculate_mtf_score_gps(api, sym, typ)
-                sc += mtf['score']
-                
-                if strict_mode and mtf['score'] < 1.5: continue # GPS doit valider
-                
-                # 4. Fondamental (CSM 0-10)
-                cs_data = {}
-                is_forex = sym in ALL_CROSSES
-                valid_fund = False
-                
-                if is_forex:
-                    base, quote = sym.split('_')
-                    sb, sq, gap, map_d = CurrencyStrengthSystem.get_pair_analysis(matrix, base, quote)
-                    cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d}
+            # 4. Détection du signal M5 avec RSI amélioré
+            signal_type = None
+            rsi_quality = 'normal'
+            
+            if hma_val == 1:  # HMA haussier
+                if 30 < rsi < 70:  # Zone saine
+                    signal_type = 'BUY'
+                    if 40 < rsi < 60:
+                        rsi_quality = 'optimal'
+                elif rsi <= 30:  # Survente = forte opportunité
+                    signal_type = 'BUY'
+                    rsi_quality = 'oversold'
                     
-                    if typ == 'BUY':
-                        if sb >= 5.5 and sq <= 4.5: sc += 3; valid_fund = True
-                        elif gap > 0: sc += 1
-                    else:
-                        if sq >= 5.5 and sb <= 4.5: sc += 3; valid_fund = True
-                        elif gap < 0: sc += 1
-                        
-                    if strict_mode and not valid_fund: continue
-                else:
-                    # Or/Indices : Pas de CSM
-                    sc += 2
-                    
-                if fvg: sc += 1
+            elif hma_val == -1:  # HMA baissier
+                if 30 < rsi < 70:  # Zone saine
+                    signal_type = 'SELL'
+                    if 40 < rsi < 60:
+                        rsi_quality = 'optimal'
+                elif rsi >= 70:  # Surachat = forte opportunité
+                    signal_type = 'SELL'
+                    rsi_quality = 'overbought'
+            
+            if not signal_type:
+                continue
+            
+            # 5. Analyse GPS MTF (critique)
+            mtf = calculate_mtf_score_gps(api, sym, signal_type)
+            
+            # Filtre GPS en mode strict
+            if strict_mode and mtf['score'] < 1.5:
+                logger.debug(f"{sym} filtré: GPS insuffisant ({mtf['quality']})")
+                continue
+            
+            # 6. Analyse fondamentale (CSM)
+            cs_data = {}
+            fundamental_score = 0
+            is_forex = sym in ALL_CROSSES
+            
+            if is_forex:
+                base, quote = sym.split('_')
+                sb, sq, gap, map_d = CurrencyStrengthSystem.get_pair_analysis(matrix, base, quote)
+                cs_data = {
+                    'sb': sb,
+                    'sq': sq,
+                    'gap': gap,
+                    'map': map_d,
+                    'base': base,
+                    'quote': quote
+                }
                 
-                # 5. Risk Calculation
-                atr = calculate_atr(df)
-                price = df['close'].iloc[-1]
-                sl_dist = atr * 2.0
-                tp_dist = atr * 3.0
-                sl = price - sl_dist if typ == 'BUY' else price + sl_dist
-                tp = price + tp_dist if typ == 'BUY' else price - tp_dist
+                # Scoring fondamental amélioré
+                if signal_type == 'BUY':
+                    if sb >= 6.5 and sq <= 3.5 and gap >= 3.0:
+                        fundamental_score = 3.0  # Alignement parfait
+                    elif sb >= 5.5 and sq <= 4.5 and gap >= 1.0:
+                        fundamental_score = 2.0  # Bon alignement
+                    elif gap > 0:
+                        fundamental_score = 1.0  # Alignement faible
+                else:  # SELL
+                    if sq >= 6.5 and sb <= 3.5 and gap <= -3.0:
+                        fundamental_score = 3.0
+                    elif sq >= 5.5 and sb <= 4.5 and gap <= -1.0:
+                        fundamental_score = 2.0
+                    elif gap < 0:
+                        fundamental_score = 1.0
                 
-                if sc >= min_score:
-                    sigs.append({
-                        'symbol': sym, 'type': typ, 'price': price, 'score': sc,
-                        'quality': mtf['quality'], 'atr': atr, 'mtf': mtf, 
-                        'cs': cs_data, 'fvg': fvg, 'rsi': rsi, 'sl': sl, 'tp': tp, 
-                        'time': df['time'].iloc[-1]
-                    })
-        except: continue
+                # Filtre strict fondamental
+                if strict_mode and fundamental_score < 1.5:
+                    logger.debug(f"{sym} filtré: fondamental faible (gap={gap:.2f})")
+                    continue
+            else:
+                # Or/Indices : scoring par défaut
+                fundamental_score = 2.0
+            
+            # 7. Bonus technique
+            technical_score = 2.5  # Base
+            if rsi_quality == 'optimal':
+                technical_score += 0.5
+            elif rsi_quality in ['oversold', 'overbought']:
+                technical_score += 0.3
+            
+            # Bonus FVG aligné
+            if fvg_present:
+                if (signal_type == 'BUY' and fvg_type == 'BULL') or \
+                   (signal_type == 'SELL' and fvg_type == 'BEAR'):
+                    technical_score += 1.0
+            
+            # 8. Calcul du score final pondéré
+            gps_weighted = mtf['score'] * (SCORING_CONFIG['gps_weight'] / 0.3) * 10
+            fund_weighted = fundamental_score * (SCORING_CONFIG['fundamental_weight'] / 0.3) * 10
+            tech_weighted = technical_score * (SCORING_CONFIG['technical_weight'] / 0.25) * 10
+            
+            final_score = (gps_weighted + fund_weighted + tech_weighted) / 10
+            final_score = min(10.0, final_score)
+            
+            # Filtre score minimum
+            if final_score < min_score:
+                continue
+            
+            # 9. Calcul du Risk Management
+            atr = calculate_atr(df)
+            price = df['close'].iloc[-1]
+            
+            # Stop Loss : 1.8x ATR (plus serré)
+            sl_dist = atr * 1.8
+            # Take Profit : 3x ATR (ratio 1:1.67)
+            tp_dist = atr * 3.0
+            
+            if signal_type == 'BUY':
+                sl = price - sl_dist
+                tp = price + tp_dist
+            else:
+                sl = price + sl_dist
+                tp = price - tp_dist
+            
+            rr_ratio = tp_dist / sl_dist
+            
+            # 10. Ajout du signal validé
+            signals.append({
+                'symbol': sym,
+                'type': signal_type,
+                'price': price,
+                'score': final_score,
+                'quality': mtf['quality'],
+                'atr': atr,
+                'atr_pct': atr_pct,
+                'mtf': mtf,
+                'cs': cs_data,
+                'fundamental_score': fundamental_score,
+                'technical_score': technical_score,
+                'fvg': fvg_present,
+                'fvg_type': fvg_type,
+                'rsi': rsi,
+                'rsi_quality': rsi_quality,
+                'sl': sl,
+                'tp': tp,
+                'rr': rr_ratio,
+                'time': signal_time,
+                'scan_time': scan_start
+            })
+            
+            logger.info(f"Signal validé: {sym} {signal_type} @ {price:.5f} (Score: {final_score:.1f})")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse de {sym}: {e}")
+            continue
+    
     pbar.empty()
-    return sigs
+    logger.info(f"Scan terminé: {len(signals)} signaux trouvés")
+    return signals
 
 # ==========================================
-# 7. AFFICHAGE (DESIGN ORIGINAL + WIDGETS)
+# 8. AFFICHAGE (DESIGN CONSERVÉ + AMÉLIORATIONS)
 # ==========================================
 def draw_mini_meter(label, val, color):
-    # Jauge compacte
+    """Jauge compacte de force"""
     w = min(100, max(0, val*10))
     st.markdown(f"""
     <div style="margin-bottom:2px;font-size:0.75em;color:#cbd5e1;display:flex;justify-content:space-between;">
-        <span>{label}</span><span>{val:.1f}</span>
+        <span>{label}</span><span>{val:.1f}/10</span>
     </div>
     <div style="width:100%;background:#334155;height:6px;border-radius:4px;">
         <div style="width:{w}%;background:{color};height:100%;border-radius:4px;"></div>
     </div>
     """, unsafe_allow_html=True)
 
+def format_timestamp(dt):
+    """Formatage élégant de l'horodatage"""
+    try:
+        if isinstance(dt, str):
+            dt = pd.to_datetime(dt)
+        return dt.strftime("%d/%m/%Y %H:%M UTC")
+    except:
+        return "N/A"
+
 def display_sig(s):
+    """Affichage d'un signal avec le design original"""
     is_buy = s['type'] == 'BUY'
     col_type = "#10b981" if is_buy else "#ef4444"
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
+    # Label de qualité
     sc = s['score']
-    if sc >= 10: label = "💎 LEGENDARY"
-    elif sc >= 8: label = "⭐ EXCELLENT"
-    elif sc >= 6: label = "✅ BON"
-    else: label = "⚠️ MOYEN"
+    if sc >= 9.0:
+        label = "💎 LEGENDARY"
+    elif sc >= 8.0:
+        label = "⭐ EXCELLENT"
+    elif sc >= 7.0:
+        label = "✅ BON"
+    elif sc >= 6.0:
+        label = "📊 CORRECT"
+    else:
+        label = "⚠️ MOYEN"
 
-    # En-tête (Carte Bleue)
+    # En-tête du signal
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
+        
+        # Horodatage
+        st.markdown(f"""
+        <div class="timestamp-box">
+            📅 Signal détecté le {format_timestamp(s['time'])} • Scan effectué à {format_timestamp(s['scan_time'])}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Carte principale
         st.markdown(f"""
         <div style="background:{bg};padding:15px;border-radius:8px;border:2px solid {col_type};display:flex;justify-content:space-between;align-items:center;">
             <div>
@@ -457,74 +857,262 @@ def display_sig(s):
             </div>
             <div style="text-align:right;">
                 <div style="font-size:1.4em;font-weight:bold;color:white;">{s['price']:.5f}</div>
+                <div style="font-size:0.75em;color:#cbd5e1;">ATR: {s['atr_pct']:.2f}%</div>
             </div>
         </div>""", unsafe_allow_html=True)
         
-        # Badges GPS
+        # Badges
         badges = []
-        if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
-        q_col = "#10b981" if s['quality'] in ['A+', 'A'] else "#f59e0b"
+        
+        # Badge FVG
+        if s['fvg']:
+            fvg_match = (is_buy and s['fvg_type'] == 'BULL') or (not is_buy and s['fvg_type'] == 'BEAR')
+            if fvg_match:
+                badges.append("<span class='badge-fvg'>🦅 SMART MONEY ALIGNED</span>")
+            else:
+                badges.append("<span class='badge-fvg' style='opacity:0.7'>🦅 FVG DÉTECTÉ</span>")
+        
+        # Badge GPS
+        q_col = "#10b981" if s['quality'] in ['A+', 'A'] else "#f59e0b" if s['quality'] in ['B+', 'B'] else "#ef4444"
         badges.append(f"<span class='badge-gps' style='background:{q_col}'>🛡️ GPS {s['quality']}</span>")
+        
+        # Badge RSI
+        if s['rsi_quality'] == 'optimal':
+            badges.append("<span class='badge-gps' style='background:#3b82f6'>📊 RSI OPTIMAL</span>")
+        elif s['rsi_quality'] in ['oversold', 'overbought']:
+            badges.append("<span class='badge-gps' style='background:#8b5cf6'>📊 RSI EXTRÊME</span>")
+        
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         
         st.write("")
+        
+        # Métriques principales
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Score Total", f"{sc:.1f}/10", delta=label, delta_color="off")
         c2.metric("Alignement GPS", s['mtf']['alignment'])
         c3.metric("RSI M5", f"{s['rsi']:.1f}")
-        c4.metric("ATR M5", f"{s['atr']:.4f}")
+        c4.metric("Confiance GPS", f"{s['mtf'].get('confidence', 0):.0f}%")
         
-        # --- PARTIE FONDAMENTALE (INTEGRÉE) ---
+        # --- ANALYSE FONDAMENTALE (si disponible) ---
         if s['cs']:
             st.markdown("---")
+            st.markdown("### 📊 Analyse Fondamentale")
+            
             f1, f2 = st.columns([1, 2])
             
             with f1:
-                st.markdown("**Force Relative**")
-                base, quote = s['symbol'].split('_')
-                sb = s['cs']['sb']; sq = s['cs']['sq']
-                cb = "#10b981" if sb >= 5.5 else "#ef4444"; cq = "#10b981" if sq >= 5.5 else "#ef4444"
+                st.markdown("**Force Relative des Devises**")
+                base = s['cs']['base']
+                quote = s['cs']['quote']
+                sb = s['cs']['sb']
+                sq = s['cs']['sq']
+                gap = s['cs']['gap']
+                
+                # Couleurs selon la force
+                cb = "#10b981" if sb >= 6.5 else "#f59e0b" if sb >= 5.5 else "#ef4444"
+                cq = "#10b981" if sq >= 6.5 else "#f59e0b" if sq >= 5.5 else "#ef4444"
+                
                 draw_mini_meter(base, sb, cb)
+                st.write("")
                 draw_mini_meter(quote, sq, cq)
+                st.write("")
+                
+                # Gap avec indicateur directionnel
+                gap_color = "#10b981" if gap > 0 else "#ef4444"
+                gap_arrow = "⬆️" if gap > 0 else "⬇️"
+                st.markdown(f"""
+                <div style='text-align:center;margin-top:10px;'>
+                    <div style='color:#94a3b8;font-size:0.8em;'>Écart de Force</div>
+                    <div style='color:{gap_color};font-size:1.3em;font-weight:bold;'>
+                        {gap_arrow} {abs(gap):.2f}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
                 
             with f2:
-                st.markdown("**Market Map**")
+                st.markdown("**Market Map - Performance vs Devises**")
                 cols = st.columns(6)
                 for i, item in enumerate(s['cs']['map'][:6]):
                     with cols[i]:
                         val = item['val']
                         arrow = "▲" if val > 0 else "▼"
                         cl = "#10b981" if val > 0 else "#ef4444"
-                        st.markdown(f"<div style='text-align:center;font-size:0.7em;color:#94a3b8;'>{item['vs']}</div><div style='text-align:center;color:{cl};font-weight:bold;'>{arrow}</div>", unsafe_allow_html=True)
-
+                        st.markdown(f"""
+                        <div style='text-align:center;'>
+                            <div style='font-size:0.7em;color:#94a3b8;margin-bottom:4px;'>{item['vs']}</div>
+                            <div style='color:{cl};font-size:1.2em;font-weight:bold;'>{arrow}</div>
+                            <div style='font-size:0.7em;color:{cl};'>{val:.2f}%</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+        
+        # --- ANALYSE GPS DÉTAILLÉE ---
+        st.markdown("---")
+        st.markdown("### 🛡️ Analyse GPS Multi-Timeframe")
+        
+        mtf_analysis = s['mtf']['analysis']
+        timeframes = ['M', 'W', 'D', 'H4', 'H1']
+        tf_labels = {'M': 'Mensuel', 'W': 'Hebdo', 'D': 'Daily', 'H4': '4H', 'H1': '1H'}
+        
+        cols = st.columns(5)
+        for i, tf in enumerate(timeframes):
+            with cols[i]:
+                trend = mtf_analysis.get(tf, 'N/A')
+                
+                # Icône selon la tendance
+                if 'Bullish' in trend:
+                    icon = "🟢"
+                    color = "#10b981"
+                elif 'Bearish' in trend:
+                    icon = "🔴"
+                    color = "#ef4444"
+                elif 'Retracement' in trend:
+                    icon = "🟡"
+                    color = "#f59e0b"
+                else:
+                    icon = "⚪"
+                    color = "#94a3b8"
+                
+                st.markdown(f"""
+                <div style='text-align:center;background:rgba(255,255,255,0.03);padding:10px;border-radius:8px;'>
+                    <div style='font-size:0.75em;color:#94a3b8;'>{tf_labels[tf]}</div>
+                    <div style='font-size:1.5em;margin:5px 0;'>{icon}</div>
+                    <div style='font-size:0.7em;color:{color};font-weight:600;'>{trend}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
         # --- RISK MANAGER ---
         st.markdown("---")
+        st.markdown("### ⚖️ Gestion du Risque")
+        
         r1, r2, r3 = st.columns(3)
-        r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;font-size:1.1em'>{s['sl']:.5f}</div></div>", unsafe_allow_html=True)
-        r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;font-size:1.1em'>{s['tp']:.5f}</div></div>", unsafe_allow_html=True)
-        r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em'>RISK:REWARD</div><div style='color:white;font-weight:bold;font-size:1.1em'>1:1.5</div></div>", unsafe_allow_html=True)
+        
+        r1.markdown(f"""
+        <div class='risk-box'>
+            <div style='color:#94a3b8;font-size:0.8em;margin-bottom:5px;'>STOP LOSS</div>
+            <div style='color:#ef4444;font-weight:bold;font-size:1.2em;'>{s['sl']:.5f}</div>
+            <div style='color:#94a3b8;font-size:0.7em;margin-top:5px;'>1.8x ATR</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        r2.markdown(f"""
+        <div class='risk-box'>
+            <div style='color:#94a3b8;font-size:0.8em;margin-bottom:5px;'>TAKE PROFIT</div>
+            <div style='color:#10b981;font-weight:bold;font-size:1.2em;'>{s['tp']:.5f}</div>
+            <div style='color:#94a3b8;font-size:0.7em;margin-top:5px;'>3x ATR</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        r3.markdown(f"""
+        <div class='risk-box'>
+            <div style='color:#94a3b8;font-size:0.8em;margin-bottom:5px;'>RISK:REWARD</div>
+            <div style='color:#3b82f6;font-weight:bold;font-size:1.2em;'>1:{s['rr']:.2f}</div>
+            <div style='color:#94a3b8;font-size:0.7em;margin-top:5px;'>Ratio optimal</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Note informative
+        st.info("💡 **Conseil**: Ajustez la taille de position selon votre capital et tolérance au risque (recommandé: 1-2% du capital par trade)")
 
 # ==========================================
-# 8. APP PRINCIPALE
+# 9. APPLICATION PRINCIPALE
 # ==========================================
-st.title("💎 Bluestar SNP3 GPS")
-st.markdown("Scanner : GPS Institutionnel + Force Fondamentale")
-
-with st.expander("⚙️ Paramètres", expanded=True):
-    k1, k2 = st.columns(2)
-    min_sc = k1.slider("Score Minimum", 5.0, 10.0, 7.0)
-    strict = k2.checkbox("🔥 Mode Sniper (Strict)", True, help="Requiert un GPS > B et une Force Fondamentale alignée")
-
-if st.button("🚀 LANCER LE SCAN", type="primary"):
-    st.session_state.cache = {} 
-    api = OandaClient()
-    results = run_scan(api, min_sc, strict)
+def main():
+    st.title("💎 Bluestar SNP3 GPS")
+    st.markdown("**Scanner Institutionnel**: GPS Multi-Timeframe + Force Fondamentale + Entrée Sniper M5")
     
-    if not results:
-        st.warning("Aucune opportunité Sniper trouvée.")
-    else:
-        st.success(f"{len(results)} Signaux Validés")
-        results.sort(key=lambda x: x['score'], reverse=True)
-        for sig in results:
-            display_sig(sig)
+    # Paramètres de scan
+    with st.expander("⚙️ Paramètres de Scan", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            min_score = st.slider(
+                "Score Minimum",
+                min_value=5.0,
+                max_value=10.0,
+                value=7.0,
+                step=0.5,
+                help="Niveau de qualité minimum pour afficher un signal"
+            )
+        
+        with col2:
+            strict_mode = st.checkbox(
+                "🔥 Mode Sniper (Strict)",
+                value=True,
+                help="Filtre strict: GPS ≥ B ET Force fondamentale alignée (recommandé)"
+            )
+        
+        # Informations sur le scoring
+        with st.expander("ℹ️ Comprendre le Scoring", expanded=False):
+            st.markdown("""
+            **Composition du Score (0-10)**:
+            - 🛡️ **GPS Multi-Timeframe (40%)** : Analyse M/W/D/H4/H1
+            - 📊 **Force Fondamentale (35%)** : Analyse relative des devises
+            - 📈 **Technique M5 (25%)** : RSI + HMA + FVG
+            
+            **Qualités GPS**:
+            - **A+/A** : Alignement parfait M/W/D (Score GPS: 3/3)
+            - **B+/B** : Tendance confirmée W/D (Score GPS: 2/3)
+            - **B-** : Retracement possible (Score GPS: 1/3)
+            
+            **Mode Sniper**: Exige GPS ≥ B ET gap fondamental ≥ 1.0
+            """)
+    
+    # Bouton de scan
+    if st.button("🚀 LANCER LE SCAN", type="primary"):
+        # Clear cache pour forcer un refresh
+        st.session_state.cache_timestamps = {}
+        st.session_state.matrix_timestamp = None
+        
+        try:
+            # Initialisation du client API
+            api = OandaClient()
+            
+            # Exécution du scan
+            with st.spinner("🔍 Analyse en cours..."):
+                results = run_scan(api, min_score, strict_mode)
+            
+            # Affichage des résultats
+            if not results:
+                st.warning("⚠️ Aucune opportunité Sniper trouvée avec les critères actuels.")
+                st.info("💡 Essayez de réduire le score minimum ou désactiver le mode strict.")
+            else:
+                st.success(f"✅ {len(results)} Signal{'s' if len(results) > 1 else ''} Validé{'s' if len(results) > 1 else ''}")
+                
+                # Tri par score décroissant
+                results.sort(key=lambda x: x['score'], reverse=True)
+                
+                # Statistiques rapides
+                with st.expander("📊 Statistiques du Scan", expanded=False):
+                    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+                    
+                    avg_score = np.mean([s['score'] for s in results])
+                    buy_signals = sum(1 for s in results if s['type'] == 'BUY')
+                    sell_signals = len(results) - buy_signals
+                    avg_gps = np.mean([s['mtf']['score'] for s in results])
+                    
+                    stats_col1.metric("Score Moyen", f"{avg_score:.1f}/10")
+                    stats_col2.metric("Signaux BUY", buy_signals)
+                    stats_col3.metric("Signaux SELL", sell_signals)
+                    stats_col4.metric("GPS Moyen", f"{avg_gps:.1f}/3")
+                
+                # Affichage de chaque signal
+                for sig in results:
+                    display_sig(sig)
+                    
+        except Exception as e:
+            logger.error(f"Erreur lors du scan: {e}")
+            st.error(f"❌ Erreur lors du scan: {str(e)}")
+            st.info("Vérifiez votre connexion API et réessayez.")
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align:center;color:#64748b;font-size:0.85em;padding:20px 0;'>
+        💎 Bluestar SNP3 GPS v2.0 | Scanner Institutionnel Multi-Stratégies<br>
+        <span style='font-size:0.75em;'>Entrée M5 • GPS MTF • Force Fondamentale • Smart Money Detection</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
 
