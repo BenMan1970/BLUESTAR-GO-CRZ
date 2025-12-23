@@ -780,8 +780,8 @@ def check_volatility_filter(df, threshold=0.5):
         price = df['close'].iloc[-1]
         atr_pct = (atr / price) * 100
         
-        # ATR entre 0.3% et 2% considéré comme acceptable
-        return 0.3 <= atr_pct <= 2.0, atr_pct
+        # ATR entre 0.2% et 3% considéré comme acceptable (élargi de 0.3-2%)
+        return 0.2 <= atr_pct <= 3.0, atr_pct
     except Exception as e:
         logger.error(f"Erreur filtre volatilité: {e}")
         return True, 0
