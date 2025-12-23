@@ -415,96 +415,169 @@ def calculate_mtf_score_gps(api, symbol, direction):
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}, 'confidence': 0}
 
 # ==========================================
-# 5. SYSTÈME DE FORCE DES DEVISES
+# 5. SYSTÈME DE FORCE DES DEVISES (OPTIMISÉ)
 # ==========================================
 class CurrencyStrengthSystem:
     @staticmethod
     def scrape_currencystrengthmeter():
-        """Scraping depuis currencystrengthmeter.org"""
+        """Scraping optimisé depuis currencystrengthmeter.org"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0',
             }
             
             url = "https://currencystrengthmeter.org/"
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             scores = {}
-            all_text = soup.get_text()
             currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
             
+            # Méthode 1: Recherche dans les éléments structurés
+            # Le site utilise probablement des divs/spans pour afficher les devises
             for currency in currencies:
+                # Rechercher des patterns comme:
+                # <div class="currency">USD</div><div class="strength">7.5</div>
+                # ou similaire
+                currency_elements = soup.find_all(text=re.compile(rf'\b{currency}\b', re.IGNORECASE))
+                
+                for elem in currency_elements:
+                    parent = elem.parent
+                    if parent:
+                        # Chercher un nombre à proximité
+                        siblings = parent.find_next_siblings()
+                        for sib in siblings[:3]:  # Vérifier les 3 prochains éléments
+                            text = sib.get_text(strip=True)
+                            match = re.search(r'(\d+\.?\d*)', text)
+                            if match:
+                                value = float(match.group(1))
+                                if 0 <= value <= 10:
+                                    scores[currency] = value
+                                    break
+                                elif 10 < value <= 100:  # Si sur 100, normaliser
+                                    scores[currency] = value / 10
+                                    break
+                    if currency in scores:
+                        break
+            
+            # Méthode 2 (fallback): Recherche dans le texte brut
+            if len(scores) < 4:
+                scores = {}
+                all_text = soup.get_text()
+                
+                for currency in currencies:
+                    patterns = [
+                        rf'{currency}\s*[:\-=]?\s*(\d+\.?\d*)',
+                        rf'{currency}\s+(\d+\.?\d*)\s*(?:strength|force)?',
+                        rf'(?:strength|force)?\s*{currency}\s*[:\-=]?\s*(\d+\.?\d*)',
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = re.finditer(pattern, all_text, re.IGNORECASE)
+                        for match in matches:
+                            value = float(match.group(1))
+                            if 0 <= value <= 10:
+                                scores[currency] = value
+                                break
+                            elif 10 < value <= 100:
+                                scores[currency] = value / 10
+                                break
+                        if currency in scores:
+                            break
+            
+            if len(scores) >= 6:  # Au moins 6 devises (75% des 8)
+                logger.info(f"✅ CurrencyStrengthMeter: {len(scores)}/8 devises")
+                return scores, 'currencystrengthmeter.org'
+            
+            logger.warning(f"⚠️ CurrencyStrengthMeter: Seulement {len(scores)}/8 devises trouvées")
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur CurrencyStrengthMeter: {e}")
+            return None, None
+    
+    @staticmethod
+    def scrape_barchart():
+        """Scraping optimisé depuis barchart.com/forex/market-map"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.barchart.com/forex',
+            }
+            
+            # Utiliser market-map qui affiche toutes les paires
+            url = "https://www.barchart.com/forex/market-map"
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            scores = {}
+            
+            # Le market-map affiche des paires avec leurs variations
+            # Pattern: EUR/USD -0.03% ou GBP/JPY +0.15%
+            all_text = soup.get_text()
+            
+            # Définir toutes les paires majeures
+            major_pairs = [
+                ('EUR', 'USD'), ('GBP', 'USD'), ('USD', 'JPY'), 
+                ('USD', 'CHF'), ('AUD', 'USD'), ('USD', 'CAD'), 
+                ('NZD', 'USD'),
+                ('EUR', 'GBP'), ('EUR', 'JPY'), ('EUR', 'CHF'),
+                ('GBP', 'JPY'), ('GBP', 'CHF'), ('AUD', 'JPY'),
+                ('CHF', 'JPY')
+            ]
+            
+            pairs_found = 0
+            for base, quote in major_pairs:
+                # Pattern: EUR/USD [prix] [variation%]
                 patterns = [
-                    rf'{currency}[\s:=-]+(\d+\.?\d*)',
-                    rf'{currency.lower()}[\s:=-]+(\d+\.?\d*)',
+                    rf'{base}/{quote}\s+(?:USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD)?\s*([+-]?\d+\.?\d*)%',
+                    rf'{base}/{quote}.*?([+-]\d+\.?\d*)%',
+                    rf'{base}\s*\/\s*{quote}.*?([+-]?\d+\.?\d*)%',
                 ]
                 
                 for pattern in patterns:
                     match = re.search(pattern, all_text, re.IGNORECASE)
                     if match:
-                        value = float(match.group(1))
-                        if value > 10:
-                            value = value / 10
-                        scores[currency] = value
+                        pct = float(match.group(1))
+                        scores[base] = scores.get(base, 0) + pct
+                        scores[quote] = scores.get(quote, 0) - pct
+                        pairs_found += 1
                         break
             
-            if len(scores) >= 4:
-                logger.info(f"✅ CurrencyStrengthMeter: {len(scores)} devises")
-                return scores, 'currencystrengthmeter'
+            logger.info(f"📊 Barchart: {pairs_found} paires analysées")
             
-            return None, None
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur scraping CurrencyStrengthMeter: {e}")
-            return None, None
-    
-    @staticmethod
-    def scrape_barchart():
-        """Scraping depuis barchart.com"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            }
-            
-            url = "https://www.barchart.com/forex/performance"
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            scores = {}
-            all_text = soup.get_text()
-            
-            forex_pairs = [
-                ('EUR', 'USD'), ('GBP', 'USD'), ('USD', 'JPY'), 
-                ('USD', 'CHF'), ('AUD', 'USD'), ('USD', 'CAD'), 
-                ('NZD', 'USD')
-            ]
-            
-            for base, quote in forex_pairs:
-                pair_pattern = rf'{base}/{quote}.*?([+-]?\d+\.?\d*)%'
-                match = re.search(pair_pattern, all_text)
-                if match:
-                    pct = float(match.group(1))
-                    scores[base] = scores.get(base, 0) + pct
-                    scores[quote] = scores.get(quote, 0) - pct
-            
-            if len(scores) >= 4:
+            # Vérifier qu'on a au moins 10 paires (50%)
+            if pairs_found >= 10 and len(scores) >= 6:
+                # Normalisation 0-10
                 vals = list(scores.values())
                 min_v, max_v = min(vals), max(vals)
+                
                 if max_v != min_v:
                     for k in scores:
                         scores[k] = ((scores[k] - min_v) / (max_v - min_v)) * 10.0
+                else:
+                    # Toutes les valeurs sont égales
+                    for k in scores:
+                        scores[k] = 5.0
                 
-                logger.info(f"✅ Barchart: {len(scores)} devises")
-                return scores, 'barchart'
+                logger.info(f"✅ Barchart: {len(scores)}/8 devises calculées")
+                return scores, 'barchart.com/market-map'
             
+            logger.warning(f"⚠️ Barchart: Données insuffisantes ({pairs_found} paires, {len(scores)} devises)")
             return None, None
             
         except Exception as e:
-            logger.error(f"❌ Erreur scraping Barchart: {e}")
+            logger.error(f"❌ Erreur Barchart: {e}")
             return None, None
     
     @staticmethod
