@@ -3,16 +3,14 @@ import pandas as pd
 import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
-import requests
-from datetime import datetime, time as dtime, timezone, timedelta
 import time
 import logging
-from typing import Optional, Dict, List
+from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & DESIGN "BLUESTAR"
+# 1. CONFIGURATION & STYLE "BLUESTAR"
 # ==========================================
-st.set_page_config(page_title="Bluestar SNP3 Final Pro", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar SNP3 Ultimate", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.WARNING)
 
 st.markdown("""
@@ -29,26 +27,25 @@ st.markdown("""
     .stButton>button { width: 100%; border-radius: 12px; height: 3.5em; font-weight: 700; font-size: 1.1em; background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%); color: white; border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(37, 99, 235, 0.4); }
     
-    /* CARTES */
+    /* METRICS & TEXT */
+    div[data-testid="stMetricValue"] { font-size: 1.4rem; color: #f1f5f9; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.8rem; }
     .streamlit-expanderHeader { background-color: #1e293b !important; border: 1px solid #334155; border-radius: 10px; color: #f8fafc !important; font-weight: 600; }
     .streamlit-expanderContent { background-color: #161b22; border: 1px solid #334155; border-top: none; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }
     
-    /* METRICS */
-    div[data-testid="stMetricValue"] { font-size: 1.5rem; color: #f1f5f9; font-weight: 700; }
-    div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.85rem; }
+    /* BARRES DE FORCE */
+    .meter-container { width: 100%; background-color: #334155; border-radius: 10px; height: 10px; margin-top: 5px; margin-bottom: 10px; }
+    .meter-fill { height: 100%; border-radius: 10px; }
     
     /* BADGES */
-    .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 700; }
-    .badge-news { background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.7em; font-weight: 700; }
-    
-    /* PROGRESS BAR CUSTOM (METER) */
-    .meter-container { width: 100%; background-color: #334155; border-radius: 10px; height: 12px; margin-top: 5px; }
-    .meter-fill { height: 100%; border-radius: 10px; transition: width 0.5s ease-in-out; }
+    .badge-mtf { background: #374151; color: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; border: 1px solid #4b5563; margin-right: 4px; }
+    .badge-bull { color: #10b981; border-color: #065f46; background: rgba(16, 185, 129, 0.1); }
+    .badge-bear { color: #ef4444; border-color: #991b1b; background: rgba(239, 68, 68, 0.1); }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DONNÉES & CACHE
+# 2. INITIALISATION ROBUSTE (Plus d'erreurs !)
 # ==========================================
 ASSETS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD",
@@ -67,12 +64,13 @@ ALL_CROSSES = [
     "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
 ]
 
-if 'cache' not in st.session_state:
-    st.session_state.cache = {}
-    st.session_state.matrix_cache = None # Pour stocker la force calculée (CurrencyStrengthMeter)
+# Initialisation des variables de session (Safe Init)
+if 'cache' not in st.session_state: st.session_state.cache = {}
+if 'matrix_cache' not in st.session_state: st.session_state.matrix_cache = None
+if 'last_scan_time' not in st.session_state: st.session_state.last_scan_time = 0
 
 # ==========================================
-# 3. CLIENT API & UTILS
+# 3. CLIENT API
 # ==========================================
 class OandaClient:
     def __init__(self):
@@ -85,6 +83,7 @@ class OandaClient:
 
     def get_candles(self, instrument: str, granularity: str, count: int) -> pd.DataFrame:
         key = f"{instrument}_{granularity}"
+        # Cache simple 1 minute
         if key in st.session_state.cache: return st.session_state.cache[key]
         
         try:
@@ -94,84 +93,126 @@ class OandaClient:
             data = []
             for c in r.response['candles']:
                 if c['complete']:
-                    data.append({'time': c['time'], 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])})
+                    data.append({'time': pd.to_datetime(c['time']), 'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 'low': float(c['mid']['l']), 'close': float(c['mid']['c'])})
             df = pd.DataFrame(data)
-            if not df.empty:
-                df['time'] = pd.to_datetime(df['time'])
-                st.session_state.cache[key] = df
+            if not df.empty: st.session_state.cache[key] = df
             return df
         except: return pd.DataFrame()
 
 # ==========================================
-# 4. MOTEUR FONDAMENTAL (Le Cerveau)
+# 4. INDICATEURS TECHNIQUES & MTF
+# ==========================================
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_hma(series, length=20):
+    wma = lambda s, l: s.rolling(l).apply(lambda x: np.dot(x, np.arange(1, l+1))/np.arange(1, l+1).sum(), raw=True)
+    wma1 = wma(series, int(length/2))
+    wma2 = wma(series, length)
+    return wma(2*wma1 - wma2, int(np.sqrt(length)))
+
+def calculate_atr(df, period=14):
+    h, l, c = df['high'], df['low'], df['close']
+    tr = pd.concat([h - l, abs(h - c.shift(1)), abs(l - c.shift(1))], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean().iloc[-1]
+
+# --- LOGIQUE MTF INSTITUTIONNELLE ---
+def get_trend_score(df, tf_name):
+    if df.empty or len(df) < 50: return "Range", 0
+    close = df['close']
+    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    sma200 = close.rolling(200).mean().iloc[-1] if len(df) >= 200 else close.rolling(50).mean().iloc[-1]
+    curr = close.iloc[-1]
+    
+    if curr > sma200 and ema50 > sma200: return "Bullish", 1
+    if curr < sma200 and ema50 < sma200: return "Bearish", -1
+    return "Range", 0
+
+def get_mtf_analysis(api, symbol):
+    # On vérifie D1, H4, H1
+    trends = {}
+    score = 0
+    
+    # Daily
+    df_d = api.get_candles(symbol, "D", 250)
+    t_d, s_d = get_trend_score(df_d, "D")
+    trends['D'] = t_d
+    score += s_d * 3 # Poids lourd
+    
+    # H4
+    df_h4 = api.get_candles(symbol, "H4", 200)
+    t_h4, s_h4 = get_trend_score(df_h4, "H4")
+    trends['H4'] = t_h4
+    score += s_h4 * 2
+    
+    # H1
+    df_h1 = api.get_candles(symbol, "H1", 100)
+    t_h1, s_h1 = get_trend_score(df_h1, "H1")
+    trends['H1'] = t_h1
+    score += s_h1 * 1
+    
+    return trends, score
+
+# ==========================================
+# 5. MOTEUR FONDAMENTAL (CSM + BARCHART)
 # ==========================================
 class CurrencyStrengthSystem:
-    """
-    Réplique la logique de calcul de CurrencyStrengthMeter.org
-    et prépare les données pour la Market Map de Barchart.
-    """
     @staticmethod
     def calculate_matrix(api: OandaClient):
-        # Si déjà calculé il y a moins de 5 min, on garde (éviter latence)
+        # Utilisation du cache pour éviter la latence
         if st.session_state.matrix_cache: return st.session_state.matrix_cache
 
-        with st.spinner("🔄 Calcul de la Matrice de Force (Scan complet du marché)..."):
+        with st.spinner("🔄 Scan du marché (Analyse des 28 paires majeures)..."):
             scores = {c: 0.0 for c in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']}
-            details = {c: [] for c in scores.keys()} # Pour Barchart Map
+            details = {c: [] for c in scores.keys()} 
             
-            # On récupère la variation Daily de TOUTES les paires
             for pair in ALL_CROSSES:
+                # Analyse sur 24h (Daily Candle)
                 df = api.get_candles(pair, "D", 2)
                 if not df.empty and len(df) >= 2:
                     op = df['open'].iloc[-1]
                     cl = df['close'].iloc[-1]
-                    pct_change = ((cl - op) / op) * 100
+                    pct = ((cl - op) / op) * 100
                     
                     base, quote = pair.split('_')
+                    scores[base] += pct
+                    scores[quote] -= pct
                     
-                    # Logique de Panier (Basket)
-                    scores[base] += pct_change
-                    scores[quote] -= pct_change
-                    
-                    # Stockage pour le visuel "Barchart"
-                    details[base].append({'vs': quote, 'val': pct_change})
-                    details[quote].append({'vs': base, 'val': -pct_change})
+                    details[base].append({'vs': quote, 'val': pct})
+                    details[quote].append({'vs': base, 'val': -pct})
             
-            # Normalisation 0-10 (Comme le site web)
-            # On cherche le min et max pour étaler les scores
+            # Normalisation 0-10
             vals = list(scores.values())
             if not vals: return None
             min_v, max_v = min(vals), max(vals)
             
-            final_scores = {}
+            final = {}
             for k, v in scores.items():
-                # Formule pour mapper sur 0-10
-                if max_v - min_v == 0: norm = 5.0
-                else: norm = ((v - min_v) / (max_v - min_v)) * 10.0
-                final_scores[k] = norm
+                norm = ((v - min_v) / (max_v - min_v)) * 10.0 if max_v != min_v else 5.0
+                final[k] = norm
 
-            result = {'scores': final_scores, 'details': details}
+            result = {'scores': final, 'details': details}
             st.session_state.matrix_cache = result
             return result
 
     @staticmethod
     def get_pair_analysis(matrix, base, quote):
         if not matrix: return 5.0, 5.0, 0.0, []
-        
-        s_base = matrix['scores'].get(base, 5.0)
-        s_quote = matrix['scores'].get(quote, 5.0)
-        
-        # Liste des détails pour le Market Map (Base vs Others)
-        # On trie pour voir les meilleures perfs en premier
+        s_b = matrix['scores'].get(base, 5.0)
+        s_q = matrix['scores'].get(quote, 5.0)
+        # Tri des détails pour le Market Map
         map_data = sorted(matrix['details'].get(base, []), key=lambda x: x['val'], reverse=True)
-        
-        return s_base, s_quote, (s_base - s_quote), map_data
+        return s_b, s_q, (s_b - s_q), map_data
 
 # ==========================================
-# 5. INDICATEURS TECHNIQUES & MOTEUR SCAN
+# 6. SCANNER UNIFIÉ (Tech + Fund + MTF)
 # ==========================================
-def run_scanner(api, min_tech_score, risk_mode, strict_mode):
-    # 1. Calcul FONDAMENTAL (Matrice)
+def run_ultimate_scanner(api, min_score, strict_mode):
+    # 1. Calculer la Force Fondamentale (Matrice)
     matrix = CurrencyStrengthSystem.calculate_matrix(api)
     
     signals = []
@@ -180,177 +221,168 @@ def run_scanner(api, min_tech_score, risk_mode, strict_mode):
     for i, symbol in enumerate(ASSETS):
         pbar.progress((i+1)/len(ASSETS))
         
-        # Gestion des indices/Or (Pas de calcul de force complet)
-        is_forex = symbol in ALL_CROSSES
-        
-        # Données M5 (Sniper)
+        # A. TECHNIQUE (M5 Sniper)
         df = api.get_candles(symbol, "M5", 100)
         if df.empty or len(df) < 50: continue
         
-        # --- CALCULS TECHNIQUES ---
-        close = df['close']
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = rsi.iloc[-1]
+        rsi = calculate_rsi(df['close']).iloc[-1]
+        hma = calculate_hma(df['close']).iloc[-1]
+        prev_hma = calculate_hma(df['close']).iloc[-2]
         
-        # HMA (Hull Moving Average) Trend
-        def wma(s, l): return s.rolling(l).apply(lambda x: np.dot(x, np.arange(1, l+1))/np.arange(1, l+1).sum(), raw=True)
-        wma1 = wma(close, int(20/2)); wma2 = wma(close, 20)
-        hma = wma(2*wma1 - wma2, int(np.sqrt(20)))
-        trend = 1 if hma.iloc[-1] > hma.iloc[-2] else -1
+        sig_type = None
+        if rsi > 50 and hma > prev_hma: sig_type = "BUY"
+        elif rsi < 50 and hma < prev_hma: sig_type = "SELL"
         
-        # Détection du Signal Technique
-        signal_type = None
-        if current_rsi > 50 and trend == 1: signal_type = "BUY"
-        elif current_rsi < 50 and trend == -1: signal_type = "SELL"
+        if not sig_type: continue # Pas de technique, on passe
         
-        if signal_type:
-            score = 5 # Base technique
+        # B. FONDAMENTAL (CSM)
+        score_fund = 0
+        cs_data = {}
+        is_forex = symbol in ALL_CROSSES
+        
+        if is_forex:
+            base, quote = symbol.split('_')
+            sb, sq, gap, map_d = CurrencyStrengthSystem.get_pair_analysis(matrix, base, quote)
+            cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d}
             
-            # --- VALIDATION FONDAMENTALE (CSM) ---
-            cs_data = {'b_score': 0, 'q_score': 0, 'gap': 0, 'map': []}
-            
-            if is_forex:
-                parts = symbol.split('_')
-                base, quote = parts[0], parts[1]
-                b_s, q_s, gap, map_d = CurrencyStrengthSystem.get_pair_analysis(matrix, base, quote)
-                cs_data = {'b_score': b_s, 'q_score': q_s, 'gap': gap, 'map': map_d}
-                
-                # LOGIQUE DU SITE "CURRENCYSTRENGTHMETER.ORG"
-                # BUY: Base forte (>6), Quote faible (<4)
-                # SELL: Base faible (<4), Quote forte (>6)
-                
-                valid_fund = False
-                if signal_type == "BUY":
-                    if b_s > q_s: score += 2 # Bon sens
-                    if b_s >= 6.0 and q_s <= 4.0: score += 3; valid_fund = True # Configuration Parfaite
-                else: # SELL
-                    if q_s > b_s: score += 2
-                    if q_s >= 6.0 and b_s <= 4.0: score += 3; valid_fund = True
-                
-                # FILTRE STRICT (MODE SNIPER)
-                if strict_mode and not valid_fund:
-                    continue # On zappe ce signal
+            # Logique Site Web : Ecart fort requis
+            if sig_type == "BUY":
+                if sb >= 6.0 and sq <= 4.0: score_fund = 3 # Parfait
+                elif gap > 2.0: score_fund = 2 # Bon
             else:
-                # Pour XAU/Indices, on utilise juste le trend D1
-                df_d = api.get_candles(symbol, "D", 2)
-                chg = (df_d['close'].iloc[-1] - df_d['open'].iloc[-1]) / df_d['open'].iloc[-1]
-                if (signal_type == "BUY" and chg > 0) or (signal_type == "SELL" and chg < 0):
-                    score += 3
-            
-            # --- FILTRE FINAL ---
-            if score >= min_tech_score:
-                signals.append({
-                    'symbol': symbol, 'type': signal_type, 'price': close.iloc[-1],
-                    'score': score, 'rsi': current_rsi, 'cs': cs_data, 'time': df['time'].iloc[-1]
-                })
+                if sq >= 6.0 and sb <= 4.0: score_fund = 3
+                elif gap < -2.0: score_fund = 2
                 
+            if strict_mode and score_fund < 2: continue # Rejet strict
+        else:
+            # Pour Or/Indices
+            score_fund = 1
+        
+        # C. CONTEXTE (MTF)
+        # On ne calcule le MTF que si le reste est bon (pour aller vite)
+        mtf_trends, mtf_score = get_mtf_analysis(api, symbol)
+        
+        # Validation MTF
+        valid_mtf = False
+        if sig_type == "BUY" and mtf_score > 0: valid_mtf = True
+        if sig_type == "SELL" and mtf_score < 0: valid_mtf = True
+        
+        if strict_mode and not valid_mtf: continue
+        
+        # D. SCORE FINAL
+        total_score = 4 + score_fund + (abs(mtf_score)/2) # Tech(4) + Fund(3) + MTF(3)
+        
+        if total_score >= min_score:
+            atr = calculate_atr(df)
+            signals.append({
+                'symbol': symbol, 'type': sig_type, 'price': df['close'].iloc[-1],
+                'score': total_score, 'rsi': rsi, 
+                'cs': cs_data, 'mtf': mtf_trends,
+                'atr': atr
+            })
+            
     pbar.empty()
     return signals
 
 # ==========================================
-# 6. AFFICHAGE VISUEL (STYLE SITE WEB)
+# 7. AFFICHAGE (CARTE)
 # ==========================================
-def draw_meter_bar(label, value, color_hex):
-    # Dessine une jauge style "CurrencyStrengthMeter.org"
-    # value est entre 0 et 10
-    width_pct = min(100, max(0, value * 10))
+def draw_meter(label, val, color):
+    width = min(100, max(0, val * 10))
     st.markdown(f"""
-    <div style="margin-bottom:5px;">
-        <div style="display:flex;justify-content:space-between;font-size:0.8em;color:#cbd5e1;font-weight:bold;">
-            <span>{label}</span>
-            <span>{value:.1f}/10</span>
-        </div>
-        <div class="meter-container">
-            <div class="meter-fill" style="width:{width_pct}%; background-color:{color_hex};"></div>
-        </div>
+    <div style="font-size:0.8em;color:#cbd5e1;display:flex;justify-content:space-between;">
+        <b>{label}</b> <span>{val:.1f}/10</span>
     </div>
+    <div class="meter-container"><div class="meter-fill" style="width:{width}%;background:{color};"></div></div>
     """, unsafe_allow_html=True)
 
-def display_signal_card(s):
+def display_card(s):
     is_buy = s['type'] == 'BUY'
-    main_col = "#10b981" if is_buy else "#ef4444" # Vert / Rouge
-    bg_grad = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
+    color = "#10b981" if is_buy else "#ef4444"
+    bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
-    parts = s['symbol'].split('_')
-    base = parts[0]
-    quote = parts[1] if len(parts) > 1 else ""
-
-    with st.expander(f"{s['symbol']} | {s['type']} | Score: {s['score']}/10", expanded=True):
-        # Header visuel
+    with st.expander(f"{s['symbol']} | {s['type']} | Score: {s['score']:.1f}/10", expanded=True):
+        # Header
         st.markdown(f"""
-        <div style="background:{bg_grad};padding:15px;border-radius:8px;border-left:5px solid {main_col};display:flex;justify-content:space-between;align-items:center;">
+        <div style="background:{bg};padding:15px;border-radius:8px;border-left:5px solid {color};display:flex;justify-content:space-between;align-items:center;">
             <div>
-                <span style="font-size:1.5em;font-weight:900;color:white;">{s['symbol']}</span>
-                <span style="background:rgba(255,255,255,0.2);padding:3px 8px;border-radius:4px;color:white;margin-left:10px;font-weight:bold;">{s['type']}</span>
+                <span style="font-size:1.6em;font-weight:900;color:white;">{s['symbol']}</span>
+                <span style="background:rgba(255,255,255,0.2);padding:4px 8px;border-radius:4px;color:white;font-weight:bold;margin-left:10px;">{s['type']}</span>
             </div>
-            <div style="font-size:1.2em;font-weight:bold;color:white;">{s['price']:.5f}</div>
+            <div style="text-align:right;">
+                <div style="font-size:1.3em;font-weight:bold;color:white;">{s['price']:.5f}</div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
-        # SECTION 1 : VISUEL "CURRENCY STRENGTH METER"
-        if quote: # Seulement pour Forex
-            st.markdown("##### 📊 Force Relative (0-10)")
-            c1, c2 = st.columns(2)
+        c1, c2 = st.columns(2)
+        
+        # Colonne Gauche : FORCE (CSM)
+        with c1:
+            st.markdown("###### 📊 Force Relative (Site Web)")
+            if s['cs']:
+                sb = s['cs']['sb']
+                sq = s['cs']['sq']
+                col_b = "#10b981" if sb >= 6 else "#ef4444" if sb <= 4 else "#94a3b8"
+                col_q = "#10b981" if sq >= 6 else "#ef4444" if sq <= 4 else "#94a3b8"
+                
+                base, quote = s['symbol'].split('_')
+                draw_meter(base, sb, col_b)
+                draw_meter(quote, sq, col_q)
+            else:
+                st.info("N/A (Indice)")
+        
+        # Colonne Droite : MTF (Institutionnel)
+        with c2:
+            st.markdown("###### 🏛️ Tendance MTF")
+            mtf = s['mtf']
+            for tf, trend in mtf.items():
+                css_class = "badge-mtf badge-bull" if trend == "Bullish" else "badge-mtf badge-bear" if trend == "Bearish" else "badge-mtf"
+                st.markdown(f"<span class='{css_class}'>{tf}: {trend}</span>", unsafe_allow_html=True)
             
-            b_score = s['cs']['b_score']
-            q_score = s['cs']['q_score']
-            
-            # Couleurs dynamiques (Vert si fort, Rouge si faible, Gris si moyen)
-            def get_col(val): return "#10b981" if val >= 6 else "#ef4444" if val <= 4 else "#94a3b8"
-            
-            with c1: draw_meter_bar(base, b_score, get_col(b_score))
-            with c2: draw_meter_bar(quote, q_score, get_col(q_score))
-            
+            st.markdown(f"<div style='margin-top:10px;font-size:0.8em;color:#94a3b8;'>RSI M5: {s['rsi']:.1f}</div>", unsafe_allow_html=True)
+
+        # Bas : MARKET MAP (Barchart)
+        if s['cs']:
             st.markdown("---")
-            
-            # SECTION 2 : VISUEL "BARCHART MARKET MAP"
-            st.markdown("##### 🗺️ Market Map (Contexte)")
-            st.caption(f"Comment {base} performe contre les autres ce jour :")
-            
-            # On affiche les 6 principales croix pour montrer si c'est "Tout Vert" ou "Tout Rouge"
+            st.markdown("###### 🗺️ Market Map (Preuve de Force)")
             cols = st.columns(6)
-            map_data = s['cs']['map'][:6] # Top 6 mouvements
-            
+            map_data = s['cs']['map'][:6] # Top 6
             for i, item in enumerate(map_data):
                 with cols[i]:
                     val = item['val']
-                    col = "#10b981" if val > 0 else "#ef4444"
                     arrow = "▲" if val > 0 else "▼"
+                    c_txt = "#10b981" if val > 0 else "#ef4444"
                     st.markdown(f"""
-                    <div style="text-align:center;background:#1e293b;border-radius:5px;padding:5px;">
-                        <div style="font-size:0.7em;color:#94a3b8;">vs {item['vs']}</div>
-                        <div style="color:{col};font-weight:bold;font-size:0.9em;">{arrow}</div>
+                    <div style="text-align:center;background:#1e293b;border-radius:4px;padding:4px;">
+                        <div style="font-size:0.7em;color:#cbd5e1;">vs {item['vs']}</div>
+                        <div style="color:{c_txt};font-weight:bold;">{arrow}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
 # ==========================================
-# 7. INTERFACE PRINCIPALE
+# 8. APP PRINCIPALE
 # ==========================================
-st.title("💎 Bluestar SNP3 Final Pro")
-st.markdown("Scanner Hybrid : Technique M5 + Force Fondamentale D1")
+st.title("💎 Bluestar SNP3 Ultimate")
+st.markdown("Le meilleur des deux mondes : Technique M5 + Force Fondamentale + MTF.")
 
-with st.expander("⚙️ Paramètres de Scan", expanded=True):
-    c1, c2 = st.columns(2)
-    score_min = c1.slider("Score Minimum", 5, 10, 7)
-    strict = c2.checkbox("🔥 Mode Sniper (Strict)", value=True, help="Si activé, le scanner rejette le signal si la force des devises n'est pas parfaitement alignée (Ex: Base > 6/10 et Quote < 4/10).")
+with st.expander("⚙️ Configuration", expanded=True):
+    k1, k2 = st.columns(2)
+    min_sc = k1.slider("Score Min", 5.0, 10.0, 7.0)
+    strict = k2.checkbox("🔥 Mode Sniper Strict", True, help="Exige une Force Fondamentale alignée ET une tendance MTF valide.")
 
-if st.button("🚀 LANCER LE SCAN DE FORCE", type="primary"):
-    # Clear cache manuel si besoin
-    # st.session_state.matrix_cache = None 
+if st.button("🚀 LANCER LE SCAN COMPLET", type="primary"):
+    # Reset cache partiel pour rafraichir le scan
+    st.session_state.cache = {} 
     
     api = OandaClient()
-    results = run_scanner(api, score_min, False, strict)
+    results = run_ultimate_scanner(api, min_sc, strict)
     
     if not results:
-        st.warning("Aucune opportunité trouvée avec ces filtres stricts. Le marché est peut-être en range.")
+        st.warning("Aucun setup parfait trouvé. Le marché est peut-être calme ou en range.")
     else:
-        st.success(f"{len(results)} Signaux Détectés !")
-        # Tri par score décroissant
+        st.success(f"{len(results)} Signaux 'Sniper' Détectés")
+        # Tri : Les meilleurs scores en premier
         results.sort(key=lambda x: x['score'], reverse=True)
         for sig in results:
-            display_signal_card(sig)
+            display_card(sig)
