@@ -6,6 +6,9 @@ import oandapyV20.endpoints.instruments as instruments
 import time
 import logging
 from datetime import datetime, timezone, timedelta
+import requests
+from bs4 import BeautifulSoup
+import re
 
 # ==========================================
 # 1. CONFIGURATION & SESSION
@@ -415,77 +418,235 @@ def calculate_mtf_score_gps(api, symbol, direction):
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}, 'confidence': 0}
 
 # ==========================================
-# 5. SYSTÈME DE FORCE DES DEVISES (OPTIMISÉ)
+# 5. SYSTÈME DE FORCE DES DEVISES (WEB SCRAPING)
 # ==========================================
+import requests
+from bs4 import BeautifulSoup
+import re
+
 class CurrencyStrengthSystem:
     @staticmethod
+    def scrape_currencystrengthmeter():
+        """Scraping depuis currencystrengthmeter.org"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            url = "https://currencystrengthmeter.org/"
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            scores = {}
+            
+            # Recherche des éléments contenant les forces
+            # Structure typique: divs avec classes comme "currency-item" ou similaire
+            currency_elements = soup.find_all('div', class_=re.compile(r'currency|strength'))
+            
+            for elem in currency_elements:
+                text = elem.get_text().strip()
+                # Extraction pattern: "USD: 7.5" ou similaire
+                match = re.search(r'(USD|EUR|GBP|JPY|AUD|CAD|CHF|NZD).*?(\d+\.?\d*)', text)
+                if match:
+                    currency = match.group(1)
+                    value = float(match.group(2))
+                    # Normalisation si nécessaire (certains sites utilisent 0-10, d'autres 0-100)
+                    if value > 10:
+                        value = value / 10
+                    scores[currency] = value
+            
+            if len(scores) >= 4:  # Au moins 4 devises trouvées
+                logger.info(f"CurrencyStrengthMeter: {len(scores)} devises scrapées")
+                return scores, 'currencystrengthmeter'
+            
+            logger.warning("CurrencyStrengthMeter: données insuffisantes")
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"Erreur scraping CurrencyStrengthMeter: {e}")
+            return None, None
+    
+    @staticmethod
+    def scrape_barchart():
+        """Scraping depuis barchart.com/forex/market-map"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            url = "https://www.barchart.com/forex/market-map"
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            scores = {}
+            
+            # Barchart utilise souvent des tables ou des divs avec data-attributes
+            # Recherche de patterns de performance (% change)
+            currency_data = soup.find_all(['tr', 'div'], attrs={'data-symbol': True})
+            
+            for elem in currency_data:
+                symbol = elem.get('data-symbol', '')
+                # Extraction des symboles forex (ex: "EURUSD")
+                if len(symbol) == 6 and symbol[:3] in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']:
+                    base = symbol[:3]
+                    quote = symbol[3:]
+                    
+                    # Recherche du % change
+                    change_elem = elem.find(['span', 'td'], class_=re.compile(r'change|percent'))
+                    if change_elem:
+                        change_text = change_elem.get_text().strip()
+                        match = re.search(r'(-?\d+\.?\d*)', change_text)
+                        if match:
+                            pct = float(match.group(1))
+                            scores[base] = scores.get(base, 0) + pct
+                            scores[quote] = scores.get(quote, 0) - pct
+            
+            # Normalisation 0-10
+            if scores:
+                vals = list(scores.values())
+                min_v, max_v = min(vals), max(vals)
+                if max_v != min_v:
+                    for k in scores:
+                        scores[k] = ((scores[k] - min_v) / (max_v - min_v)) * 10.0
+                
+                logger.info(f"Barchart: {len(scores)} devises scrapées")
+                return scores, 'barchart'
+            
+            logger.warning("Barchart: données insuffisantes")
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"Erreur scraping Barchart: {e}")
+            return None, None
+    
+    @staticmethod
     def calculate_matrix(api: OandaClient):
-        """Calcul de la matrice de force avec cache de 15 minutes"""
+        """Calcul de la matrice de force avec scraping multi-sources"""
         now = datetime.now(timezone.utc)
         
-        # Vérifier le cache
+        # Vérifier le cache (15 minutes)
         if st.session_state.matrix_cache and st.session_state.matrix_timestamp:
             age = (now - st.session_state.matrix_timestamp).total_seconds()
             if age < 900:  # 15 minutes
                 logger.debug("Utilisation du cache de la matrice")
                 return st.session_state.matrix_cache
 
-        with st.spinner("🔄 Analyse fondamentale du marché..."):
-            scores = {c: 0.0 for c in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']}
-            details = {c: [] for c in scores.keys()}
-            count = 0
+        with st.spinner("🔄 Récupération de la force des devises..."):
+            all_currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']
+            final_scores = {c: 5.0 for c in all_currencies}  # Valeur par défaut
+            sources_used = []
             
-            for pair in ALL_CROSSES:
-                try:
-                    df = api.get_candles(pair, "D", 2)
-                    if not df.empty and len(df) >= 2:
-                        op = df['open'].iloc[-1]
-                        cl = df['close'].iloc[-1]
-                        pct = ((cl - op) / op) * 100
-                        
-                        base, quote = pair.split('_')
-                        scores[base] += pct
-                        scores[quote] -= pct
-                        
-                        details[base].append({'vs': quote, 'val': pct})
-                        details[quote].append({'vs': base, 'val': -pct})
-                        count += 1
-                except Exception as e:
-                    logger.error(f"Erreur calcul force pour {pair}: {e}")
-                    continue
+            # Tentative 1: CurrencyStrengthMeter
+            scores1, source1 = CurrencyStrengthSystem.scrape_currencystrengthmeter()
+            if scores1:
+                sources_used.append(source1)
+                for curr in all_currencies:
+                    if curr in scores1:
+                        final_scores[curr] = scores1[curr]
+                logger.info("✅ Données de CurrencyStrengthMeter utilisées")
             
-            if count < len(ALL_CROSSES) * 0.5:
-                logger.warning("Moins de 50% des paires analysées pour la force des devises")
+            # Tentative 2: Barchart (si première source échoue ou pour moyenne)
+            scores2, source2 = CurrencyStrengthSystem.scrape_barchart()
+            if scores2:
+                sources_used.append(source2)
+                if scores1:  # Moyenne des deux sources
+                    for curr in all_currencies:
+                        if curr in scores1 and curr in scores2:
+                            final_scores[curr] = (scores1[curr] + scores2[curr]) / 2
+                        elif curr in scores2:
+                            final_scores[curr] = scores2[curr]
+                else:  # Utiliser uniquement Barchart
+                    for curr in all_currencies:
+                        if curr in scores2:
+                            final_scores[curr] = scores2[curr]
+                logger.info("✅ Données de Barchart utilisées")
             
-            # Normalisation 0-10 avec protection
-            vals = list(scores.values())
-            if not vals or all(v == 0 for v in vals):
-                logger.error("Aucune donnée valide pour la force des devises")
-                return None
-                
-            min_v, max_v = min(vals), max(vals)
+            # Si aucune source ne fonctionne, fallback sur calcul manuel
+            if not sources_used:
+                logger.warning("⚠️ Scraping échoué, utilisation du calcul manuel")
+                return CurrencyStrengthSystem.calculate_matrix_fallback(api)
             
-            final = {}
-            for k, v in scores.items():
-                if max_v != min_v:
-                    norm = ((v - min_v) / (max_v - min_v)) * 10.0
-                else:
-                    norm = 5.0
-                final[k] = norm
-
+            # Génération des détails (market map)
+            details = {c: [] for c in all_currencies}
+            for base in all_currencies:
+                for quote in all_currencies:
+                    if base != quote:
+                        gap = final_scores[base] - final_scores[quote]
+                        details[base].append({'vs': quote, 'val': gap})
+            
             result = {
-                'scores': final,
+                'scores': final_scores,
                 'details': details,
                 'timestamp': now,
-                'pairs_analyzed': count
+                'sources': sources_used
             }
             
             # Mise en cache
             st.session_state.matrix_cache = result
             st.session_state.matrix_timestamp = now
             
-            logger.info(f"Matrice calculée: {count} paires analysées")
+            logger.info(f"✅ Matrice générée depuis: {', '.join(sources_used)}")
             return result
+    
+    @staticmethod
+    def calculate_matrix_fallback(api: OandaClient):
+        """Calcul manuel en fallback si scraping échoue"""
+        logger.info("Fallback: calcul manuel de la force des devises")
+        
+        scores = {c: 0.0 for c in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD']}
+        details = {c: [] for c in scores.keys()}
+        count = 0
+        
+        for pair in ALL_CROSSES:
+            try:
+                df = api.get_candles(pair, "D", 2)
+                if not df.empty and len(df) >= 2:
+                    op = df['open'].iloc[-1]
+                    cl = df['close'].iloc[-1]
+                    pct = ((cl - op) / op) * 100
+                    
+                    base, quote = pair.split('_')
+                    scores[base] += pct
+                    scores[quote] -= pct
+                    
+                    details[base].append({'vs': quote, 'val': pct})
+                    details[quote].append({'vs': base, 'val': -pct})
+                    count += 1
+            except Exception as e:
+                logger.error(f"Erreur calcul force pour {pair}: {e}")
+                continue
+        
+        if count < len(ALL_CROSSES) * 0.3:
+            logger.error("Fallback échoué: données insuffisantes")
+            return None
+        
+        # Normalisation 0-10
+        vals = list(scores.values())
+        min_v, max_v = min(vals), max(vals)
+        
+        final = {}
+        for k, v in scores.items():
+            if max_v != min_v:
+                norm = ((v - min_v) / (max_v - min_v)) * 10.0
+            else:
+                norm = 5.0
+            final[k] = norm
+
+        now = datetime.now(timezone.utc)
+        result = {
+            'scores': final,
+            'details': details,
+            'timestamp': now,
+            'sources': ['manual_fallback']
+        }
+        
+        st.session_state.matrix_cache = result
+        st.session_state.matrix_timestamp = now
+        
+        logger.info(f"Fallback: {count} paires analysées")
+        return result
 
     @staticmethod
     def get_pair_analysis(matrix, base, quote):
@@ -1094,6 +1255,14 @@ def main():
                     stats_col2.metric("Signaux BUY", buy_signals)
                     stats_col3.metric("Signaux SELL", sell_signals)
                     stats_col4.metric("GPS Moyen", f"{avg_gps:.1f}/3")
+                    
+                    # Afficher les sources de données fondamentales
+                    if api and st.session_state.matrix_cache:
+                        sources = st.session_state.matrix_cache.get('sources', [])
+                        if sources:
+                            st.success(f"📡 Sources fondamentales: {', '.join(sources)}")
+                        else:
+                            st.info("📡 Sources fondamentales: Calcul manuel")
                 
                 # Affichage de chaque signal
                 for sig in results:
@@ -1115,4 +1284,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
