@@ -1269,4 +1269,9 @@ def main():
     st.markdown("""
     <div style='text-align:center;color:#64748b;font-size:0.85em;padding:20px 0;'>
         💎 Bluestar SNP3 GPS v2.1 CORRIGÉ<br>
-        <span style='font-size:0.75em;'>RSI Strict • GPS MTF • Smart Money •
+        <span style='font-size:0.75em;'>RSI Strict • GPS MTF • Smart Money • Force Fondamentale</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
