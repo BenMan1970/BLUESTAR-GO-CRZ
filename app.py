@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (ORIGINAL)
+# 1. CONFIGURATION & STYLE (STRICTEMENT ORIGINAL)
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
@@ -84,7 +84,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API
+# 2. CLIENT API (AVEC VOLUME)
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 
@@ -250,6 +250,7 @@ class SmartIndicators:
 
     @staticmethod
     def detect_institutional_fvg(df, atr):
+        # FVG avec logique Mitigation (LuxAlgo style)
         if len(df) < 5: return False, None
         curr_close = df['close'].iloc[-1]
         for i in range(1, 4):
@@ -257,10 +258,15 @@ class SmartIndicators:
             high_C, low_C = df['high'].iloc[-i], df['low'].iloc[-i]
             min_gap = atr * 0.3
             
+            # BULLISH
             if low_C > high_A:
-                if (low_C - high_A) > min_gap and curr_close > high_A: return True, "BULL"
+                if (low_C - high_A) > min_gap:
+                    if curr_close > high_A: return True, "BULL" # Mitigation check
+            
+            # BEARISH
             if high_C < low_A:
-                if (low_A - high_C) > min_gap and curr_close < low_A: return True, "BEAR"
+                if (low_A - high_C) > min_gap:
+                    if curr_close < low_A: return True, "BEAR" # Mitigation check
         return False, None
 
     @staticmethod
@@ -319,7 +325,7 @@ def get_pair_analysis_math(scores, pct_changes, base, quote):
     return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. SCANNER & SCORING "HEDGE FUND"
+# 6. SCANNER & SCORING "ROBUSTE V2"
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -342,53 +348,49 @@ def run_scan(api, min_score, strict_mode):
             obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             price = df['close'].iloc[-1]
             
-            # 1. Trigger Signal (Permission M5)
+            # 1. Trigger Signal
             signal_type = None
             if trend_hma == 1:
-                if rsi < 65: signal_type = "BUY"
+                if rsi < 70: signal_type = "BUY"
             elif trend_hma == -1:
-                if rsi > 35: signal_type = "SELL"
+                if rsi > 30: signal_type = "SELL"
             if not signal_type: continue
             
-            # 2. SCORING INSTITUTIONNEL (BASE 0)
-            score = 0.0
+            # 2. SCORING TUNED V2 (Base 3.0)
+            score = 3.0
             
-            # A. SOCLE MACRO (Max 4.0)
+            # GPS
+            mtf = calculate_mtf_score_gps(api, sym, signal_type)
+            if mtf['quality'] in ['A', 'A+']: score += 2.0
+            elif mtf['quality'] == 'B+': score += 1.5
+            elif mtf['quality'] == 'B': score += 1.0
+            
+            # Matrice Fonda
             cs_data = {}
             if "_" in sym and "XAU" not in sym and "US30" not in sym:
                 base, quote = sym.split('_')
                 sb, sq, gap, map_d = get_pair_analysis_math(scores, pct_changes, base, quote)
                 cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d, 'base': base, 'quote': quote}
                 
-                # Matrice Weights
                 if signal_type == "BUY":
-                    if gap > 1.0: score += 2.5      # Alignement Fort
-                    elif gap > 0.5: score += 1.5    # Alignement Correct
-                    elif gap < -0.5: score -= 4.0   # KILL SWITCH
-                else: # SELL
-                    if gap < -1.0: score += 2.5
-                    elif gap < -0.5: score += 1.5
-                    elif gap > 0.5: score -= 4.0
+                    if gap > 1.0: score += 2.0
+                    elif gap > 0.2: score += 1.0
+                    elif gap < -1.0: score -= 2.0
+                else:
+                    if gap < -1.0: score += 2.0
+                    elif gap < -0.2: score += 1.0
+                    elif gap > 1.0: score -= 2.0
             else:
-                score += 1.5 # Bonus pour actifs hors devises (Or/Indices)
+                score += 1.0 # Or/Indices
             
-            # GPS Weights
-            mtf = calculate_mtf_score_gps(api, sym, signal_type)
-            if mtf['quality'] == 'A': score += 1.5
-            elif mtf['quality'] == 'B+' or mtf['quality'] == 'B': score += 1.0
+            # RSI Timing
+            if 40 <= rsi <= 60: score += 1.0
             
-            # B. TRIGGER & MOMENTUM (Max 2.5)
-            # RSI Weights
-            if 45 <= rsi <= 55: score += 1.5        # Golden Zone (Pullback parfait)
-            elif 35 <= rsi <= 65: score += 1.0      # Acceptable
-            
-            # C. ALPHA BONUS (Max 3.0)
-            # FVG Mitigated
+            # BONUS (Smart Money & Volume)
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
                     score += 1.5
             
-            # OBV Volume (Turbo)
             obv_status = None
             if signal_type == "BUY" and obv_pump:
                 score += 1.5
@@ -397,14 +399,14 @@ def run_scan(api, min_score, strict_mode):
                 score += 1.5
                 obv_status = "DUMP"
                 
-            # D. PENALTIES
+            # PENALITIES (Ajustée pour marché calme)
             atr_pct = (atr / price) * 100
-            if atr_pct < 0.04: score -= 2.0 # Volatilité morte
+            if atr_pct < 0.02: score -= 1.0
             
-            # Limites
+            # Limit
             final_score = min(10.0, max(0.0, score))
             
-            # Filtre Final
+            # Filtre
             if final_score < min_score: continue
             
             # Risk Calc
@@ -426,7 +428,7 @@ def run_scan(api, min_score, strict_mode):
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 7. AFFICHAGE (STRICTEMENT ORIGINAL)
+# 7. AFFICHAGE (100% ORIGINAL)
 # ==========================================
 def draw_mini_meter(label, val, color):
     w = min(100, max(0, val*10))
@@ -533,7 +535,8 @@ def main():
     with st.sidebar:
         st.header("Paramètres")
         min_score = st.slider("Score Min", 5.0, 10.0, 6.0, 0.5)
-        strict_mode = st.checkbox("🔥 Mode Sniper", False)
+        # ✅ Mode Sniper activé par défaut (value=True)
+        strict_mode = st.checkbox("🔥 Mode Sniper", value=True)
     
     if st.button("🚀 LANCER LE SCAN", type="primary"):
         st.session_state.cache = {}
