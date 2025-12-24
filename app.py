@@ -7,11 +7,10 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (ORIGINAL)
+# 1. CONFIGURATION & STYLE (100% ORIGINAL)
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # CSS STRICTEMENT IDENTIQUE À L'ORIGINAL
 st.markdown("""
@@ -66,6 +65,7 @@ st.markdown("""
 
     .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     .badge-gps { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
+    .badge-vol { background: linear-gradient(135deg, #ea580c 0%, #f97316 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     
     .risk-box {
         background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px;
@@ -85,7 +85,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API
+# 2. CLIENT API (MODIFIÉ POUR LE VOLUME)
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 
@@ -101,7 +101,6 @@ class OandaClient:
 
     def get_candles(self, instrument, granularity, count):
         key = f"{instrument}_{granularity}"
-        # Cache simple 60s
         if key in st.session_state.cache:
             ts, data = st.session_state.cache[key]
             if (datetime.now() - ts).total_seconds() < 60: return data
@@ -116,7 +115,8 @@ class OandaClient:
                     data.append({
                         'time': pd.to_datetime(c['time']),
                         'open': float(c['mid']['o']), 'high': float(c['mid']['h']),
-                        'low': float(c['mid']['l']), 'close': float(c['mid']['c'])
+                        'low': float(c['mid']['l']), 'close': float(c['mid']['c']),
+                        'volume': int(c['volume']) # ✅ AJOUT DU VOLUME ICI
                     })
             df = pd.DataFrame(data)
             if not df.empty:
@@ -135,7 +135,7 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. GPS INSTITUTIONNEL (LOGIQUE ORIGINALE)
+# 3. GPS INSTITUTIONNEL (ORIGINAL)
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
@@ -185,12 +185,10 @@ def calc_institutional_trend_intraday(df):
     return "Range", 30
 
 def calculate_mtf_score_gps(api, symbol, direction):
-    # Calcul complet du GPS (Original)
     try:
         df_d = api.get_candles(symbol, "D", 300)
         df_h4 = api.get_candles(symbol, "H4", 200)
         df_h1 = api.get_candles(symbol, "H1", 200)
-        
         if df_d.empty: return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
 
         d_res = df_d.copy().set_index('time')
@@ -206,36 +204,29 @@ def calculate_mtf_score_gps(api, symbol, direction):
         trends['H1'], scores['H1'] = calc_institutional_trend_intraday(df_h1)
         
         target = 'Bullish' if direction == 'BUY' else 'Bearish'
-        w_score, perfect = 0, 0
-        
+        w_score = 0
         for tf, trend in trends.items():
             weight = MTF_WEIGHTS.get(tf, 1.0)
-            if trend == target:
-                w_score += weight * (scores[tf] / 100)
-                perfect += weight
+            if trend == target: w_score += weight * (scores[tf] / 100)
                 
         alignment_pct = (w_score / TOTAL_WEIGHT) * 100
         quality = 'C'
         if trends['D'] == target and trends['W'] == target: quality = 'A' if trends['M'] == target else 'B+'
         elif trends['D'] == target: quality = 'B'
         
-        # Mapping Score GPS 0-3
         final_score = 1.0
         if quality == 'A': final_score = 3.0
         elif quality == 'B+': final_score = 2.5
         elif quality == 'B': final_score = 2.0
         
         return {
-            'score': final_score,
-            'quality': quality,
-            'alignment': f"{alignment_pct:.0f}%",
-            'analysis': trends
+            'score': final_score, 'quality': quality, 'alignment': f"{alignment_pct:.0f}%", 'analysis': trends
         }
     except:
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
 
 # ==========================================
-# 4. INDICATEURS & LOGIQUE (AMÉLIORÉS MAIS INVISIBLES)
+# 4. INDICATEURS COMPLETS (+ OBV)
 # ==========================================
 class SmartIndicators:
     @staticmethod
@@ -264,30 +255,53 @@ class SmartIndicators:
     def detect_institutional_fvg(df, atr):
         if len(df) < 5: return False, None
         for i in range(1, 4):
-            # Gap > 30% ATR pour éviter le bruit
             gap_threshold = atr * 0.3
             if df['low'].iloc[-i] > df['high'].iloc[-(i+2)] + gap_threshold: return True, "BULL"
             if df['high'].iloc[-i] < df['low'].iloc[-(i+2)] - gap_threshold: return True, "BEAR"
         return False, None
+    
+    @staticmethod
+    def detect_obv_pump(df, length=20, sigma=1.5):
+        """
+        ✅ NOUVEL INDICATEUR OBV PUMP/DUMP
+        Détecte les anomalies de volume significatives
+        """
+        try:
+            # Calcul OBV
+            change = df['close'].diff()
+            vol = df['volume']
+            obv_direction = np.where(change > 0, vol, np.where(change < 0, -vol, 0))
+            obv = pd.Series(obv_direction).cumsum()
+            
+            # Bandes de Bollinger sur OBV
+            obv_sma = obv.rolling(window=length).mean()
+            obv_std = obv.rolling(window=length).std()
+            
+            upper_band = obv_sma + (sigma * obv_std)
+            lower_band = obv_sma - (sigma * obv_std)
+            
+            curr_obv = obv.iloc[-1]
+            
+            is_pump = curr_obv > upper_band.iloc[-1]
+            is_dump = curr_obv < lower_band.iloc[-1]
+            
+            return is_pump, is_dump
+            
+        except Exception:
+            return False, False
 
 # ==========================================
-# 5. MOTEUR MATHÉMATIQUE (REMPLACE LE SCRAPING)
+# 5. MATRICE FONDAMENTALE MATHÉMATIQUE
 # ==========================================
 def calculate_math_matrix(api):
-    # Remplace le scraping par un calcul précis via l'API
-    prices = {}
-    pct_changes = {}
-    
-    # On récupère les 28 paires majeures pour la matrice
+    prices, pct_changes = {}, {}
     forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
     
     for sym in forex_pairs:
         df = api.get_candles(sym, "H1", 50)
         if not df.empty:
             prices[sym] = df['close']
-            op = df['open'].iloc[-1]
-            cl = df['close'].iloc[-1]
-            pct_changes[sym] = ((cl - op) / op) * 100
+            pct_changes[sym] = ((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
             
     if not prices: return None, None
     
@@ -295,49 +309,32 @@ def calculate_math_matrix(api):
     scores = {}
     currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
     
-    # Calcul score 0-10 basé sur RSI H1
     for curr in currencies:
         vals = []
         for opp in currencies:
             if curr == opp: continue
             pair_d, pair_i = f"{curr}_{opp}", f"{opp}_{curr}"
-            
             if pair_d in df_p.columns:
-                rsi = SmartIndicators.calculate_rsi(df_p[pair_d]).iloc[-1]
-                vals.append(((rsi-50)/50+1)*5)
+                vals.append(((SmartIndicators.calculate_rsi(df_p[pair_d]).iloc[-1]-50)/50+1)*5)
             elif pair_i in df_p.columns:
-                rsi = SmartIndicators.calculate_rsi(1/df_p[pair_i]).iloc[-1]
-                vals.append(((rsi-50)/50+1)*5)
+                vals.append(((SmartIndicators.calculate_rsi(1/df_p[pair_i]).iloc[-1]-50)/50+1)*5)
         scores[curr] = np.mean(vals) if vals else 5.0
         
     return scores, pct_changes
 
 def get_pair_analysis_math(scores, pct_changes, base, quote):
-    # Simule l'ancienne fonction "get_pair_analysis" mais avec les données maths
-    s_b = scores.get(base, 5.0)
-    s_q = scores.get(quote, 5.0)
+    s_b, s_q = scores.get(base, 5.0), scores.get(quote, 5.0)
     gap = s_b - s_q
-    
-    # Construction de la "Map" locale pour cette paire
     map_data = []
-    # On cherche les mouvements les plus forts impliquant Base ou Quote
     for pair, pct in pct_changes.items():
         if base in pair or quote in pair:
-            # Formatage pour l'affichage
-            if pair == f"{base}_{quote}": continue # On saute la paire elle-même
-            
-            p_val = pct if pair.startswith(base) else -pct
-            vs_curr = pair.replace(base, "").replace("_", "")
-            if quote in pair: vs_curr = pair.replace(quote, "").replace("_", "")
-            
-            map_data.append({'vs': vs_curr, 'val': abs(pct), 'raw': pct})
-            
-    # Tri par volatilité
-    map_data.sort(key=lambda x: x['val'], reverse=True)
-    return s_b, s_q, gap, map_data[:6]
+            if pair == f"{base}_{quote}": continue
+            vs_curr = pair.replace(base, "").replace(quote, "").replace("_", "")
+            map_data.append({'vs': vs_curr, 'raw': pct})
+    return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. SCANNER & AFFICHAGE (VISUEL 100% ORIGINAL)
+# 6. SCANNER AVANCÉ (AVEC OBV & SCORING SUISSE)
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -348,7 +345,6 @@ def run_scan(api, min_score, strict_mode):
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
-        
         try:
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
@@ -358,18 +354,18 @@ def run_scan(api, min_score, strict_mode):
             rsi = SmartIndicators.calculate_rsi(df['close']).iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
             fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
+            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df) # ✅ OBV
             price = df['close'].iloc[-1]
             
-            # Détection Signal (Logique Souple)
+            # Signal
             signal_type = None
             if trend_hma == 1:
-                if rsi < 65: signal_type = "BUY" # On accepte jusqu'à 65 en trend fort
+                if rsi < 65: signal_type = "BUY"
             elif trend_hma == -1:
-                if rsi > 35: signal_type = "SELL" # On accepte jusqu'à 35 en trend fort
-                
+                if rsi > 35: signal_type = "SELL"
             if not signal_type: continue
             
-            # Scoring
+            # Scoring "Montre Suisse"
             final_score = 5.0
             
             # 1. Fonda
@@ -378,8 +374,6 @@ def run_scan(api, min_score, strict_mode):
                 base, quote = sym.split('_')
                 sb, sq, gap, map_d = get_pair_analysis_math(scores, pct_changes, base, quote)
                 cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d, 'base': base, 'quote': quote}
-                
-                # Scoring Fonda Souple
                 if signal_type == "BUY":
                     if gap > 0.5: final_score += 1.5
                     elif gap < -0.5: final_score -= 2.5
@@ -387,25 +381,33 @@ def run_scan(api, min_score, strict_mode):
                     if gap < -0.5: final_score += 1.5
                     elif gap > 0.5: final_score -= 2.5
             else:
-                final_score += 1.0 # Bonus pour Or/Indices (pas de fonda devises)
+                final_score += 1.0 
             
             # 2. GPS
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
-            final_score += (mtf['score'] * 0.5) # Max +1.5
+            final_score += (mtf['score'] * 0.5)
             
-            # 3. Technique
+            # 3. Technique (HMA/RSI/FVG)
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    final_score += 1.0 # Bonus FVG
+                    final_score += 1.0 # Bonus Smart Money
             
-            if 45 <= rsi <= 55: final_score += 1.0 # Bonus RSI Optimal
+            if 45 <= rsi <= 55: final_score += 1.0
+            
+            # 4. ✅ OBV Volume (LE TURBO)
+            obv_status = None
+            if signal_type == "BUY" and obv_pump:
+                final_score += 1.0 # Bonus Pump
+                obv_status = "PUMP"
+            elif signal_type == "SELL" and obv_dump:
+                final_score += 1.0 # Bonus Dump
+                obv_status = "DUMP"
             
             # Volatilité
             atr_pct = (atr / price) * 100
             if atr_pct < 0.04: final_score -= 1.0
             
             final_score = min(10.0, final_score)
-            
             if final_score < min_score: continue
             
             # Risk
@@ -417,15 +419,18 @@ def run_scan(api, min_score, strict_mode):
                 'score': final_score, 'quality': mtf['quality'],
                 'atr_pct': atr_pct, 'mtf': mtf, 'cs': cs_data,
                 'fvg': fvg, 'fvg_type': fvg_type, 'rsi': rsi,
+                'obv_status': obv_status, # ✅ Status pour affichage
                 'sl': sl, 'tp': tp, 'time': df['time'].iloc[-1]
             })
             
-        except Exception as e:
-            continue
+        except Exception: continue
             
     bar.empty()
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
+# ==========================================
+# 7. AFFICHAGE (100% ORIGINAL)
+# ==========================================
 def draw_mini_meter(label, val, color):
     w = min(100, max(0, val*10))
     st.markdown(f"""
@@ -438,7 +443,6 @@ def draw_mini_meter(label, val, color):
     """, unsafe_allow_html=True)
 
 def display_sig(s):
-    # FONCTION D'AFFICHAGE ORIGINALE (RESTITUÉE)
     is_buy = s['type'] == 'BUY'
     col_type = "#10b981" if is_buy else "#ef4444"
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
@@ -450,12 +454,7 @@ def display_sig(s):
     else: label = "⚠️ MOYEN"
 
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
-        
-        st.markdown(f"""
-        <div class="timestamp-box">
-            📅 Signal: {s['time'].strftime('%d/%m %H:%M UTC')}
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"<div class='timestamp-box'>📅 Signal: {s['time'].strftime('%d/%m %H:%M UTC')}</div>", unsafe_allow_html=True)
         
         st.markdown(f"""
         <div style="background:{bg};padding:15px;border-radius:8px;border:2px solid {col_type};display:flex;justify-content:space-between;align-items:center;">
@@ -470,11 +469,18 @@ def display_sig(s):
             </div>
         </div>""", unsafe_allow_html=True)
         
+        # BADGES (AVEC OBV INTÉGRÉ DISCRÈTEMENT)
         badges = []
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
         badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
         
+        # ✅ BADGE VOLUME (S'affiche uniquement si Pump/Dump détecté)
+        if s['obv_status'] == 'PUMP':
+            badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
+        elif s['obv_status'] == 'DUMP':
+            badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
+            
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         st.write("")
         
@@ -528,11 +534,7 @@ def display_sig(s):
         r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;'>{s['sl']:.5f}</div><div style='font-size:0.7em;'>1.8x ATR</div></div>", unsafe_allow_html=True)
         r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div><div style='font-size:0.7em;'>3x ATR</div></div>", unsafe_allow_html=True)
         r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>RISK:REWARD</div><div style='color:#3b82f6;font-weight:bold;'>1:1.67</div><div style='font-size:0.7em;'>Optimal</div></div>", unsafe_allow_html=True)
-        st.info("💡 Position: 1-2% du capital")
 
-# ==========================================
-# 7. MAIN
-# ==========================================
 def main():
     st.title("💎 BLUESTAR SNP3 GPS")
     
