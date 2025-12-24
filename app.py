@@ -87,6 +87,7 @@ st.markdown("""
 # 2. CLIENT API (AVEC VOLUME)
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
+if 'signal_history' not in st.session_state: st.session_state.signal_history = {}
 
 class OandaClient:
     def __init__(self):
@@ -233,8 +234,9 @@ class SmartIndicators:
         return tr.ewm(span=period, adjust=False).mean().iloc[-1]
 
     @staticmethod
-    def calculate_rsi(series, period=14):
-        delta = series.diff()
+    def calculate_rsi_ohlc4(df, period=7):
+        ohlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+        delta = ohlc4.diff()
         gain = (delta.where(delta > 0, 0)).fillna(0)
         loss = (-delta.where(delta < 0, 0)).fillna(0)
         rs = gain.ewm(alpha=1/period, adjust=False).mean() / loss.ewm(alpha=1/period, adjust=False).mean()
@@ -250,7 +252,6 @@ class SmartIndicators:
 
     @staticmethod
     def detect_institutional_fvg(df, atr):
-        # FVG avec logique Mitigation (LuxAlgo style)
         if len(df) < 5: return False, None
         curr_close = df['close'].iloc[-1]
         for i in range(1, 4):
@@ -258,15 +259,13 @@ class SmartIndicators:
             high_C, low_C = df['high'].iloc[-i], df['low'].iloc[-i]
             min_gap = atr * 0.3
             
-            # BULLISH
             if low_C > high_A:
                 if (low_C - high_A) > min_gap:
-                    if curr_close > high_A: return True, "BULL" # Mitigation check
+                    if curr_close > high_A: return True, "BULL"
             
-            # BEARISH
             if high_C < low_A:
                 if (low_A - high_C) > min_gap:
-                    if curr_close < low_A: return True, "BEAR" # Mitigation check
+                    if curr_close < low_A: return True, "BEAR"
         return False, None
 
     @staticmethod
@@ -307,9 +306,10 @@ def calculate_math_matrix(api):
             if curr == opp: continue
             pair_d, pair_i = f"{curr}_{opp}", f"{opp}_{curr}"
             if pair_d in df_p.columns:
-                vals.append(((SmartIndicators.calculate_rsi(df_p[pair_d]).iloc[-1]-50)/50+1)*5)
+                vals.append(((SmartIndicators.calculate_rsi_ohlc4(pd.DataFrame({'open': df_p[pair_d], 'high': df_p[pair_d], 'low': df_p[pair_d], 'close': df_p[pair_d]})).iloc[-1]-50)/50+1)*5)
             elif pair_i in df_p.columns:
-                vals.append(((SmartIndicators.calculate_rsi(1/df_p[pair_i]).iloc[-1]-50)/50+1)*5)
+                inv_df = pd.DataFrame({'open': 1/df_p[pair_i], 'high': 1/df_p[pair_i], 'low': 1/df_p[pair_i], 'close': 1/df_p[pair_i]})
+                vals.append(((SmartIndicators.calculate_rsi_ohlc4(inv_df).iloc[-1]-50)/50+1)*5)
         scores[curr] = np.mean(vals) if vals else 5.0
     return scores, pct_changes
 
@@ -325,7 +325,86 @@ def get_pair_analysis_math(scores, pct_changes, base, quote):
     return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. SCANNER & SCORING "ROBUSTE V2"
+# 6. INSTITUTIONAL GRADE ENHANCEMENTS
+# ==========================================
+def check_signal_cooldown(symbol, hours=2):
+    """Évite les re-signaux trop fréquents sur le même asset"""
+    now = datetime.now()
+    if symbol in st.session_state.signal_history:
+        last_signal = st.session_state.signal_history[symbol]
+        if (now - last_signal).total_seconds() < hours * 3600:
+            return False
+    return True
+
+def detect_correlation_conflict(signals, new_signal):
+    """Détecte les conflits de corrélation (ex: EUR/USD BUY + GBP/USD SELL)"""
+    CORRELATED_PAIRS = {
+        'EUR_USD': ['GBP_USD', 'AUD_USD', 'NZD_USD'],
+        'GBP_USD': ['EUR_USD', 'AUD_USD', 'NZD_USD'],
+        'USD_JPY': ['USD_CHF', 'USD_CAD'],
+        'XAU_USD': ['EUR_USD']
+    }
+    
+    sym = new_signal['symbol']
+    typ = new_signal['type']
+    
+    if sym not in CORRELATED_PAIRS:
+        return False
+    
+    for existing in signals[-5:]:
+        if existing['symbol'] in CORRELATED_PAIRS[sym]:
+            if existing['type'] != typ:
+                return True
+    return False
+
+def get_session_multiplier():
+    """Bonus selon la session de trading active"""
+    utc_hour = datetime.now(timezone.utc).hour
+    
+    # Tokyo (23-08 UTC) - Paires JPY
+    if 23 <= utc_hour or utc_hour < 8:
+        return 1.15, ['JPY']
+    
+    # London (07-16 UTC) - EUR, GBP
+    elif 7 <= utc_hour < 16:
+        return 1.20, ['EUR', 'GBP']
+    
+    # New York (12-21 UTC) - USD, CAD
+    elif 12 <= utc_hour < 21:
+        return 1.15, ['USD', 'CAD']
+    
+    return 1.0, []
+
+def calculate_adaptive_risk(signal):
+    """Risk Management adaptatif selon qualité du signal"""
+    quality = signal['quality']
+    atr = signal['price'] * (signal['atr_pct'] / 100)
+    
+    # High Quality = SL serré, TP large
+    if quality == 'A':
+        sl_mult, tp_mult = 1.2, 4.5
+    elif quality == 'B+':
+        sl_mult, tp_mult = 1.5, 4.0
+    elif quality == 'B':
+        sl_mult, tp_mult = 1.8, 3.5
+    else:
+        sl_mult, tp_mult = 2.2, 3.0
+    
+    # Ajustement selon FVG + OBV
+    if signal['fvg'] and signal['obv_status']:
+        sl_mult *= 0.85  # SL plus serré si smart money + volume
+        tp_mult *= 1.15  # TP plus large
+    
+    is_buy = signal['type'] == 'BUY'
+    sl = signal['price'] - (atr * sl_mult) if is_buy else signal['price'] + (atr * sl_mult)
+    tp = signal['price'] + (atr * tp_mult) if is_buy else signal['price'] - (atr * tp_mult)
+    
+    rr = tp_mult / sl_mult
+    
+    return sl, tp, rr, sl_mult, tp_mult
+
+# ==========================================
+# 7. SCANNER INSTITUTIONAL GRADE
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -333,39 +412,58 @@ def run_scan(api, min_score, strict_mode):
     
     signals = []
     bar = st.progress(0)
+    session_mult, active_currencies = get_session_multiplier()
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
+        
+        # Cooldown check
+        if not check_signal_cooldown(sym):
+            continue
+        
         try:
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
             
-            # Data & Indicators
+            # OHLC4 pour RSI
+            df['ohlc4'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+            
+            # Indicators
             atr = SmartIndicators.calculate_atr(df)
-            rsi = SmartIndicators.calculate_rsi(df['close']).iloc[-1]
+            rsi = SmartIndicators.calculate_rsi_ohlc4(df).iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
             fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
             obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             price = df['close'].iloc[-1]
             
-            # 1. Trigger Signal
+            # ENTRY LOGIC (INTOUCHABLE)
             signal_type = None
             if trend_hma == 1:
-                if rsi < 70: signal_type = "BUY"
+                if rsi < 50:  # RSI sous médiane pour BUY
+                    signal_type = "BUY"
             elif trend_hma == -1:
-                if rsi > 30: signal_type = "SELL"
+                if rsi > 50:  # RSI sur médiane pour SELL
+                    signal_type = "SELL"
+            
             if not signal_type: continue
             
-            # 2. SCORING TUNED V2 (Base 3.0)
-            score = 3.0
+            # SCORING MULTIPLICATIF INSTITUTIONNEL
+            base_score = 5.0
+            multiplier = 1.0
             
-            # GPS
+            # 1. GPS (Facteur dominant)
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
-            if mtf['quality'] in ['A', 'A+']: score += 2.0
-            elif mtf['quality'] == 'B+': score += 1.5
-            elif mtf['quality'] == 'B': score += 1.0
+            if mtf['quality'] == 'A':
+                multiplier *= 1.50
+            elif mtf['quality'] == 'B+':
+                multiplier *= 1.35
+            elif mtf['quality'] == 'B':
+                multiplier *= 1.20
+            else:
+                multiplier *= 0.90
             
-            # Matrice Fonda
+            # 2. Matrice Fondamentale
+            fonda_factor = 1.0
             cs_data = {}
             if "_" in sym and "XAU" not in sym and "US30" not in sym:
                 base, quote = sym.split('_')
@@ -373,62 +471,107 @@ def run_scan(api, min_score, strict_mode):
                 cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d, 'base': base, 'quote': quote}
                 
                 if signal_type == "BUY":
-                    if gap > 1.0: score += 2.0
-                    elif gap > 0.2: score += 1.0
-                    elif gap < -1.0: score -= 2.0
+                    if gap > 1.5: fonda_factor = 1.40
+                    elif gap > 0.8: fonda_factor = 1.25
+                    elif gap > 0.3: fonda_factor = 1.10
+                    elif gap < -1.0: fonda_factor = 0.75
                 else:
-                    if gap < -1.0: score += 2.0
-                    elif gap < -0.2: score += 1.0
-                    elif gap > 1.0: score -= 2.0
+                    if gap < -1.5: fonda_factor = 1.40
+                    elif gap < -0.8: fonda_factor = 1.25
+                    elif gap < -0.3: fonda_factor = 1.10
+                    elif gap > 1.0: fonda_factor = 0.75
             else:
-                score += 1.0 # Or/Indices
+                fonda_factor = 1.15  # Bonus Or/Indices
             
-            # RSI Timing
-            if 40 <= rsi <= 60: score += 1.0
+            multiplier *= fonda_factor
             
-            # BONUS (Smart Money & Volume)
+            # 3. RSI Sweet Spot (Zone d'entrée optimale)
+            if signal_type == "BUY":
+                if 30 <= rsi <= 45:
+                    multiplier *= 1.25
+                elif 45 < rsi <= 50:
+                    multiplier *= 1.10
+            else:
+                if 55 <= rsi <= 70:
+                    multiplier *= 1.25
+                elif 50 <= rsi < 55:
+                    multiplier *= 1.10
+            
+            # 4. Smart Money Confluence
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    score += 1.5
+                    multiplier *= 1.30
             
+            # 5. Volume Anomaly
             obv_status = None
             if signal_type == "BUY" and obv_pump:
-                score += 1.5
+                multiplier *= 1.25
                 obv_status = "PUMP"
             elif signal_type == "SELL" and obv_dump:
-                score += 1.5
+                multiplier *= 1.25
                 obv_status = "DUMP"
-                
-            # PENALITIES (Ajustée pour marché calme)
+            
+            # 6. Session Multiplier
+            for curr in active_currencies:
+                if curr in sym:
+                    multiplier *= session_mult
+                    break
+            
+            # 7. Volatility Check (Pénalité ajustée)
             atr_pct = (atr / price) * 100
-            if atr_pct < 0.02: score -= 1.0
+            if atr_pct < 0.05:
+                multiplier *= 0.85
+            elif atr_pct < 0.08:
+                multiplier *= 0.95
             
-            # Limit
-            final_score = min(10.0, max(0.0, score))
+            # Score final
+            final_score = base_score * multiplier
+            final_score = min(10.0, max(0.0, final_score))
             
-            # Filtre
-            if final_score < min_score: continue
+            # Filtre strict mode
+            if strict_mode:
+                if final_score < 7.0: continue
+                if mtf['quality'] not in ['A', 'B+']: continue
+            elif final_score < min_score:
+                continue
             
-            # Risk Calc
-            sl = price - (atr*1.8) if signal_type == "BUY" else price + (atr*1.8)
-            tp = price + (atr*3.0) if signal_type == "BUY" else price - (atr*3.0)
+            # Correlation conflict check
+            if detect_correlation_conflict(signals, {'symbol': sym, 'type': signal_type}):
+                continue
             
-            signals.append({
+            # Temporary risk calc for signal object
+            sl_temp = price - (atr*1.8) if signal_type == "BUY" else price + (atr*1.8)
+            tp_temp = price + (atr*3.0) if signal_type == "BUY" else price - (atr*3.0)
+            
+            signal_obj = {
                 'symbol': sym, 'type': signal_type, 'price': price,
                 'score': final_score, 'quality': mtf['quality'],
                 'atr_pct': atr_pct, 'mtf': mtf, 'cs': cs_data,
                 'fvg': fvg, 'fvg_type': fvg_type, 'rsi': rsi,
                 'obv_status': obv_status,
-                'sl': sl, 'tp': tp, 'time': df['time'].iloc[-1]
-            })
+                'sl': sl_temp, 'tp': tp_temp, 'time': df['time'].iloc[-1],
+                'session_boost': session_mult > 1.0
+            }
             
-        except Exception: continue
+            # Adaptive risk management
+            sl_adapt, tp_adapt, rr, sl_m, tp_m = calculate_adaptive_risk(signal_obj)
+            signal_obj['sl'] = sl_adapt
+            signal_obj['tp'] = tp_adapt
+            signal_obj['rr'] = rr
+            signal_obj['sl_mult'] = sl_m
+            signal_obj['tp_mult'] = tp_m
+            
+            signals.append(signal_obj)
+            st.session_state.signal_history[sym] = datetime.now()
+            
+        except Exception: 
+            continue
             
     bar.empty()
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 7. AFFICHAGE (100% ORIGINAL)
+# 8. AFFICHAGE (100% ORIGINAL)
 # ==========================================
 def draw_mini_meter(label, val, color):
     w = min(100, max(0, val*10))
@@ -474,6 +617,7 @@ def display_sig(s):
         badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
         if s['obv_status'] == 'PUMP': badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
         elif s['obv_status'] == 'DUMP': badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
+        if s.get('session_boost'): badges.append("<span class='badge-vol' style='background:#6366f1'>🌍 SESSION</span>")
             
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         st.write("")
@@ -525,9 +669,9 @@ def display_sig(s):
         st.markdown("---")
         st.markdown("### ⚖️ Risk Management")
         r1, r2, r3 = st.columns(3)
-        r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;'>{s['sl']:.5f}</div><div style='font-size:0.7em;'>1.8x ATR</div></div>", unsafe_allow_html=True)
-        r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div><div style='font-size:0.7em;'>3x ATR</div></div>", unsafe_allow_html=True)
-        r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>RISK:REWARD</div><div style='color:#3b82f6;font-weight:bold;'>1:1.67</div><div style='font-size:0.7em;'>Optimal</div></div>", unsafe_allow_html=True)
+        r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;'>{s['sl']:.5f}</div><div style='font-size:0.7em;'>{s['sl_mult']:.1f}x ATR</div></div>", unsafe_allow_html=True)
+        r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div><div style='font-size:0.7em;'>{s['tp_mult']:.1f}x ATR</div></div>", unsafe_allow_html=True)
+        r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>RISK:REWARD</div><div style='color:#3b82f6;font-weight:bold;'>1:{s['rr']:.2f}</div><div style='font-size:0.7em;'>Adaptatif</div></div>", unsafe_allow_html=True)
 
 def main():
     st.title("💎 BLUESTAR SNP3 GPS")
@@ -535,7 +679,6 @@ def main():
     with st.sidebar:
         st.header("Paramètres")
         min_score = st.slider("Score Min", 5.0, 10.0, 6.0, 0.5)
-        # ✅ Mode Sniper activé par défaut (value=True)
         strict_mode = st.checkbox("🔥 Mode Sniper", value=True)
     
     if st.button("🚀 LANCER LE SCAN", type="primary"):
