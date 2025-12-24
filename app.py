@@ -285,33 +285,62 @@ class SmartIndicators:
             return False, False
 
 # ==========================================
-# 5. MATRICE FONDAMENTALE (MATHS)
+# 5. MATRICE FONDAMENTALE (RAW STRENGTH METHOD)
 # ==========================================
 def calculate_math_matrix(api):
-    prices, pct_changes = {}, {}
+    """
+    Calcul de force relative INSTITUTIONNELLE (méthode RAW)
+    Agrège les % moves de toutes les paires pour chaque devise
+    """
+    pct_changes = {}
     forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
+    
+    # Collecte des % change sur H1 (période optimale pour intraday)
     for sym in forex_pairs:
         df = api.get_candles(sym, "H1", 50)
-        if not df.empty:
-            prices[sym] = df['close']
-            pct_changes[sym] = ((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
-    if not prices: return None, None
+        if not df.empty and len(df) >= 2:
+            # % change depuis open de la première bougie
+            pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
     
-    df_p = pd.DataFrame(prices).ffill().bfill()
-    scores = {}
+    if not pct_changes: return None, None
+    
+    # Calcul RAW STRENGTH pour chaque devise
     currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
+    raw_scores = {}
+    
     for curr in currencies:
-        vals = []
-        for opp in currencies:
-            if curr == opp: continue
-            pair_d, pair_i = f"{curr}_{opp}", f"{opp}_{curr}"
-            if pair_d in df_p.columns:
-                vals.append(((SmartIndicators.calculate_rsi_ohlc4(pd.DataFrame({'open': df_p[pair_d], 'high': df_p[pair_d], 'low': df_p[pair_d], 'close': df_p[pair_d]})).iloc[-1]-50)/50+1)*5)
-            elif pair_i in df_p.columns:
-                inv_df = pd.DataFrame({'open': 1/df_p[pair_i], 'high': 1/df_p[pair_i], 'low': 1/df_p[pair_i], 'close': 1/df_p[pair_i]})
-                vals.append(((SmartIndicators.calculate_rsi_ohlc4(inv_df).iloc[-1]-50)/50+1)*5)
-        scores[curr] = np.mean(vals) if vals else 5.0
-    return scores, pct_changes
+        total_move = 0.0
+        pair_count = 0
+        
+        for pair, pct in pct_changes.items():
+            if curr not in pair: continue
+            
+            base, quote = pair.split('_')
+            
+            # Si curr est base : mouvement positif = force
+            if base == curr:
+                total_move += pct
+                pair_count += 1
+            
+            # Si curr est quote : mouvement négatif = force (inverse)
+            elif quote == curr:
+                total_move -= pct
+                pair_count += 1
+        
+        # Score RAW = somme des moves (peut être négatif)
+        raw_scores[curr] = total_move if pair_count > 0 else 0.0
+    
+    # Normalisation 0-10 (pour compatibilité affichage)
+    min_score = min(raw_scores.values())
+    max_score = max(raw_scores.values())
+    range_score = max_score - min_score if max_score != min_score else 1.0
+    
+    normalized_scores = {}
+    for curr, raw in raw_scores.items():
+        # Normalise entre 0-10 (5.0 = neutre)
+        normalized_scores[curr] = 5.0 + ((raw - min_score) / range_score - 0.5) * 10
+    
+    return normalized_scores, pct_changes
 
 def get_pair_analysis_math(scores, pct_changes, base, quote):
     s_b, s_q = scores.get(base, 5.0), scores.get(quote, 5.0)
@@ -697,3 +726,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+   
