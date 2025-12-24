@@ -7,12 +7,11 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (100% ORIGINAL)
+# 1. CONFIGURATION & STYLE (STRICTEMENT ORIGINAL)
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
-# CSS STRICTEMENT IDENTIQUE À L'ORIGINAL
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
@@ -85,7 +84,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API (MODIFIÉ POUR LE VOLUME)
+# 2. CLIENT API (AVEC VOLUME)
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 
@@ -116,7 +115,7 @@ class OandaClient:
                         'time': pd.to_datetime(c['time']),
                         'open': float(c['mid']['o']), 'high': float(c['mid']['h']),
                         'low': float(c['mid']['l']), 'close': float(c['mid']['c']),
-                        'volume': int(c['volume']) # ✅ AJOUT DU VOLUME ICI
+                        'volume': int(c['volume'])
                     })
             df = pd.DataFrame(data)
             if not df.empty:
@@ -135,7 +134,7 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. GPS INSTITUTIONNEL (ORIGINAL)
+# 3. GPS INSTITUTIONNEL (LOGIQUE ORIGINALE)
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
@@ -219,14 +218,12 @@ def calculate_mtf_score_gps(api, symbol, direction):
         elif quality == 'B+': final_score = 2.5
         elif quality == 'B': final_score = 2.0
         
-        return {
-            'score': final_score, 'quality': quality, 'alignment': f"{alignment_pct:.0f}%", 'analysis': trends
-        }
+        return {'score': final_score, 'quality': quality, 'alignment': f"{alignment_pct:.0f}%", 'analysis': trends}
     except:
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
 
 # ==========================================
-# 4. INDICATEURS COMPLETS (+ OBV)
+# 4. INDICATEURS INTELLIGENTS (OBV + FVG MITIGATION)
 # ==========================================
 class SmartIndicators:
     @staticmethod
@@ -253,45 +250,61 @@ class SmartIndicators:
 
     @staticmethod
     def detect_institutional_fvg(df, atr):
+        """
+        ✅ FVG 'Smart Money' AMÉLIORÉ
+        1. Taille > 30% ATR (Bruit)
+        2. Non Mitigated : On vérifie que le prix n'a pas déjà comblé le gap.
+        """
         if len(df) < 5: return False, None
+        
+        curr_close = df['close'].iloc[-1]
+        
         for i in range(1, 4):
-            gap_threshold = atr * 0.3
-            if df['low'].iloc[-i] > df['high'].iloc[-(i+2)] + gap_threshold: return True, "BULL"
-            if df['high'].iloc[-i] < df['low'].iloc[-(i+2)] - gap_threshold: return True, "BEAR"
+            # Candle A (gauche), B (gap), C (droite)
+            high_A = df['high'].iloc[-(i+2)]
+            low_A  = df['low'].iloc[-(i+2)]
+            high_C = df['high'].iloc[-i]
+            low_C  = df['low'].iloc[-i]
+            
+            min_gap = atr * 0.3
+            
+            # BULLISH
+            if low_C > high_A:
+                gap = low_C - high_A
+                if gap > min_gap:
+                    # Mitigation Check: Est-ce que le prix est revenu sous le gap ?
+                    if curr_close > high_A: return True, "BULL"
+            
+            # BEARISH
+            if high_C < low_A:
+                gap = low_A - high_C
+                if gap > min_gap:
+                    # Mitigation Check
+                    if curr_close < low_A: return True, "BEAR"
         return False, None
-    
+
     @staticmethod
     def detect_obv_pump(df, length=20, sigma=1.5):
-        """
-        ✅ NOUVEL INDICATEUR OBV PUMP/DUMP
-        Détecte les anomalies de volume significatives
-        """
+        """✅ OBV PUMP/DUMP DETECTOR"""
         try:
-            # Calcul OBV
             change = df['close'].diff()
             vol = df['volume']
             obv_direction = np.where(change > 0, vol, np.where(change < 0, -vol, 0))
             obv = pd.Series(obv_direction).cumsum()
             
-            # Bandes de Bollinger sur OBV
             obv_sma = obv.rolling(window=length).mean()
             obv_std = obv.rolling(window=length).std()
             
-            upper_band = obv_sma + (sigma * obv_std)
-            lower_band = obv_sma - (sigma * obv_std)
+            upper = obv_sma + (sigma * obv_std)
+            lower = obv_sma - (sigma * obv_std)
+            curr = obv.iloc[-1]
             
-            curr_obv = obv.iloc[-1]
-            
-            is_pump = curr_obv > upper_band.iloc[-1]
-            is_dump = curr_obv < lower_band.iloc[-1]
-            
-            return is_pump, is_dump
-            
-        except Exception:
+            return (curr > upper.iloc[-1]), (curr < lower.iloc[-1])
+        except:
             return False, False
 
 # ==========================================
-# 5. MATRICE FONDAMENTALE MATHÉMATIQUE
+# 5. MATRICE FONDAMENTALE (MATHS)
 # ==========================================
 def calculate_math_matrix(api):
     prices, pct_changes = {}, {}
@@ -319,7 +332,6 @@ def calculate_math_matrix(api):
             elif pair_i in df_p.columns:
                 vals.append(((SmartIndicators.calculate_rsi(1/df_p[pair_i]).iloc[-1]-50)/50+1)*5)
         scores[curr] = np.mean(vals) if vals else 5.0
-        
     return scores, pct_changes
 
 def get_pair_analysis_math(scores, pct_changes, base, quote):
@@ -334,7 +346,7 @@ def get_pair_analysis_math(scores, pct_changes, base, quote):
     return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. SCANNER AVANCÉ (AVEC OBV & SCORING SUISSE)
+# 6. SCANNER & SCORING
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -353,8 +365,8 @@ def run_scan(api, min_score, strict_mode):
             atr = SmartIndicators.calculate_atr(df)
             rsi = SmartIndicators.calculate_rsi(df['close']).iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
-            fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
-            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df) # ✅ OBV
+            fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr) # ✅ AVEC MITIGATION
+            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df) # ✅ AVEC VOLUME
             price = df['close'].iloc[-1]
             
             # Signal
@@ -365,7 +377,7 @@ def run_scan(api, min_score, strict_mode):
                 if rsi > 35: signal_type = "SELL"
             if not signal_type: continue
             
-            # Scoring "Montre Suisse"
+            # Scoring
             final_score = 5.0
             
             # 1. Fonda
@@ -381,26 +393,26 @@ def run_scan(api, min_score, strict_mode):
                     if gap < -0.5: final_score += 1.5
                     elif gap > 0.5: final_score -= 2.5
             else:
-                final_score += 1.0 
+                final_score += 1.0
             
             # 2. GPS
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
             final_score += (mtf['score'] * 0.5)
             
-            # 3. Technique (HMA/RSI/FVG)
+            # 3. Technique
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    final_score += 1.0 # Bonus Smart Money
+                    final_score += 1.0 # Bonus FVG Non Comblé
             
             if 45 <= rsi <= 55: final_score += 1.0
             
-            # 4. ✅ OBV Volume (LE TURBO)
+            # 4. ✅ OBV Volume (TURBO)
             obv_status = None
             if signal_type == "BUY" and obv_pump:
-                final_score += 1.0 # Bonus Pump
+                final_score += 1.0
                 obv_status = "PUMP"
             elif signal_type == "SELL" and obv_dump:
-                final_score += 1.0 # Bonus Dump
+                final_score += 1.0
                 obv_status = "DUMP"
             
             # Volatilité
@@ -419,7 +431,7 @@ def run_scan(api, min_score, strict_mode):
                 'score': final_score, 'quality': mtf['quality'],
                 'atr_pct': atr_pct, 'mtf': mtf, 'cs': cs_data,
                 'fvg': fvg, 'fvg_type': fvg_type, 'rsi': rsi,
-                'obv_status': obv_status, # ✅ Status pour affichage
+                'obv_status': obv_status,
                 'sl': sl, 'tp': tp, 'time': df['time'].iloc[-1]
             })
             
@@ -469,17 +481,13 @@ def display_sig(s):
             </div>
         </div>""", unsafe_allow_html=True)
         
-        # BADGES (AVEC OBV INTÉGRÉ DISCRÈTEMENT)
         badges = []
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
         badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
         
-        # ✅ BADGE VOLUME (S'affiche uniquement si Pump/Dump détecté)
-        if s['obv_status'] == 'PUMP':
-            badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
-        elif s['obv_status'] == 'DUMP':
-            badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
+        if s['obv_status'] == 'PUMP': badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
+        elif s['obv_status'] == 'DUMP': badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
             
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         st.write("")
