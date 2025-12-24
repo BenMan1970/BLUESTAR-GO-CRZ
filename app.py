@@ -938,26 +938,41 @@ def run_scan(api, min_score, strict_mode):
                     'map': map_d, 'base': base, 'quote': quote
                 }
                 
+                # ✅ SCORING FONDAMENTAL CORRIGÉ (PLUS STRICT)
                 if signal_type == 'BUY':
-                    if sb >= 6.5 and sq <= 3.5 and gap >= 3.0:
+                    if sb >= 7.0 and sq <= 3.0 and gap >= 4.0:
+                        fundamental_score = 3.0  # Excellent
+                    elif sb >= 6.0 and sq <= 4.0 and gap >= 2.0:
+                        fundamental_score = 2.5  # Très bon
+                    elif sb >= 5.5 and sq <= 4.5 and gap >= 1.5:
+                        fundamental_score = 2.0  # Bon
+                    elif sb >= 5.0 and sq <= 5.0 and gap >= 1.0:
+                        fundamental_score = 1.5  # Acceptable
+                    elif sb > sq and gap >= 0.5:  # ✅ CHANGÉ: gap minimum 0.5
+                        fundamental_score = 1.0  # Faible
+                    else:
+                        fundamental_score = 0  # ❌ Rejeté
+                else:  # SELL
+                    if sq >= 7.0 and sb <= 3.0 and gap <= -4.0:
                         fundamental_score = 3.0
-                    elif sb >= 5.5 and sq <= 4.5 and gap >= 1.0:
+                    elif sq >= 6.0 and sb <= 4.0 and gap <= -2.0:
+                        fundamental_score = 2.5
+                    elif sq >= 5.5 and sb <= 4.5 and gap <= -1.5:
                         fundamental_score = 2.0
-                    elif sb >= 5.0 and gap >= 0.5:
+                    elif sq >= 5.0 and sb <= 5.0 and gap <= -1.0:
                         fundamental_score = 1.5
-                    elif gap > 0:
+                    elif sq > sb and gap <= -0.5:  # ✅ CHANGÉ: gap minimum -0.5
                         fundamental_score = 1.0
-                else:
-                    if sq >= 6.5 and sb <= 3.5 and gap <= -3.0:
-                        fundamental_score = 3.0
-                    elif sq >= 5.5 and sb <= 4.5 and gap <= -1.0:
-                        fundamental_score = 2.0
-                    elif sq >= 5.0 and gap <= -0.5:
-                        fundamental_score = 1.5
-                    elif gap < 0:
-                        fundamental_score = 1.0
+                    else:
+                        fundamental_score = 0  # ❌ Rejeté
                 
-                if strict_mode and fundamental_score < 1.0:
+                # ✅ NOUVEAU FILTRE: Rejeter si fondamental = 0
+                if fundamental_score == 0:
+                    debug_info['filtered']['fundamental_invalid'] = debug_info['filtered'].get('fundamental_invalid', 0) + 1
+                    logger.debug(f"{sym} - Fondamental invalide: {base}={sb:.1f} vs {quote}={sq:.1f}, gap={gap:.2f}")
+                    continue
+                
+                if strict_mode and fundamental_score < 1.5:  # ✅ Seuil augmenté de 1.0 à 1.5
                     debug_info['filtered']['fundamental'] = debug_info['filtered'].get('fundamental', 0) + 1
                     continue
             else:
@@ -1316,7 +1331,8 @@ def main():
                             'rsi_invalid': 'RSI rejeté (hors zones)',
                             'rsi_weak': 'RSI faible (mode strict)',
                             'gps_weak': 'GPS trop faible',
-                            'fundamental': 'Fondamental faible',
+                            'fundamental_invalid': 'Fondamental invalide (gap < 0.5)',
+                            'fundamental': 'Fondamental trop faible (strict)',
                             'score_low': 'Score < minimum',
                             'error': 'Erreurs techniques'
                         }
