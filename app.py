@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (STRICTEMENT ORIGINAL)
+# 1. CONFIGURATION & STYLE (ORIGINAL)
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
@@ -84,7 +84,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API (AVEC VOLUME)
+# 2. CLIENT API
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 
@@ -134,7 +134,7 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. GPS INSTITUTIONNEL (LOGIQUE ORIGINALE)
+# 3. GPS INSTITUTIONNEL
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
@@ -223,7 +223,7 @@ def calculate_mtf_score_gps(api, symbol, direction):
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
 
 # ==========================================
-# 4. INDICATEURS INTELLIGENTS (OBV + FVG MITIGATION)
+# 4. INDICATEURS INTELLIGENTS
 # ==========================================
 class SmartIndicators:
     @staticmethod
@@ -250,55 +250,31 @@ class SmartIndicators:
 
     @staticmethod
     def detect_institutional_fvg(df, atr):
-        """
-        ✅ FVG 'Smart Money' AMÉLIORÉ
-        1. Taille > 30% ATR (Bruit)
-        2. Non Mitigated : On vérifie que le prix n'a pas déjà comblé le gap.
-        """
         if len(df) < 5: return False, None
-        
         curr_close = df['close'].iloc[-1]
-        
         for i in range(1, 4):
-            # Candle A (gauche), B (gap), C (droite)
-            high_A = df['high'].iloc[-(i+2)]
-            low_A  = df['low'].iloc[-(i+2)]
-            high_C = df['high'].iloc[-i]
-            low_C  = df['low'].iloc[-i]
-            
+            high_A, low_A = df['high'].iloc[-(i+2)], df['low'].iloc[-(i+2)]
+            high_C, low_C = df['high'].iloc[-i], df['low'].iloc[-i]
             min_gap = atr * 0.3
             
-            # BULLISH
             if low_C > high_A:
-                gap = low_C - high_A
-                if gap > min_gap:
-                    # Mitigation Check: Est-ce que le prix est revenu sous le gap ?
-                    if curr_close > high_A: return True, "BULL"
-            
-            # BEARISH
+                if (low_C - high_A) > min_gap and curr_close > high_A: return True, "BULL"
             if high_C < low_A:
-                gap = low_A - high_C
-                if gap > min_gap:
-                    # Mitigation Check
-                    if curr_close < low_A: return True, "BEAR"
+                if (low_A - high_C) > min_gap and curr_close < low_A: return True, "BEAR"
         return False, None
 
     @staticmethod
     def detect_obv_pump(df, length=20, sigma=1.5):
-        """✅ OBV PUMP/DUMP DETECTOR"""
         try:
             change = df['close'].diff()
             vol = df['volume']
             obv_direction = np.where(change > 0, vol, np.where(change < 0, -vol, 0))
             obv = pd.Series(obv_direction).cumsum()
-            
             obv_sma = obv.rolling(window=length).mean()
             obv_std = obv.rolling(window=length).std()
-            
             upper = obv_sma + (sigma * obv_std)
             lower = obv_sma - (sigma * obv_std)
             curr = obv.iloc[-1]
-            
             return (curr > upper.iloc[-1]), (curr < lower.iloc[-1])
         except:
             return False, False
@@ -309,19 +285,16 @@ class SmartIndicators:
 def calculate_math_matrix(api):
     prices, pct_changes = {}, {}
     forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
-    
     for sym in forex_pairs:
         df = api.get_candles(sym, "H1", 50)
         if not df.empty:
             prices[sym] = df['close']
             pct_changes[sym] = ((df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1]) * 100
-            
     if not prices: return None, None
     
     df_p = pd.DataFrame(prices).ffill().bfill()
     scores = {}
     currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
-    
     for curr in currencies:
         vals = []
         for opp in currencies:
@@ -346,7 +319,7 @@ def get_pair_analysis_math(scores, pct_changes, base, quote):
     return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. SCANNER & SCORING
+# 6. SCANNER & SCORING "HEDGE FUND"
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -361,15 +334,15 @@ def run_scan(api, min_score, strict_mode):
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
             
-            # Indicateurs
+            # Data & Indicators
             atr = SmartIndicators.calculate_atr(df)
             rsi = SmartIndicators.calculate_rsi(df['close']).iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
-            fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr) # ✅ AVEC MITIGATION
-            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df) # ✅ AVEC VOLUME
+            fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
+            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             price = df['close'].iloc[-1]
             
-            # Signal
+            # 1. Trigger Signal (Permission M5)
             signal_type = None
             if trend_hma == 1:
                 if rsi < 65: signal_type = "BUY"
@@ -377,52 +350,64 @@ def run_scan(api, min_score, strict_mode):
                 if rsi > 35: signal_type = "SELL"
             if not signal_type: continue
             
-            # Scoring
-            final_score = 5.0
+            # 2. SCORING INSTITUTIONNEL (BASE 0)
+            score = 0.0
             
-            # 1. Fonda
+            # A. SOCLE MACRO (Max 4.0)
             cs_data = {}
             if "_" in sym and "XAU" not in sym and "US30" not in sym:
                 base, quote = sym.split('_')
                 sb, sq, gap, map_d = get_pair_analysis_math(scores, pct_changes, base, quote)
                 cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d, 'base': base, 'quote': quote}
+                
+                # Matrice Weights
                 if signal_type == "BUY":
-                    if gap > 0.5: final_score += 1.5
-                    elif gap < -0.5: final_score -= 2.5
-                else:
-                    if gap < -0.5: final_score += 1.5
-                    elif gap > 0.5: final_score -= 2.5
+                    if gap > 1.0: score += 2.5      # Alignement Fort
+                    elif gap > 0.5: score += 1.5    # Alignement Correct
+                    elif gap < -0.5: score -= 4.0   # KILL SWITCH
+                else: # SELL
+                    if gap < -1.0: score += 2.5
+                    elif gap < -0.5: score += 1.5
+                    elif gap > 0.5: score -= 4.0
             else:
-                final_score += 1.0
+                score += 1.5 # Bonus pour actifs hors devises (Or/Indices)
             
-            # 2. GPS
+            # GPS Weights
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
-            final_score += (mtf['score'] * 0.5)
+            if mtf['quality'] == 'A': score += 1.5
+            elif mtf['quality'] == 'B+' or mtf['quality'] == 'B': score += 1.0
             
-            # 3. Technique
+            # B. TRIGGER & MOMENTUM (Max 2.5)
+            # RSI Weights
+            if 45 <= rsi <= 55: score += 1.5        # Golden Zone (Pullback parfait)
+            elif 35 <= rsi <= 65: score += 1.0      # Acceptable
+            
+            # C. ALPHA BONUS (Max 3.0)
+            # FVG Mitigated
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    final_score += 1.0 # Bonus FVG Non Comblé
+                    score += 1.5
             
-            if 45 <= rsi <= 55: final_score += 1.0
-            
-            # 4. ✅ OBV Volume (TURBO)
+            # OBV Volume (Turbo)
             obv_status = None
             if signal_type == "BUY" and obv_pump:
-                final_score += 1.0
+                score += 1.5
                 obv_status = "PUMP"
             elif signal_type == "SELL" and obv_dump:
-                final_score += 1.0
+                score += 1.5
                 obv_status = "DUMP"
-            
-            # Volatilité
+                
+            # D. PENALTIES
             atr_pct = (atr / price) * 100
-            if atr_pct < 0.04: final_score -= 1.0
+            if atr_pct < 0.04: score -= 2.0 # Volatilité morte
             
-            final_score = min(10.0, final_score)
+            # Limites
+            final_score = min(10.0, max(0.0, score))
+            
+            # Filtre Final
             if final_score < min_score: continue
             
-            # Risk
+            # Risk Calc
             sl = price - (atr*1.8) if signal_type == "BUY" else price + (atr*1.8)
             tp = price + (atr*3.0) if signal_type == "BUY" else price - (atr*3.0)
             
@@ -441,7 +426,7 @@ def run_scan(api, min_score, strict_mode):
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 7. AFFICHAGE (100% ORIGINAL)
+# 7. AFFICHAGE (STRICTEMENT ORIGINAL)
 # ==========================================
 def draw_mini_meter(label, val, color):
     w = min(100, max(0, val*10))
@@ -485,7 +470,6 @@ def display_sig(s):
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
         badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
-        
         if s['obv_status'] == 'PUMP': badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
         elif s['obv_status'] == 'DUMP': badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
             
