@@ -7,9 +7,9 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (INCHANGÉ)
+# 1. CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar SNP3 Pro Edge", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar SNP3 Ultimate", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -101,7 +101,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API
+# 2. CLIENT API & ASSETS
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 if 'signal_history' not in st.session_state: st.session_state.signal_history = {}
@@ -152,7 +152,20 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. MARKET REGIME (COEUR - INCHANGÉ MAIS ROBUSTE)
+# 3. HELPER DYNAMIQUE PAR ACTIF
+# ==========================================
+def get_asset_params(symbol):
+    """Retourne les seuils adaptés à la classe d'actif"""
+    if "XAU" in symbol:
+        return {'type': 'COMMODITY', 'min_atr': 0.08, 'adx_threshold': 20}
+    if "US30" in symbol or "NAS" in symbol or "SPX" in symbol:
+        return {'type': 'INDEX', 'min_atr': 0.12, 'adx_threshold': 22}
+    
+    # Forex par défaut
+    return {'type': 'FOREX', 'min_atr': 0.045, 'adx_threshold': 20}
+
+# ==========================================
+# 4. MARKET REGIME (COEUR)
 # ==========================================
 def calculate_adx(df, period=14):
     if len(df) < period + 1: return 0
@@ -184,29 +197,31 @@ def get_market_regime(api, symbol):
         df_d = api.get_candles(symbol, "D", 50)
         if df_h4.empty or df_d.empty: return "UNKNOWN", {}
         
+        # Paramètres dynamiques selon l'actif
+        params = get_asset_params(symbol)
+        
         atr_h4 = SmartIndicators.calculate_atr(df_h4, 14)
         atr_median = df_h4['close'].rolling(14).apply(lambda x: SmartIndicators.calculate_atr(df_h4.iloc[:len(x)], 14), raw=False).median()
         atr_ratio = atr_h4 / atr_median if atr_median > 0 else 1.0
         
-        adx_h4, adx_d = calculate_adx(df_h4, 14), calculate_adx(df_d, 14)
+        adx_h4 = calculate_adx(df_h4, 14)
         structure, s_score = detect_structure_htf(df_d)
         
-        regime_data = {'atr_ratio': atr_ratio, 'adx_h4': adx_h4, 'adx_d': adx_d, 'structure': structure}
+        regime_data = {'atr_ratio': atr_ratio, 'adx_h4': adx_h4, 'structure': structure}
         
-        # Kill Switch Binaire (Simplifié)
-        # ADX < 15 et Compression = RANGE = NO TRADE
+        # Logique Regime
         if atr_ratio < 0.75 and adx_h4 < 15: return "RANGE", regime_data
         
-        # Structure OK + ADX Correct = TREND
-        if adx_h4 > 20 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: return "TREND", regime_data
+        if adx_h4 > params['adx_threshold'] and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: 
+            return "TREND", regime_data
+        
         if adx_h4 > 25: return "TREND", regime_data
         
-        # Le reste = WEAK_TREND (Acceptable mais moins de points)
         return "WEAK_TREND", regime_data
     except: return "UNKNOWN", {}
 
 # ==========================================
-# 4. GPS SIMPLIFIÉ (D/W FOCUS)
+# 5. GPS & UTILS
 # ==========================================
 def ema(series, length): return series.ewm(span=length, adjust=False).mean()
 def sma_local(series, length): return series.rolling(window=length).mean()
@@ -222,34 +237,23 @@ def calc_institutional_trend(df):
     return "Range"
 
 def calculate_mtf_gps(api, symbol, direction):
-    # Simplification: Focus Weekly + Daily (Structure)
     try:
         df_d = api.get_candles(symbol, "D", 250)
         if df_d.empty: return {'quality': 'N/A', 'analysis': {}}
-
         d_res = df_d.copy().set_index('time')
         df_w = d_res.resample('W-FRI').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
 
         trend_d = calc_institutional_trend(df_d)
         trend_w = calc_institutional_trend(df_w)
-        
         target = 'Bullish' if direction == 'BUY' else 'Bearish'
         
-        # Logic Binaire Institutionnelle
-        quality = 'C' # Par défaut (Rejet)
-        
-        if trend_d == target and trend_w == target:
-            quality = 'A' # Alignement parfait
-        elif trend_d == target:
-            quality = 'B' # Daily aligné, Weekly neutre/contraire (OK pour scalping)
+        quality = 'C'
+        if trend_d == target and trend_w == target: quality = 'A'
+        elif trend_d == target: quality = 'B'
             
         return {'quality': quality, 'analysis': {'D': trend_d, 'W': trend_w}}
-    except:
-        return {'quality': 'N/A', 'analysis': {}}
+    except: return {'quality': 'N/A', 'analysis': {}}
 
-# ==========================================
-# 5. INDICATEURS & UTILS
-# ==========================================
 class SmartIndicators:
     @staticmethod
     def calculate_atr(df, period=14):
@@ -301,8 +305,7 @@ def check_signal_cooldown(symbol, hours=2):
     now = datetime.now()
     if symbol in st.session_state.signal_history:
         last_signal = st.session_state.signal_history[symbol]
-        if (now - last_signal).total_seconds() < hours * 3600:
-            return False
+        if (now - last_signal).total_seconds() < hours * 3600: return False
     return True
 
 def detect_correlation_conflict(signals, new_signal):
@@ -316,12 +319,11 @@ def detect_correlation_conflict(signals, new_signal):
     typ = new_signal['type']
     if sym not in CORRELATED_PAIRS: return False
     for existing in signals[-5:]:
-        if existing['symbol'] in CORRELATED_PAIRS[sym] and existing['type'] != typ:
-            return True
+        if existing['symbol'] in CORRELATED_PAIRS[sym] and existing['type'] != typ: return True
     return False
 
 # ==========================================
-# 6. FILTRES BINAIRES & CONTEXTE (ADDITIF)
+# 6. SCANNER ADDITIF (ADAPTATIF & MULTI-MODE)
 # ==========================================
 def calculate_currency_strength(api):
     pct_changes = {}
@@ -332,10 +334,8 @@ def calculate_currency_strength(api):
             pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
     
     if not pct_changes: return None
-    
     currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
     raw_scores = {c: 0.0 for c in currencies}
-    
     for curr in currencies:
         for pair, pct in pct_changes.items():
             if curr in pair:
@@ -344,54 +344,62 @@ def calculate_currency_strength(api):
                 elif quote == curr: raw_scores[curr] -= pct
     return raw_scores
 
-def check_session_validity():
-    # Amélioration 1: Score de Contexte
-    utc_hour = datetime.now(timezone.utc).hour
-    # Session Londres (8-16) et NY (13-21) -> Bonus
-    if 8 <= utc_hour < 21:
-        return True # Active Session
-    return False
-
-# ==========================================
-# 7. SCANNER ADDITIF (LE COEUR DU CHANGEMENT)
-# ==========================================
-def run_scan(api, min_score):
+def run_scan(api, min_score, strict_mode):
     cs_scores = calculate_currency_strength(api)
-    if not cs_scores: return []
-    
     signals = []
     bar = st.progress(0)
     
-    regime_stats = {'TREND': 0, 'WEAK_TREND': 0, 'RANGE': 0, 'UNKNOWN': 0}
-    session_active = check_session_validity()
+    # Session Check (Heure Serveur ou UTC)
+    utc_hour = datetime.now(timezone.utc).hour
+    session_active = (8 <= utc_hour < 21)
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
         if not check_signal_cooldown(sym): continue
         
         try:
-            # --- 1. REGIME (Fondation) ---
-            regime, regime_data = get_market_regime(api, sym)
-            regime_stats.get(regime, 0)
-            if regime == "RANGE": continue # Kill switch
+            # 1. PARAMÈTRES DYNAMIQUES
+            asset_params = get_asset_params(sym)
             
-            # --- 2. DATA ---
+            # 2. REGIME
+            regime, regime_data = get_market_regime(api, sym)
+            
+            # LOGIQUE MODE : Veto vs Malus
+            if regime == "RANGE":
+                continue # Range est toujours toxique, même en mode Normal
+            
+            regime_malus = 0
+            if regime == "UNKNOWN" or regime == "WEAK_TREND":
+                if strict_mode: 
+                     # En strict, WEAK est accepté avec moins de points, mais UNKNOWN exclu
+                     if regime == "UNKNOWN": continue
+                else:
+                     # En normal, on tolère un peu plus
+                     pass
+            
+            # 3. DATA & INDICATORS
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
             df['ohlc4'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
             
             atr = SmartIndicators.calculate_atr(df)
             price = df['close'].iloc[-1]
+            atr_pct = (atr / price) * 100
             
-            # --- 3. TRIGGER M5 ---
+            # FILTRE VOLATILITÉ DYNAMIQUE
+            if strict_mode:
+                if atr_pct < asset_params['min_atr']: continue
+            else:
+                # Mode Normal : on tolère une volatilité un peu plus basse (80% du seuil)
+                if atr_pct < (asset_params['min_atr'] * 0.8): continue
+            
+            # 4. TRIGGER M5
             rsi_series = SmartIndicators.calculate_rsi_ohlc4(df)
             rsi = rsi_series.iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
-            
-            signal_type = None
             rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
             
-            # Cross + HMA (Logic Pure)
+            signal_type = None
             rsi_cross_up = (rsi_prev <= 50 and rsi >= 50)
             rsi_cross_down = (rsi_prev >= 50 and rsi <= 50)
             
@@ -400,7 +408,7 @@ def run_scan(api, min_score):
             
             if not signal_type: continue
             
-            # --- 4. SCORING ADDITIF (NOUVEAU) ---
+            # 5. SCORING ADDITIF (LE MOTEUR)
             current_score = 0.0
             
             # A. Regime Points
@@ -409,89 +417,86 @@ def run_scan(api, min_score):
             
             # B. GPS Points
             mtf = calculate_mtf_gps(api, sym, signal_type)
-            if mtf['quality'] == 'C': continue # VETO GPS
+            if strict_mode:
+                if mtf['quality'] == 'C': continue # VETO Strict
+            else:
+                if mtf['quality'] == 'C': current_score -= 2.0 # MALUS Normal
             
             if mtf['quality'] == 'A': current_score += 3.0
             elif mtf['quality'] == 'B': current_score += 2.0
             
-            # C. Currency Strength (Filtre + Points)
-            base, quote = sym.split('_') if "_" in sym else (None, None)
+            # C. Currency Strength / Asset Strength
             cs_aligned = False
-            if base and quote:
-                gap = cs_scores[base] - cs_scores[quote]
+            base, quote = sym.split('_') if "_" in sym else (None, None)
+            
+            if asset_params['type'] == 'FOREX' and cs_scores and base and quote:
+                gap = cs_scores.get(base, 0) - cs_scores.get(quote, 0)
                 if signal_type == "BUY":
-                    if gap < -0.5: continue # VETO CS (Opposé)
                     if gap > 0.5: 
-                        current_score += 1.5
-                        cs_aligned = True
+                        current_score += 1.5; cs_aligned = True
+                    elif gap < -0.5:
+                        if strict_mode: continue # VETO CS
+                        else: current_score -= 2.0 # Malus CS
                 else: # SELL
-                    if gap > 0.5: continue # VETO CS (Opposé)
-                    if gap < -0.5: 
-                        current_score += 1.5
-                        cs_aligned = True
+                    if gap < -0.5:
+                        current_score += 1.5; cs_aligned = True
+                    elif gap > 0.5:
+                        if strict_mode: continue
+                        else: current_score -= 2.0
+                        
+            else:
+                # COMPENSATION POUR GOLD & INDICES
+                # Ils n'ont pas de CS, donc on leur donne un "Bonus Structurel" 
+                # si le reste est propre pour compenser les 1.5 pts manquants
+                if regime == "TREND" and mtf['quality'] in ['A', 'B']:
+                    current_score += 1.5 # Bonus compensatoire d'actif unique
             
-            # D. Contexte (Session)
+            # D. Contexte
             if session_active: current_score += 1.0
-            elif "JPY" not in sym: # Si hors session et pas JPY
-                current_score -= 1.0 # Malus hors session
+            elif strict_mode and "JPY" not in sym: current_score -= 1.0
             
-            # E. Technique (RSI / FVG / Vol)
+            # E. Technique
             fvg, fvg_type = SmartIndicators.detect_fvg(df, atr)
             obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             
-            # RSI Freshness (déjà checké par le cross, bonus point)
-            current_score += 1.0 
-            
-            # FVG
-            if fvg:
-                if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    current_score += 0.8
-            
-            # Volume
+            current_score += 1.0 # RSI Freshness bonus de base
+            if fvg and ((signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR")):
+                current_score += 0.8
+                
             obv_ok = (signal_type == "BUY" and obv_pump) or (signal_type == "SELL" and obv_dump)
             if obv_ok: current_score += 0.7
             
-            # F. Volatilité (Binaire)
-            atr_pct = (atr / price) * 100
-            if atr_pct < 0.045: continue # VETO ATR (Trop calme)
-            if 0.045 <= atr_pct <= 0.15: current_score += 1.0 # Volatilité saine
+            # F. Volatilité (Points)
+            if atr_pct >= asset_params['min_atr']: current_score += 1.0
             
-            # --- 5. VALIDATION ---
-            # Score Max Théorique ~ 10
-            # Seuil minimum
+            # 6. FINAL CHECK
             if current_score < min_score: continue
-            
             if detect_correlation_conflict(signals, {'symbol': sym, 'type': signal_type}): continue
             
-            # --- 6. RISK MANAGEMENT ---
-            # SL basé sur ATR (Pas de calcul complexe, simple et robuste)
+            # 7. RISK
             sl_mult = 1.5 if mtf['quality'] == 'A' else 2.0
-            tp_mult = 3.0
-            
+            # Gold/Indices demandent souvent un peu plus d'air
+            if asset_params['type'] != 'FOREX': sl_mult += 0.5
+                
             sl = price - (atr * sl_mult) if signal_type == "BUY" else price + (atr * sl_mult)
-            tp = price + (atr * tp_mult) if signal_type == "BUY" else price - (atr * tp_mult)
+            tp = price + (atr * 3.0) if signal_type == "BUY" else price - (atr * 3.0)
             
             signals.append({
                 'symbol': sym, 'type': signal_type, 'price': price,
                 'score': current_score, 'regime': regime,
                 'mtf': mtf, 'atr_pct': atr_pct, 'time': df['time'].iloc[-1],
-                'sl': sl, 'tp': tp, 'rr': tp_mult/sl_mult,
-                'details': {
-                    'cs_aligned': cs_aligned,
-                    'session': session_active,
-                    'fvg': fvg,
-                    'vol': obv_ok
-                }
+                'sl': sl, 'tp': tp, 'rr': 3.0/sl_mult,
+                'details': {'cs_aligned': cs_aligned, 'session': session_active, 'fvg': fvg, 'vol': obv_ok}
             })
             st.session_state.signal_history[sym] = datetime.now()
             
-        except Exception as e: continue
+        except Exception: continue
             
     bar.empty()
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 8. AFFICHAGE (ADAPTÉ AU NOUVEAU SCORING)
+# 7. AFFICHAGE
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -516,7 +521,6 @@ def display_sig(s):
             </div>
         </div>""", unsafe_allow_html=True)
         
-        # Badges contextuels
         badges = []
         badges.append(f"<span class='badge-regime'>{s['regime']}</span>")
         badges.append(f"<span class='badge-gps'>GPS {s['mtf']['quality']}</span>")
@@ -538,22 +542,40 @@ def display_sig(s):
         r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div></div>", unsafe_allow_html=True)
 
 def main():
-    st.title("💎 BLUESTAR PRO EDGE")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Scoring Additif | Filtres Binaires | Version Simplifiée</p>", unsafe_allow_html=True)
+    st.title("💎 BLUESTAR ULTIMATE")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Multi-Asset | Dual Mode | Additive Scoring</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("Paramètres")
+        # LE MODE STRICT EST ACTIVÉ PAR DÉFAUT
+        strict_mode = st.checkbox("🔥 Mode Strict (Veto)", value=True)
+        
         min_score = st.slider("Score Min", 5.0, 10.0, 7.0, 0.5)
-        st.info("ℹ️ **Scoring Additif:**\n\n+2.0 Regime\n+3.0 GPS A\n+1.5 CS Align\n+1.0 Session\n+1.0 RSI\n+0.8 FVG")
+        
+        st.markdown("---")
+        st.markdown("### 📊 Sensibilité Actifs")
+        st.markdown("""
+        <div style='font-size:0.8em;color:#94a3b8;'>
+        <b>Forex:</b> ATR > 0.045%<br>
+        <b>Gold:</b> ATR > 0.08%<br>
+        <b>Indices:</b> ATR > 0.12%<br>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        if strict_mode:
+            st.warning("🛡️ MODE STRICT: Les signaux imparfaits sont bloqués.")
+        else:
+            st.info("🌊 MODE NORMAL: Tolérance élargie (Malus au lieu de Veto).")
     
     if st.button("🚀 LANCER LE SCAN", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
-        with st.spinner("Calcul des points en cours..."):
-            results = run_scan(api, min_score)
+        with st.spinner(f"Scan en cours (Mode {'Strict' if strict_mode else 'Normal'})..."):
+            results = run_scan(api, min_score, strict_mode)
         
         if not results:
-            st.warning("⚠️ Aucun setup ne passe les filtres stricts (VETO actifs).")
+            st.warning("⚠️ Aucun signal qualifié.")
         else:
             st.success(f"✅ {len(results)} Signaux qualifiés")
             for sig in results:
@@ -561,3 +583,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+   
