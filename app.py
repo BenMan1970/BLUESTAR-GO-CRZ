@@ -65,6 +65,7 @@ st.markdown("""
     .badge-fvg { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     .badge-gps { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     .badge-vol { background: linear-gradient(135deg, #ea580c 0%, #f97316 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
+    .badge-regime { background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; }
     
     .risk-box {
         background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px;
@@ -84,6 +85,14 @@ st.markdown("""
     .confluence-box {
         background: rgba(139, 92, 246, 0.1);
         border: 1px solid #8b5cf6;
+        border-radius: 8px;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    
+    .regime-box {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid #ef4444;
         border-radius: 8px;
         padding: 10px;
         margin: 10px 0;
@@ -143,7 +152,147 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. GPS INSTITUTIONNEL
+# 3. MARKET REGIME CLASSIFIER (NOUVEAU)
+# ==========================================
+def calculate_adx(df, period=14):
+    """Calcule l'ADX pour mesurer la force de tendance"""
+    if len(df) < period + 1:
+        return 0
+    
+    high, low, close = df['high'], df['low'], df['close']
+    
+    # True Range
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    
+    # Directional Movement
+    up = high - high.shift(1)
+    down = low.shift(1) - low
+    
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
+    
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False).mean()
+    
+    plus_di = 100 * (plus_dm_smooth / atr)
+    minus_di = 100 * (minus_dm_smooth / atr)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    
+    return adx.iloc[-1] if len(adx) > 0 else 0
+
+def detect_structure_htf(df):
+    """Détecte si le marché construit une structure (HH/LL) ou oscille"""
+    if len(df) < 20:
+        return "UNKNOWN", 0
+    
+    close = df['close']
+    highs = df['high'].rolling(5).max()
+    lows = df['low'].rolling(5).min()
+    
+    # Derniers pivots
+    recent_highs = highs.iloc[-15:].values
+    recent_lows = lows.iloc[-15:].values
+    
+    # Compter les HH/LL
+    hh_count = sum(1 for i in range(1, len(recent_highs)) if recent_highs[i] > recent_highs[i-1])
+    ll_count = sum(1 for i in range(1, len(recent_lows)) if recent_lows[i] < recent_lows[i-1])
+    
+    total_pivots = len(recent_highs) - 1
+    
+    # Structure progressive
+    if hh_count / total_pivots > 0.6:
+        return "BULLISH_STRUCTURE", 80
+    elif ll_count / total_pivots > 0.6:
+        return "BEARISH_STRUCTURE", 80
+    else:
+        return "OSCILLATING", 30
+
+def get_market_regime(api, symbol):
+    """
+    Classification en 3 régimes:
+    - TREND: marché directionnel exploitable
+    - RANGE: compression, mean reversion uniquement
+    - TRANSITION: zone interdite (NO TRADE)
+    """
+    try:
+        df_h4 = api.get_candles(symbol, "H4", 100)
+        df_d = api.get_candles(symbol, "D", 50)
+        
+        if df_h4.empty or df_d.empty:
+            return "UNKNOWN", {}
+        
+        # 1. ATR Ratio (contraction = range)
+        atr_h4_current = SmartIndicators.calculate_atr(df_h4, 14)
+        atr_h4_series = df_h4['close'].rolling(14).apply(lambda x: SmartIndicators.calculate_atr(df_h4.iloc[:len(x)], 14), raw=False)
+        atr_h4_median = atr_h4_series.median()
+        atr_ratio = atr_h4_current / atr_h4_median if atr_h4_median > 0 else 1.0
+        
+        # 2. ADX (force directionnelle)
+        adx_h4 = calculate_adx(df_h4, 14)
+        adx_d = calculate_adx(df_d, 14)
+        
+        # 3. Structure HTF
+        structure, structure_score = detect_structure_htf(df_d)
+        
+        # 4. EMA Separation (flux directionnel)
+        close = df_h4['close']
+        ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
+        ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+        ema_separation = abs(ema21 - ema50) / ema50 * 100
+        
+        # DECISION TREE PRO
+        regime_data = {
+            'atr_ratio': atr_ratio,
+            'adx_h4': adx_h4,
+            'adx_d': adx_d,
+            'structure': structure,
+            'structure_score': structure_score,
+            'ema_separation': ema_separation
+        }
+        
+        # === RANGE DETECTION (VETO) ===
+        if atr_ratio < 0.7 and adx_h4 < 20:
+            return "RANGE", regime_data
+        
+        if adx_h4 < 15 and adx_d < 20:
+            return "RANGE", regime_data
+        
+        # === TRANSITION DETECTION (VETO) ===
+        if 0.7 <= atr_ratio <= 1.1 and 15 <= adx_h4 <= 25:
+            if structure == "OSCILLATING":
+                return "TRANSITION", regime_data
+        
+        if adx_h4 > 15 and adx_h4 < 25 and structure == "OSCILLATING":
+            return "TRANSITION", regime_data
+        
+        # === TREND CONFIRMED ===
+        if adx_h4 > 25 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]:
+            return "TREND", regime_data
+        
+        if adx_h4 > 30:
+            return "TREND", regime_data
+        
+        if atr_ratio > 1.3 and adx_h4 > 20:
+            return "TREND", regime_data
+        
+        # === WEAK TREND (acceptable mais pas optimal) ===
+        if adx_h4 > 20 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]:
+            return "WEAK_TREND", regime_data
+        
+        # Par défaut: transition
+        return "TRANSITION", regime_data
+        
+    except:
+        return "UNKNOWN", {}
+
+# ==========================================
+# 4. GPS INSTITUTIONNEL (INCHANGÉ)
 # ==========================================
 MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
 TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
@@ -232,7 +381,7 @@ def calculate_mtf_score_gps(api, symbol, direction):
         return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
 
 # ==========================================
-# 4. INDICATEURS INTELLIGENTS
+# 5. INDICATEURS INTELLIGENTS (INCHANGÉ)
 # ==========================================
 class SmartIndicators:
     @staticmethod
@@ -293,7 +442,7 @@ class SmartIndicators:
             return False, False
 
 # ==========================================
-# 5. MATRICE FONDAMENTALE
+# 6. MATRICE FONDAMENTALE (INCHANGÉ)
 # ==========================================
 def calculate_math_matrix(api):
     pct_changes = {}
@@ -348,7 +497,7 @@ def get_pair_analysis_math(scores, pct_changes, base, quote):
     return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
 
 # ==========================================
-# 6. ENHANCEMENTS
+# 7. ENHANCEMENTS (INCHANGÉ)
 # ==========================================
 def check_signal_cooldown(symbol, hours=2):
     now = datetime.now()
@@ -452,7 +601,7 @@ def calculate_confluence_score(signal):
     return min(5, stars), details
 
 # ==========================================
-# 7. SCANNER ULTIMATE TUNING
+# 8. SCANNER REGIME-AWARE (NOUVEAU)
 # ==========================================
 def run_scan(api, min_score, strict_mode):
     scores, pct_changes = calculate_math_matrix(api)
@@ -462,6 +611,9 @@ def run_scan(api, min_score, strict_mode):
     bar = st.progress(0)
     session_mult, active_currencies = get_session_multiplier()
     
+    # Tracking regime stats
+    regime_stats = {'TREND': 0, 'WEAK_TREND': 0, 'RANGE': 0, 'TRANSITION': 0, 'UNKNOWN': 0}
+    
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
         
@@ -469,6 +621,25 @@ def run_scan(api, min_score, strict_mode):
             continue
         
         try:
+            # === REGIME CHECK FIRST (VETO ABSOLU) ===
+            regime, regime_data = get_market_regime(api, sym)
+            regime_stats[regime] += 1
+            
+            # VETO 1: RANGE = NO DIRECTIONAL TRADES
+            if regime == "RANGE":
+                continue
+            
+            # VETO 2: TRANSITION = NO TRADES
+            if regime == "TRANSITION":
+                continue
+            
+            # VETO 3: UNKNOWN = NO TRADES (sécurité)
+            if regime == "UNKNOWN":
+                continue
+            
+            # WEAK_TREND accepté mais pénalisé plus tard
+            
+            # === M5 ANALYSIS ===
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
             
@@ -483,7 +654,7 @@ def run_scan(api, min_score, strict_mode):
             obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             price = df['close'].iloc[-1]
             
-            # ENTRY LOGIC - RSI CROSS + HMA
+            # === ENTRY LOGIC - RSI CROSS + HMA (INCHANGÉ) ===
             signal_type = None
             rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
             rsi_crossing_up = (rsi_prev <= 50 and rsi >= 50)
@@ -499,17 +670,31 @@ def run_scan(api, min_score, strict_mode):
             
             if not signal_type: continue
             
-            # ===== ULTIMATE TUNING SCORING =====
+            # === REGIME-AWARE SCORING ===
             base_score = 5.0
             multiplier = 1.0
             
-            # 1. GPS (Poids optimisé)
+            # 1. GPS (VETO sur qualité en strict mode)
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
+            
+            if strict_mode:
+                # En strict: GPS C interdit, GPS B accepté seulement si TREND confirmé
+                if mtf['quality'] == 'C':
+                    continue
+                if mtf['quality'] == 'B' and regime == 'WEAK_TREND':
+                    continue
+            
             GPS_FACTORS = {'A': 2.20, 'B+': 1.80, 'B': 1.40, 'C': 0.75}
             gps_factor = GPS_FACTORS.get(mtf['quality'], 0.75)
             multiplier *= gps_factor
             
-            # 2. RSI Cross (LE signal principal)
+            # 2. REGIME MULTIPLIER (NOUVEAU - MAJEUR)
+            if regime == "TREND":
+                multiplier *= 1.30  # Bonus trend confirmé
+            elif regime == "WEAK_TREND":
+                multiplier *= 0.90  # Acceptable mais pénalisé
+            
+            # 3. RSI Cross
             rsi_crossing = False
             if signal_type == "BUY":
                 rsi_crossing = rsi_crossing_up
@@ -517,13 +702,13 @@ def run_scan(api, min_score, strict_mode):
                 rsi_crossing = rsi_crossing_down
             
             if rsi_crossing:
-                multiplier *= 1.60  # Bonus majeur
+                multiplier *= 1.60
             
-            # Pénalité RSI extrême (signal tardif)
+            # Pénalité RSI extrême
             if rsi < 25 or rsi > 75:
                 multiplier *= 0.80
             
-            # 3. Matrice Fondamentale
+            # 4. Matrice Fondamentale
             fonda_factor = 1.0
             fonda_strong = False
             cs_data = {}
@@ -551,7 +736,7 @@ def run_scan(api, min_score, strict_mode):
             
             multiplier *= fonda_factor
             
-            # 4. RSI Sweet Spot
+            # 5. RSI Sweet Spot
             if signal_type == "BUY":
                 if 30 <= rsi <= 45:
                     multiplier *= 1.10
@@ -563,12 +748,12 @@ def run_scan(api, min_score, strict_mode):
                 elif 50 <= rsi < 55:
                     multiplier *= 1.05
             
-            # 5. Smart Money (poids augmenté)
+            # 6. Smart Money
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
                     multiplier *= 1.35
             
-            # 6. Volume
+            # 7. Volume
             obv_status = None
             if signal_type == "BUY" and obv_pump:
                 multiplier *= 1.15
@@ -577,34 +762,39 @@ def run_scan(api, min_score, strict_mode):
                 multiplier *= 1.15
                 obv_status = "DUMP"
             
-            # 7. Session
+            # 8. Session
+            session_boost = False
             for curr in active_currencies:
                 if curr in sym:
                     multiplier *= session_mult
+                    session_boost = True
                     break
             
-            # 8. Volatilité (plus nuancé)
+            # 9. Volatilité (VETO renforcé en strict)
             atr_pct = (atr / price) * 100
+            if strict_mode:
+                if atr_pct < 0.07:  # VETO en strict mode
+                    continue
+            
             if atr_pct < 0.04:
-                multiplier *= 0.60  # Marché mort
+                multiplier *= 0.60
             elif atr_pct < 0.07:
-                multiplier *= 0.85  # Acceptable
+                multiplier *= 0.85
             elif atr_pct > 0.25:
-                multiplier *= 0.75  # Chaos
+                multiplier *= 0.75
             elif atr_pct > 0.15:
-                multiplier *= 0.90  # Volatilité élevée
+                multiplier *= 0.90
             
             # Score final
             final_score = base_score * multiplier
             final_score = min(10.0, max(0.0, final_score))
             
-            # Filtre strict mode (assouplissement intelligent)
+            # Filtre strict mode amélioré
             if strict_mode:
-                if final_score < 7.2: continue
-                # Permet GPS B si score exceptionnel
-                if mtf['quality'] == 'C': continue
-                if mtf['quality'] == 'B' and final_score < 8.0: continue
-                if atr_pct < 0.07: continue
+                if final_score < 7.5:  # Seuil relevé
+                    continue
+                if regime == "WEAK_TREND" and final_score < 8.2:
+                    continue
             elif final_score < min_score:
                 continue
             
@@ -624,7 +814,8 @@ def run_scan(api, min_score, strict_mode):
                 'obv_status': obv_status, 'rsi_crossing': rsi_crossing,
                 'fonda_strong': fonda_strong,
                 'sl': sl_temp, 'tp': tp_temp, 'time': df['time'].iloc[-1],
-                'session_boost': session_mult > 1.0
+                'session_boost': session_boost,
+                'regime': regime, 'regime_data': regime_data  # NOUVEAU
             }
             
             # Adaptive risk
@@ -647,10 +838,14 @@ def run_scan(api, min_score, strict_mode):
             continue
             
     bar.empty()
+    
+    # Afficher stats régimes
+    st.session_state['regime_stats'] = regime_stats
+    
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 8. AFFICHAGE
+# 9. AFFICHAGE (LÉGÈREMENT ENRICHI)
 # ==========================================
 def draw_mini_meter(label, val, color):
     w = min(100, max(0, val*10))
@@ -702,6 +897,21 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
+        
+        # NOUVEAU: Badge Regime
+        regime = s['regime']
+        regime_colors = {
+            'TREND': '#10b981',
+            'WEAK_TREND': '#f59e0b'
+        }
+        regime_icons = {
+            'TREND': '🚀',
+            'WEAK_TREND': '⚡'
+        }
+        regime_color = regime_colors.get(regime, '#64748b')
+        regime_icon = regime_icons.get(regime, '📊')
+        badges.append(f"<span class='badge-regime' style='background:{regime_color}'>{regime_icon} {regime}</span>")
+        
         if s.get('rsi_crossing'): badges.append("<span class='badge-vol' style='background:#8b5cf6'>🎯 RSI CROSS</span>")
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
@@ -712,7 +922,7 @@ def display_sig(s):
             
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         
-        # NOUVEAU : Confluence Score
+        # Confluence Score
         stars_display = draw_star_rating(s['confluence_stars'])
         conf_text = " • ".join(s['confluence_details'])
         st.markdown(f"""
@@ -721,6 +931,21 @@ def display_sig(s):
                 <div style='font-size:0.8em;color:#a78bfa;margin-bottom:5px;'>CONFLUENCE</div>
                 <div style='font-size:1.5em;'>{stars_display}</div>
                 <div style='font-size:0.75em;color:#c4b5fd;margin-top:5px;'>{conf_text}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # NOUVEAU: Regime Details
+        rd = s['regime_data']
+        st.markdown(f"""
+        <div class='regime-box'>
+            <div style='text-align:center;'>
+                <div style='font-size:0.8em;color:#fca5a5;margin-bottom:5px;'>MARKET REGIME ANALYSIS</div>
+                <div style='font-size:0.7em;color:#fecaca;'>
+                    ADX H4: {rd.get('adx_h4', 0):.1f} | ADX D: {rd.get('adx_d', 0):.1f} | 
+                    ATR Ratio: {rd.get('atr_ratio', 0):.2f} | 
+                    Structure: {rd.get('structure', 'N/A')}
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -780,7 +1005,7 @@ def display_sig(s):
 
 def main():
     st.title("💎 BLUESTAR SNP3 GPS")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Ultimate Tuning Edition</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Regime-Aware Edition | Institutional Grade</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("Paramètres")
@@ -788,33 +1013,82 @@ def main():
         strict_mode = st.checkbox("🔥 Mode Sniper", value=True)
         
         st.markdown("---")
+        st.markdown("### 🎯 Regime Filter")
+        st.markdown("""
+        <div style='font-size:0.8em;color:#94a3b8;'>
+        <b>TREND:</b> ✅ Trades directionnels<br>
+        <b>WEAK_TREND:</b> ⚠️ Accepté (pénalisé)<br>
+        <b>RANGE:</b> 🚫 NO TRADE<br>
+        <b>TRANSITION:</b> 🚫 NO TRADE<br>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
         st.markdown("### 📊 Tuning Actif")
         st.markdown("""
         <div style='font-size:0.8em;color:#94a3b8;'>
-        <b>GPS:</b> A×2.2, B+×1.8, B×1.4, C×0.75<br>
-        <b>RSI Cross:</b> ×1.60 (prioritaire)<br>
+        <b>TREND Regime:</b> ×1.30<br>
+        <b>GPS:</b> A×2.2, B+×1.8, B×1.4<br>
+        <b>RSI Cross:</b> ×1.60<br>
         <b>Smart Money:</b> ×1.35<br>
-        <b>Volatilité:</b> Optimale 0.07-0.15%
+        <b>Strict ATR:</b> >0.07% obligatoire
         </div>
         """, unsafe_allow_html=True)
+        
+        # Afficher regime stats si disponible
+        if 'regime_stats' in st.session_state:
+            st.markdown("---")
+            st.markdown("### 📈 Derniers Régimes")
+            rs = st.session_state['regime_stats']
+            total = sum(rs.values())
+            if total > 0:
+                st.markdown(f"""
+                <div style='font-size:0.75em;color:#94a3b8;'>
+                TREND: {rs.get('TREND', 0)} ({rs.get('TREND', 0)/total*100:.0f}%)<br>
+                WEAK: {rs.get('WEAK_TREND', 0)} ({rs.get('WEAK_TREND', 0)/total*100:.0f}%)<br>
+                RANGE: {rs.get('RANGE', 0)} ({rs.get('RANGE', 0)/total*100:.0f}%)<br>
+                TRANS: {rs.get('TRANSITION', 0)} ({rs.get('TRANSITION', 0)/total*100:.0f}%)
+                </div>
+                """, unsafe_allow_html=True)
     
     if st.button("🚀 LANCER LE SCAN", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
         
-        with st.spinner("🔍 Analyse en cours..."):
+        with st.spinner("🔍 Analyse Regime-Aware en cours..."):
             results = run_scan(api, min_score, strict_mode)
             
         if not results:
-            st.warning("⚠️ Aucune opportunité détectée avec les critères actuels.")
+            st.warning("⚠️ Aucune opportunité détectée. Les filtres regime ont éliminé les trades non-optimaux.")
+            
+            # Afficher les stats de filtrage
+            if 'regime_stats' in st.session_state:
+                rs = st.session_state['regime_stats']
+                st.info(f"""
+                📊 **Analyse du marché actuel:**
+                - {rs.get('TREND', 0)} actifs en TREND (tradeable)
+                - {rs.get('WEAK_TREND', 0)} actifs en WEAK_TREND (accepté)
+                - {rs.get('RANGE', 0)} actifs en RANGE (filtré ❌)
+                - {rs.get('TRANSITION', 0)} actifs en TRANSITION (filtré ❌)
+                
+                💡 Le filtre regime protège votre capital en éliminant les marchés non directionnels.
+                """)
         else:
             legendary = [s for s in results if s['score'] >= 9.0]
             excellent = [s for s in results if 7.5 <= s['score'] < 9.0]
             good = [s for s in results if s['score'] < 7.5]
             
-            st.success(f"✅ {len(results)} Signaux détectés")
+            st.success(f"✅ {len(results)} Signaux REGIME-VALIDATED détectés")
             if legendary:
                 st.info(f"💎 {len(legendary)} LEGENDARY • ⭐ {len(excellent)} EXCELLENT • ✅ {len(good)} BON")
+            
+            # Stats regime des signaux
+            regime_count = {}
+            for sig in results:
+                r = sig['regime']
+                regime_count[r] = regime_count.get(r, 0) + 1
+            
+            st.info(f"🎯 Composition: {regime_count.get('TREND', 0)} TREND • {regime_count.get('WEAK_TREND', 0)} WEAK_TREND")
             
             for sig in results:
                 display_sig(sig)
