@@ -459,39 +459,64 @@ def run_scan(api, min_score, strict_mode):
             
             # Indicators
             atr = SmartIndicators.calculate_atr(df)
-            rsi = SmartIndicators.calculate_rsi_ohlc4(df).iloc[-1]
+            rsi_series = SmartIndicators.calculate_rsi_ohlc4(df)
+            rsi = rsi_series.iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
             fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
             obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             price = df['close'].iloc[-1]
             
-            # ENTRY LOGIC (INTOUCHABLE)
+            # ENTRY LOGIC - RÈGLE PRINCIPALE : RSI 7 CROISE SA MÉDIANE (50) + HMA 20
             signal_type = None
+            
+            # Calcul du croisement RSI autour de 50
+            rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
+            rsi_crossing_up = (rsi_prev <= 50 and rsi >= 50)  # Croise vers le haut
+            rsi_crossing_down = (rsi_prev >= 50 and rsi <= 50)  # Croise vers le bas
+            rsi_near_median = abs(rsi - 50) <= 8  # Zone acceptable autour de 50
+            
+            # BUY : HMA verte (uptrend) + RSI croise 50 vers le haut OU RSI < 50 proche médiane
             if trend_hma == 1:
-                if rsi < 50:  # RSI sous médiane pour BUY
+                if rsi_crossing_up or (rsi < 50 and rsi_near_median):
                     signal_type = "BUY"
+            
+            # SELL : HMA rouge (downtrend) + RSI croise 50 vers le bas OU RSI > 50 proche médiane
             elif trend_hma == -1:
-                if rsi > 50:  # RSI sur médiane pour SELL
+                if rsi_crossing_down or (rsi > 50 and rsi_near_median):
                     signal_type = "SELL"
             
             if not signal_type: continue
             
-            # SCORING MULTIPLICATIF INSTITUTIONNEL
+            # SCORING MULTIPLICATIF INSTITUTIONNEL - GPS PRIORITAIRE
             base_score = 5.0
             multiplier = 1.0
             
-            # 1. GPS (Facteur dominant)
+            # 1. GPS (Facteur DOMINANT - Poids doublé)
             mtf = calculate_mtf_score_gps(api, sym, signal_type)
+            gps_factor = 1.0
             if mtf['quality'] == 'A':
-                multiplier *= 1.50
+                gps_factor = 2.50  # Augmenté de 1.50 → 2.50
             elif mtf['quality'] == 'B+':
-                multiplier *= 1.35
+                gps_factor = 2.00  # Augmenté de 1.35 → 2.00
             elif mtf['quality'] == 'B':
-                multiplier *= 1.20
+                gps_factor = 1.50  # Augmenté de 1.20 → 1.50
             else:
-                multiplier *= 0.90
+                gps_factor = 0.50  # Pénalité forte pour qualité C (avant 0.90)
             
-            # 2. Matrice Fondamentale
+            multiplier *= gps_factor
+            
+            # 2. Croisement RSI Médiane (RÈGLE PRINCIPALE - Nouveau bonus)
+            rsi_crossing = False
+            
+            if signal_type == "BUY":
+                rsi_crossing = (rsi_prev <= 50 and rsi >= 50)
+            else:
+                rsi_crossing = (rsi_prev >= 50 and rsi <= 50)
+            
+            if rsi_crossing:
+                multiplier *= 1.50  # BONUS MAJEUR pour croisement exact de la médiane
+            
+            # 3. Matrice Fondamentale
             fonda_factor = 1.0
             cs_data = {}
             if "_" in sym and "XAU" not in sym and "US30" not in sym:
@@ -514,53 +539,54 @@ def run_scan(api, min_score, strict_mode):
             
             multiplier *= fonda_factor
             
-            # 3. RSI Sweet Spot (Zone d'entrée optimale)
+            # 4. RSI Sweet Spot (Zone d'entrée optimale - poids réduit)
             if signal_type == "BUY":
                 if 30 <= rsi <= 45:
-                    multiplier *= 1.25
+                    multiplier *= 1.15  # Réduit de 1.25 → 1.15
                 elif 45 < rsi <= 50:
-                    multiplier *= 1.10
+                    multiplier *= 1.05  # Réduit de 1.10 → 1.05
             else:
                 if 55 <= rsi <= 70:
-                    multiplier *= 1.25
+                    multiplier *= 1.15  # Réduit de 1.25 → 1.15
                 elif 50 <= rsi < 55:
-                    multiplier *= 1.10
+                    multiplier *= 1.05  # Réduit de 1.10 → 1.05
             
-            # 4. Smart Money Confluence
+            # 5. Smart Money Confluence
             if fvg:
                 if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
-                    multiplier *= 1.30
+                    multiplier *= 1.20  # Réduit de 1.30 → 1.20
             
-            # 5. Volume Anomaly
+            # 6. Volume Anomaly
             obv_status = None
             if signal_type == "BUY" and obv_pump:
-                multiplier *= 1.25
+                multiplier *= 1.15  # Réduit de 1.25 → 1.15
                 obv_status = "PUMP"
             elif signal_type == "SELL" and obv_dump:
-                multiplier *= 1.25
+                multiplier *= 1.15  # Réduit de 1.25 → 1.15
                 obv_status = "DUMP"
             
-            # 6. Session Multiplier
+            # 7. Session Multiplier
             for curr in active_currencies:
                 if curr in sym:
                     multiplier *= session_mult
                     break
             
-            # 7. Volatility Check (Pénalité ajustée)
+            # 8. Volatility Check (Pénalité renforcée)
             atr_pct = (atr / price) * 100
             if atr_pct < 0.05:
-                multiplier *= 0.85
+                multiplier *= 0.70  # Pénalité renforcée (avant 0.85)
             elif atr_pct < 0.08:
-                multiplier *= 0.95
+                multiplier *= 0.85  # Pénalité renforcée (avant 0.95)
             
             # Score final
             final_score = base_score * multiplier
             final_score = min(10.0, max(0.0, final_score))
             
-            # Filtre strict mode
+            # Filtre strict mode (critères renforcés)
             if strict_mode:
-                if final_score < 7.0: continue
+                if final_score < 7.5: continue  # Seuil augmenté de 7.0 → 7.5
                 if mtf['quality'] not in ['A', 'B+']: continue
+                if atr_pct < 0.08: continue  # Filtre volatilité en mode sniper
             elif final_score < min_score:
                 continue
             
@@ -577,7 +603,7 @@ def run_scan(api, min_score, strict_mode):
                 'score': final_score, 'quality': mtf['quality'],
                 'atr_pct': atr_pct, 'mtf': mtf, 'cs': cs_data,
                 'fvg': fvg, 'fvg_type': fvg_type, 'rsi': rsi,
-                'obv_status': obv_status,
+                'obv_status': obv_status, 'rsi_crossing': rsi_crossing,
                 'sl': sl_temp, 'tp': tp_temp, 'time': df['time'].iloc[-1],
                 'session_boost': session_mult > 1.0
             }
@@ -641,6 +667,7 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
+        if s.get('rsi_crossing'): badges.append("<span class='badge-vol' style='background:#8b5cf6'>🎯 RSI CROSS</span>")
         if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
         badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
         badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
