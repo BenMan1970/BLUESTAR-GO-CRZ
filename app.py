@@ -7,9 +7,9 @@ import logging
 from datetime import datetime, timezone
 
 # ==========================================
-# 1. CONFIGURATION & STYLE (STRICTEMENT ORIGINAL)
+# 1. CONFIGURATION & STYLE (INCHANGÉ)
 # ==========================================
-st.set_page_config(page_title="Bluestar SNP3 GPS", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar SNP3 Pro Edge", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -101,7 +101,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT API (AVEC VOLUME)
+# 2. CLIENT API
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 if 'signal_history' not in st.session_state: st.session_state.signal_history = {}
@@ -152,7 +152,7 @@ ASSETS = [
 ]
 
 # ==========================================
-# 3. MARKET REGIME CLASSIFIER (OPTIMISÉ HEDGE FUND)
+# 3. MARKET REGIME (COEUR - INCHANGÉ MAIS ROBUSTE)
 # ==========================================
 def calculate_adx(df, period=14):
     if len(df) < period + 1: return 0
@@ -191,121 +191,64 @@ def get_market_regime(api, symbol):
         adx_h4, adx_d = calculate_adx(df_h4, 14), calculate_adx(df_d, 14)
         structure, s_score = detect_structure_htf(df_d)
         
-        ema21 = df_h4['close'].ewm(span=21, adjust=False).mean().iloc[-1]
-        ema50 = df_h4['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        ema_separation = abs(ema21 - ema50) / ema50 * 100
+        regime_data = {'atr_ratio': atr_ratio, 'adx_h4': adx_h4, 'adx_d': adx_d, 'structure': structure}
         
-        regime_data = {'atr_ratio': atr_ratio, 'adx_h4': adx_h4, 'adx_d': adx_d, 'structure': structure, 'structure_score': s_score, 'ema_separation': ema_separation}
+        # Kill Switch Binaire (Simplifié)
+        # ADX < 15 et Compression = RANGE = NO TRADE
+        if atr_ratio < 0.75 and adx_h4 < 15: return "RANGE", regime_data
         
-        # === RECALIBRATION EXPERT POUR MARCHÉ CALME ===
-        if atr_ratio < 0.7 and adx_h4 < 15: return "RANGE", regime_data # Seuil abaissé à 15
-        if adx_h4 < 12 and adx_d < 15: return "RANGE", regime_data
-        
-        if 0.7 <= atr_ratio <= 1.1 and 12 <= adx_h4 <= 18:
-            if structure == "OSCILLATING": return "TRANSITION", regime_data
-        
-        if adx_h4 > 12 and adx_h4 < 18 and structure == "OSCILLATING": return "TRANSITION", regime_data
-        
-        if adx_h4 > 20 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: return "TREND", regime_data # Seuil 20
+        # Structure OK + ADX Correct = TREND
+        if adx_h4 > 20 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: return "TREND", regime_data
         if adx_h4 > 25: return "TREND", regime_data
-        if atr_ratio > 1.2 and adx_h4 > 18: return "TREND", regime_data
         
-        if adx_h4 > 15 and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: return "WEAK_TREND", regime_data
-        
-        return "TRANSITION", regime_data
+        # Le reste = WEAK_TREND (Acceptable mais moins de points)
+        return "WEAK_TREND", regime_data
     except: return "UNKNOWN", {}
 
 # ==========================================
-# 4. GPS INSTITUTIONNEL (INCHANGÉ)
+# 4. GPS SIMPLIFIÉ (D/W FOCUS)
 # ==========================================
-MTF_WEIGHTS = {'M': 5.0, 'W': 4.0, 'D': 4.0, 'H4': 2.5, 'H1': 1.5}
-TOTAL_WEIGHT = sum(MTF_WEIGHTS.values())
-
 def ema(series, length): return series.ewm(span=length, adjust=False).mean()
 def sma_local(series, length): return series.rolling(window=length).mean()
 
-def calc_institutional_trend_macro(df):
-    if len(df) < 50: return 'Range', 0
+def calc_institutional_trend(df):
+    if len(df) < 100: return 'Range'
     close = df['close']
     curr = close.iloc[-1]
     sma200 = sma_local(close, 200).iloc[-1] if len(df) >= 200 else sma_local(close, 50).iloc[-1]
     ema50 = ema(close, 50).iloc[-1]
-    if curr > sma200 and ema50 > sma200: return "Bullish", 85
-    if curr < sma200 and ema50 < sma200: return "Bearish", 85
-    if curr > sma200: return "Bullish", 65
-    if curr < sma200: return "Bearish", 65
-    return "Range", 40
+    if curr > sma200 and ema50 > sma200: return "Bullish"
+    if curr < sma200 and ema50 < sma200: return "Bearish"
+    return "Range"
 
-def calc_institutional_trend_daily(df):
-    if len(df) < 200: return 'Range', 0
-    close, curr = df['close'], df['close'].iloc[-1]
-    sma200 = sma_local(close, 200).iloc[-1]
-    ema50, ema21 = ema(close, 50).iloc[-1], ema(close, 21).iloc[-1]
-    if curr > sma200 and ema50 > sma200 and ema21 > ema50: return "Bullish", 90
-    if curr < sma200 and ema50 < sma200 and ema21 < ema50: return "Bearish", 90
-    if curr < sma200 and ema50 > sma200: return "Retracement Bull", 55
-    if curr > sma200 and ema50 < sma200: return "Retracement Bear", 55
-    return "Range", 35
-
-def calc_institutional_trend_4h(df):
-    if len(df) < 200: return 'Range', 0
-    close, curr = df['close'], df['close'].iloc[-1]
-    sma200 = sma_local(close, 200).iloc[-1]
-    ema50, ema21 = ema(close, 50).iloc[-1], ema(close, 21).iloc[-1]
-    if curr > sma200 and ema21 > ema50 and ema50 > sma200: return "Bullish", 80
-    if curr < sma200 and ema21 < ema50 and ema50 < sma200: return "Bearish", 80
-    return "Range", 40
-
-def calc_institutional_trend_intraday(df):
-    if len(df) < 50: return 'Range', 0
-    close = df['close']
-    ema21 = ema(close, 21).iloc[-1]
-    ema50 = ema(close, 50).iloc[-1]
-    if close.iloc[-1] > ema50 and ema21 > ema50: return "Bullish", 75
-    if close.iloc[-1] < ema50 and ema21 < ema50: return "Bearish", 75
-    return "Range", 30
-
-def calculate_mtf_score_gps(api, symbol, direction):
+def calculate_mtf_gps(api, symbol, direction):
+    # Simplification: Focus Weekly + Daily (Structure)
     try:
-        df_d = api.get_candles(symbol, "D", 300)
-        df_h4 = api.get_candles(symbol, "H4", 200)
-        df_h1 = api.get_candles(symbol, "H1", 200)
-        if df_d.empty: return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
+        df_d = api.get_candles(symbol, "D", 250)
+        if df_d.empty: return {'quality': 'N/A', 'analysis': {}}
 
         d_res = df_d.copy().set_index('time')
-        try: df_m = d_res.resample('ME').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
-        except: df_m = d_res.resample('M').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
         df_w = d_res.resample('W-FRI').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna()
 
-        trends, scores = {}, {}
-        trends['M'], scores['M'] = calc_institutional_trend_macro(df_m)
-        trends['W'], scores['W'] = calc_institutional_trend_macro(df_w)
-        trends['D'], scores['D'] = calc_institutional_trend_daily(df_d)
-        trends['H4'], scores['H4'] = calc_institutional_trend_4h(df_h4)
-        trends['H1'], scores['H1'] = calc_institutional_trend_intraday(df_h1)
+        trend_d = calc_institutional_trend(df_d)
+        trend_w = calc_institutional_trend(df_w)
         
         target = 'Bullish' if direction == 'BUY' else 'Bearish'
-        w_score = 0
-        for tf, trend in trends.items():
-            weight = MTF_WEIGHTS.get(tf, 1.0)
-            if trend == target: w_score += weight * (scores[tf] / 100)
-                
-        alignment_pct = (w_score / TOTAL_WEIGHT) * 100
-        quality = 'C'
-        if trends['D'] == target and trends['W'] == target: quality = 'A' if trends['M'] == target else 'B+'
-        elif trends['D'] == target: quality = 'B'
         
-        final_score = 1.0
-        if quality == 'A': final_score = 3.0
-        elif quality == 'B+': final_score = 2.5
-        elif quality == 'B': final_score = 2.0
+        # Logic Binaire Institutionnelle
+        quality = 'C' # Par défaut (Rejet)
         
-        return {'score': final_score, 'quality': quality, 'alignment': f"{alignment_pct:.0f}%", 'analysis': trends}
+        if trend_d == target and trend_w == target:
+            quality = 'A' # Alignement parfait
+        elif trend_d == target:
+            quality = 'B' # Daily aligné, Weekly neutre/contraire (OK pour scalping)
+            
+        return {'quality': quality, 'analysis': {'D': trend_d, 'W': trend_w}}
     except:
-        return {'score': 0, 'quality': 'N/A', 'alignment': '0%', 'analysis': {}}
+        return {'quality': 'N/A', 'analysis': {}}
 
 # ==========================================
-# 5. INDICATEURS INTELLIGENTS (INCHANGÉ)
+# 5. INDICATEURS & UTILS
 # ==========================================
 class SmartIndicators:
     @staticmethod
@@ -332,97 +275,28 @@ class SmartIndicators:
         return (1 if hma.iloc[-1] > hma.iloc[-2] else -1), hma.iloc[-1]
 
     @staticmethod
-    def detect_institutional_fvg(df, atr):
+    def detect_fvg(df, atr):
         if len(df) < 5: return False, None
         curr_close = df['close'].iloc[-1]
         for i in range(1, 4):
             high_A, low_A = df['high'].iloc[-(i+2)], df['low'].iloc[-(i+2)]
             high_C, low_C = df['high'].iloc[-i], df['low'].iloc[-i]
             min_gap = atr * 0.3
-            
-            if low_C > high_A:
-                if (low_C - high_A) > min_gap:
-                    if curr_close > high_A: return True, "BULL"
-            
-            if high_C < low_A:
-                if (low_A - high_C) > min_gap:
-                    if curr_close < low_A: return True, "BEAR"
+            if low_C > high_A and (low_C - high_A) > min_gap and curr_close > high_A: return True, "BULL"
+            if high_C < low_A and (low_A - high_C) > min_gap and curr_close < low_A: return True, "BEAR"
         return False, None
 
     @staticmethod
-    def detect_obv_pump(df, length=20, sigma=1.5):
+    def detect_obv_pump(df, length=20):
         try:
             change = df['close'].diff()
             vol = df['volume']
             obv_direction = np.where(change > 0, vol, np.where(change < 0, -vol, 0))
             obv = pd.Series(obv_direction).cumsum()
             obv_sma = obv.rolling(window=length).mean()
-            obv_std = obv.rolling(window=length).std()
-            upper = obv_sma + (sigma * obv_std)
-            lower = obv_sma - (sigma * obv_std)
-            curr = obv.iloc[-1]
-            return (curr > upper.iloc[-1]), (curr < lower.iloc[-1])
-        except:
-            return False, False
+            return obv.iloc[-1] > obv_sma.iloc[-1], obv.iloc[-1] < obv_sma.iloc[-1]
+        except: return False, False
 
-# ==========================================
-# 6. MATRICE FONDAMENTALE (INCHANGÉ)
-# ==========================================
-def calculate_math_matrix(api):
-    pct_changes = {}
-    forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
-    
-    for sym in forex_pairs:
-        df = api.get_candles(sym, "H1", 50)
-        if not df.empty and len(df) >= 2:
-            pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
-    
-    if not pct_changes: return None, None
-    
-    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
-    raw_scores = {}
-    
-    for curr in currencies:
-        total_move = 0.0
-        pair_count = 0
-        
-        for pair, pct in pct_changes.items():
-            if curr not in pair: continue
-            base, quote = pair.split('_')
-            
-            if base == curr:
-                total_move += pct
-                pair_count += 1
-            elif quote == curr:
-                total_move -= pct
-                pair_count += 1
-        
-        raw_scores[curr] = total_move if pair_count > 0 else 0.0
-    
-    min_score = min(raw_scores.values())
-    max_score = max(raw_scores.values())
-    range_score = max_score - min_score if max_score != min_score else 1.0
-    
-    normalized_scores = {}
-    for curr, raw in raw_scores.items():
-        normalized_scores[curr] = 5.0 + ((raw - min_score) / range_score - 0.5) * 10
-    
-    return normalized_scores, pct_changes
-
-def get_pair_analysis_math(scores, pct_changes, base, quote):
-    s_b, s_q = scores.get(base, 5.0), scores.get(quote, 5.0)
-    gap = s_b - s_q
-    map_data = []
-    for pair, pct in pct_changes.items():
-        if base in pair or quote in pair:
-            if pair == f"{base}_{quote}": continue
-            vs_curr = pair.replace(base, "").replace(quote, "").replace("_", "")
-            map_data.append({'vs': vs_curr, 'raw': pct})
-    return s_b, s_q, gap, sorted(map_data, key=lambda x: abs(x['raw']), reverse=True)[:6]
-
-# ==========================================
-# 7. ENHANCEMENTS & UTILS
-# ==========================================
 def check_signal_cooldown(symbol, hours=2):
     now = datetime.now()
     if symbol in st.session_state.signal_history:
@@ -446,219 +320,186 @@ def detect_correlation_conflict(signals, new_signal):
             return True
     return False
 
-def get_session_multiplier():
+# ==========================================
+# 6. FILTRES BINAIRES & CONTEXTE (ADDITIF)
+# ==========================================
+def calculate_currency_strength(api):
+    pct_changes = {}
+    forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
+    for sym in forex_pairs:
+        df = api.get_candles(sym, "H1", 50)
+        if not df.empty and len(df) >= 2:
+            pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
+    
+    if not pct_changes: return None
+    
+    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
+    raw_scores = {c: 0.0 for c in currencies}
+    
+    for curr in currencies:
+        for pair, pct in pct_changes.items():
+            if curr in pair:
+                base, quote = pair.split('_')
+                if base == curr: raw_scores[curr] += pct
+                elif quote == curr: raw_scores[curr] -= pct
+    return raw_scores
+
+def check_session_validity():
+    # Amélioration 1: Score de Contexte
     utc_hour = datetime.now(timezone.utc).hour
-    if 23 <= utc_hour or utc_hour < 8: return 1.15, ['JPY']
-    elif 7 <= utc_hour < 16: return 1.20, ['EUR', 'GBP']
-    elif 12 <= utc_hour < 21: return 1.15, ['USD', 'CAD']
-    return 1.0, []
-
-def calculate_adaptive_risk(signal):
-    quality = signal['quality']
-    atr = signal['price'] * (signal['atr_pct'] / 100)
-    if quality == 'A': sl_mult, tp_mult = 1.2, 4.5
-    elif quality == 'B+': sl_mult, tp_mult = 1.5, 4.0
-    elif quality == 'B': sl_mult, tp_mult = 1.8, 3.5
-    else: sl_mult, tp_mult = 2.2, 3.0
-    
-    if signal['fvg'] and signal['obv_status']:
-        sl_mult *= 0.85
-        tp_mult *= 1.15
-    
-    is_buy = signal['type'] == 'BUY'
-    sl = signal['price'] - (atr * sl_mult) if is_buy else signal['price'] + (atr * sl_mult)
-    tp = signal['price'] + (atr * tp_mult) if is_buy else signal['price'] - (atr * tp_mult)
-    return sl, tp, tp_mult / sl_mult, sl_mult, tp_mult
-
-def calculate_confluence_score(signal):
-    stars, details = 0, []
-    if signal['quality'] == 'A': stars += 2; details.append("GPS A")
-    elif signal['quality'] == 'B+': stars += 1.5; details.append("GPS B+")
-    elif signal['quality'] == 'B': stars += 1; details.append("GPS B")
-    if signal.get('rsi_crossing'): stars += 1; details.append("RSI Cross")
-    if signal['fvg']: stars += 1; details.append("Smart Money")
-    if signal['obv_status']: stars += 0.5; details.append("Volume")
-    elif signal.get('fonda_strong'): stars += 0.5; details.append("Fonda Strong")
-    return min(5, stars), details
+    # Session Londres (8-16) et NY (13-21) -> Bonus
+    if 8 <= utc_hour < 21:
+        return True # Active Session
+    return False
 
 # ==========================================
-# 8. SCANNER REGIME-AWARE (LOGIQUE DÉBLOQUÉE)
+# 7. SCANNER ADDITIF (LE COEUR DU CHANGEMENT)
 # ==========================================
-def run_scan(api, min_score, strict_mode):
-    scores, pct_changes = calculate_math_matrix(api)
-    if not scores: return []
+def run_scan(api, min_score):
+    cs_scores = calculate_currency_strength(api)
+    if not cs_scores: return []
     
     signals = []
     bar = st.progress(0)
-    session_mult, active_currencies = get_session_multiplier()
-    regime_stats = {'TREND': 0, 'WEAK_TREND': 0, 'RANGE': 0, 'TRANSITION': 0, 'UNKNOWN': 0}
+    
+    regime_stats = {'TREND': 0, 'WEAK_TREND': 0, 'RANGE': 0, 'UNKNOWN': 0}
+    session_active = check_session_validity()
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
         if not check_signal_cooldown(sym): continue
         
         try:
+            # --- 1. REGIME (Fondation) ---
             regime, regime_data = get_market_regime(api, sym)
-            regime_stats[regime] += 1
-            if regime in ["RANGE", "TRANSITION", "UNKNOWN"]: continue
+            regime_stats.get(regime, 0)
+            if regime == "RANGE": continue # Kill switch
             
+            # --- 2. DATA ---
             df = api.get_candles(sym, "M5", 150)
             if df.empty: continue
-            
             df['ohlc4'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+            
             atr = SmartIndicators.calculate_atr(df)
+            price = df['close'].iloc[-1]
+            
+            # --- 3. TRIGGER M5 ---
             rsi_series = SmartIndicators.calculate_rsi_ohlc4(df)
             rsi = rsi_series.iloc[-1]
             trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
-            fvg, fvg_type = SmartIndicators.detect_institutional_fvg(df, atr)
-            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
-            price = df['close'].iloc[-1]
             
             signal_type = None
             rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
-            rsi_crossing_up = (rsi_prev <= 50 and rsi >= 50)
-            rsi_crossing_down = (rsi_prev >= 50 and rsi <= 50)
-            rsi_near_median = abs(rsi - 50) <= 8
             
-            if trend_hma == 1 and (rsi_crossing_up or (rsi < 50 and rsi_near_median)): signal_type = "BUY"
-            elif trend_hma == -1 and (rsi_crossing_down or (rsi > 50 and rsi_near_median)): signal_type = "SELL"
+            # Cross + HMA (Logic Pure)
+            rsi_cross_up = (rsi_prev <= 50 and rsi >= 50)
+            rsi_cross_down = (rsi_prev >= 50 and rsi <= 50)
+            
+            if trend_hma == 1 and rsi_cross_up: signal_type = "BUY"
+            elif trend_hma == -1 and rsi_cross_down: signal_type = "SELL"
             
             if not signal_type: continue
             
-            base_score, multiplier = 5.0, 1.0
-            mtf = calculate_mtf_score_gps(api, sym, signal_type)
+            # --- 4. SCORING ADDITIF (NOUVEAU) ---
+            current_score = 0.0
             
-            # --- MODIFICATION: GPS 'B' autorisé en strict ---
-            if strict_mode:
-                if mtf['quality'] == 'C': continue
+            # A. Regime Points
+            if regime == "TREND": current_score += 2.0
+            elif regime == "WEAK_TREND": current_score += 1.0
             
-            gps_factor = {'A': 2.20, 'B+': 1.80, 'B': 1.40, 'C': 0.75}.get(mtf['quality'], 0.75)
-            multiplier *= gps_factor
+            # B. GPS Points
+            mtf = calculate_mtf_gps(api, sym, signal_type)
+            if mtf['quality'] == 'C': continue # VETO GPS
             
-            if regime == "TREND": multiplier *= 1.30
-            elif regime == "WEAK_TREND": multiplier *= 0.90
+            if mtf['quality'] == 'A': current_score += 3.0
+            elif mtf['quality'] == 'B': current_score += 2.0
             
-            rsi_crossing = rsi_crossing_up if signal_type == "BUY" else rsi_crossing_down
-            if rsi_crossing: multiplier *= 1.60
-            if rsi < 25 or rsi > 75: multiplier *= 0.80
-            
-            fonda_factor = 1.0
-            fonda_strong = False
-            cs_data = {}
-            if "_" in sym and "XAU" not in sym and "US30" not in sym:
-                base, quote = sym.split('_')
-                sb, sq, gap, map_d = get_pair_analysis_math(scores, pct_changes, base, quote)
-                cs_data = {'sb': sb, 'sq': sq, 'gap': gap, 'map': map_d, 'base': base, 'quote': quote}
+            # C. Currency Strength (Filtre + Points)
+            base, quote = sym.split('_') if "_" in sym else (None, None)
+            cs_aligned = False
+            if base and quote:
+                gap = cs_scores[base] - cs_scores[quote]
                 if signal_type == "BUY":
-                    if gap > 1.5: fonda_factor, fonda_strong = 1.40, True
-                    elif gap > 0.8: fonda_factor = 1.25
-                    elif gap > 0.3: fonda_factor = 1.10
-                    elif gap < -1.0: fonda_factor = 0.75
-                else:
-                    if gap < -1.5: fonda_factor, fonda_strong = 1.40, True
-                    elif gap < -0.8: fonda_factor = 1.25
-                    elif gap < -0.3: fonda_factor = 1.10
-                    elif gap > 1.0: fonda_factor = 0.75
-            else: fonda_factor = 1.15
-            multiplier *= fonda_factor
+                    if gap < -0.5: continue # VETO CS (Opposé)
+                    if gap > 0.5: 
+                        current_score += 1.5
+                        cs_aligned = True
+                else: # SELL
+                    if gap > 0.5: continue # VETO CS (Opposé)
+                    if gap < -0.5: 
+                        current_score += 1.5
+                        cs_aligned = True
             
-            if signal_type == "BUY":
-                if 30 <= rsi <= 45: multiplier *= 1.10
-                elif 45 < rsi <= 50: multiplier *= 1.05
-            else:
-                if 55 <= rsi <= 70: multiplier *= 1.10
-                elif 50 <= rsi < 55: multiplier *= 1.05
+            # D. Contexte (Session)
+            if session_active: current_score += 1.0
+            elif "JPY" not in sym: # Si hors session et pas JPY
+                current_score -= 1.0 # Malus hors session
             
-            if fvg and ((signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR")):
-                multiplier *= 1.35
+            # E. Technique (RSI / FVG / Vol)
+            fvg, fvg_type = SmartIndicators.detect_fvg(df, atr)
+            obv_pump, obv_dump = SmartIndicators.detect_obv_pump(df)
             
-            obv_status = None
-            if signal_type == "BUY" and obv_pump: multiplier *= 1.15; obv_status = "PUMP"
-            elif signal_type == "SELL" and obv_dump: multiplier *= 1.15; obv_status = "DUMP"
+            # RSI Freshness (déjà checké par le cross, bonus point)
+            current_score += 1.0 
             
-            session_boost = False
-            for curr in active_currencies:
-                if curr in sym: multiplier *= session_mult; session_boost = True; break
+            # FVG
+            if fvg:
+                if (signal_type == "BUY" and fvg_type == "BULL") or (signal_type == "SELL" and fvg_type == "BEAR"):
+                    current_score += 0.8
             
-            # --- MODIFICATION: ATR seuil 0.045% ---
+            # Volume
+            obv_ok = (signal_type == "BUY" and obv_pump) or (signal_type == "SELL" and obv_dump)
+            if obv_ok: current_score += 0.7
+            
+            # F. Volatilité (Binaire)
             atr_pct = (atr / price) * 100
-            if strict_mode:
-                if atr_pct < 0.045: continue
+            if atr_pct < 0.045: continue # VETO ATR (Trop calme)
+            if 0.045 <= atr_pct <= 0.15: current_score += 1.0 # Volatilité saine
             
-            if atr_pct < 0.04: multiplier *= 0.60
-            elif atr_pct < 0.06: multiplier *= 0.85
-            elif atr_pct > 0.25: multiplier *= 0.75
-            elif atr_pct > 0.15: multiplier *= 0.90
-            
-            final_score = min(10.0, max(0.0, base_score * multiplier))
-            
-            if strict_mode:
-                if final_score < 7.5: continue
-                if regime == "WEAK_TREND" and final_score < 8.2: continue
-            elif final_score < min_score: continue
+            # --- 5. VALIDATION ---
+            # Score Max Théorique ~ 10
+            # Seuil minimum
+            if current_score < min_score: continue
             
             if detect_correlation_conflict(signals, {'symbol': sym, 'type': signal_type}): continue
             
-            sl_temp = price - (atr*1.8) if signal_type == "BUY" else price + (atr*1.8)
-            tp_temp = price + (atr*3.0) if signal_type == "BUY" else price - (atr*3.0)
+            # --- 6. RISK MANAGEMENT ---
+            # SL basé sur ATR (Pas de calcul complexe, simple et robuste)
+            sl_mult = 1.5 if mtf['quality'] == 'A' else 2.0
+            tp_mult = 3.0
             
-            signal_obj = {
+            sl = price - (atr * sl_mult) if signal_type == "BUY" else price + (atr * sl_mult)
+            tp = price + (atr * tp_mult) if signal_type == "BUY" else price - (atr * tp_mult)
+            
+            signals.append({
                 'symbol': sym, 'type': signal_type, 'price': price,
-                'score': final_score, 'quality': mtf['quality'],
-                'atr_pct': atr_pct, 'mtf': mtf, 'cs': cs_data,
-                'fvg': fvg, 'fvg_type': fvg_type, 'rsi': rsi,
-                'obv_status': obv_status, 'rsi_crossing': rsi_crossing,
-                'fonda_strong': fonda_strong,
-                'sl': sl_temp, 'tp': tp_temp, 'time': df['time'].iloc[-1],
-                'session_boost': session_boost,
-                'regime': regime, 'regime_data': regime_data
-            }
-            
-            sl_adapt, tp_adapt, rr, sl_m, tp_m = calculate_adaptive_risk(signal_obj)
-            signal_obj.update({'sl': sl_adapt, 'tp': tp_adapt, 'rr': rr, 'sl_mult': sl_m, 'tp_mult': tp_m})
-            
-            conf_stars, conf_details = calculate_confluence_score(signal_obj)
-            signal_obj.update({'confluence_stars': conf_stars, 'confluence_details': conf_details})
-            
-            signals.append(signal_obj)
+                'score': current_score, 'regime': regime,
+                'mtf': mtf, 'atr_pct': atr_pct, 'time': df['time'].iloc[-1],
+                'sl': sl, 'tp': tp, 'rr': tp_mult/sl_mult,
+                'details': {
+                    'cs_aligned': cs_aligned,
+                    'session': session_active,
+                    'fvg': fvg,
+                    'vol': obv_ok
+                }
+            })
             st.session_state.signal_history[sym] = datetime.now()
             
-        except Exception: continue
+        except Exception as e: continue
             
     bar.empty()
-    st.session_state['regime_stats'] = regime_stats
     return sorted(signals, key=lambda x: x['score'], reverse=True)
 
 # ==========================================
-# 9. AFFICHAGE (STRICTEMENT ORIGINAL)
+# 8. AFFICHAGE (ADAPTÉ AU NOUVEAU SCORING)
 # ==========================================
-def draw_mini_meter(label, val, color):
-    w = min(100, max(0, val*10))
-    st.markdown(f"""
-    <div style="margin-bottom:2px;font-size:0.75em;color:#cbd5e1;display:flex;justify-content:space-between;">
-        <span>{label}</span><span>{val:.1f}/10</span>
-    </div>
-    <div style="width:100%;background:#334155;height:6px;border-radius:4px;">
-        <div style="width:{w}%;background:{color};height:100%;border-radius:4px;"></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def draw_star_rating(stars):
-    full = int(stars)
-    half = 1 if (stars - full) >= 0.5 else 0
-    empty = 5 - full - half
-    return "⭐" * full + ("✨" if half else "") + "☆" * empty
-
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
     col_type = "#10b981" if is_buy else "#ef4444"
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
     sc = s['score']
-    if sc >= 9.0: label = "💎 LEGENDARY"
-    elif sc >= 7.5: label = "⭐ EXCELLENT"
-    elif sc >= 6.5: label = "✅ BON"
-    else: label = "📊 CORRECT"
+    label = "⭐ EXCELLENT" if sc >= 8.0 else "✅ BON"
 
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
         st.markdown(f"<div class='timestamp-box'>📅 Signal: {s['time'].strftime('%d/%m %H:%M UTC')}</div>", unsafe_allow_html=True)
@@ -668,163 +509,53 @@ def display_sig(s):
             <div>
                 <span style="font-size:1.8em;font-weight:900;color:white;">{s['symbol']}</span>
                 <span style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:4px;color:white;margin-left:10px;">{s['type']}</span>
-                <span style="font-size:0.8em;margin-left:10px;color:#cbd5e1;">M5 Entry</span>
             </div>
             <div style="text-align:right;">
                 <div style="font-size:1.4em;font-weight:bold;color:white;">{s['price']:.5f}</div>
-                <div style="font-size:0.75em;color:#cbd5e1;">ATR: {s['atr_pct']:.2f}%</div>
+                <div style="font-size:0.75em;color:#cbd5e1;">ATR: {s['atr_pct']:.3f}%</div>
             </div>
         </div>""", unsafe_allow_html=True)
         
+        # Badges contextuels
         badges = []
-        regime = s['regime']
-        regime_color = {'TREND': '#10b981', 'WEAK_TREND': '#f59e0b'}.get(regime, '#64748b')
-        regime_icon = {'TREND': '🚀', 'WEAK_TREND': '⚡'}.get(regime, '📊')
-        badges.append(f"<span class='badge-regime' style='background:{regime_color}'>{regime_icon} {regime}</span>")
+        badges.append(f"<span class='badge-regime'>{s['regime']}</span>")
+        badges.append(f"<span class='badge-gps'>GPS {s['mtf']['quality']}</span>")
+        if s['details']['cs_aligned']: badges.append("<span class='badge-vol' style='background:#3b82f6'>CS ALIGNÉ</span>")
+        if s['details']['session']: badges.append("<span class='badge-vol' style='background:#f59e0b'>SESSION</span>")
+        if s['details']['fvg']: badges.append("<span class='badge-fvg'>FVG</span>")
         
-        if s.get('rsi_crossing'): badges.append("<span class='badge-vol' style='background:#8b5cf6'>🎯 RSI CROSS</span>")
-        if s['fvg']: badges.append("<span class='badge-fvg'>🦅 SMART MONEY</span>")
-        badges.append(f"<span class='badge-gps'>🛡️ GPS {s['quality']}</span>")
-        badges.append(f"<span class='badge-gps' style='background:#64748b'>RSI {s['rsi']:.1f}</span>")
-        if s['obv_status'] == 'PUMP': badges.append("<span class='badge-vol'>⚡ VOL PUMP</span>")
-        elif s['obv_status'] == 'DUMP': badges.append("<span class='badge-vol'>⚡ VOL DUMP</span>")
-        if s.get('session_boost'): badges.append("<span class='badge-vol' style='background:#6366f1'>🌍 SESSION</span>")
-            
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         
-        stars_display = draw_star_rating(s['confluence_stars'])
-        conf_text = " • ".join(s['confluence_details'])
-        st.markdown(f"""
-        <div class='confluence-box'>
-            <div style='text-align:center;'>
-                <div style='font-size:0.8em;color:#a78bfa;margin-bottom:5px;'>CONFLUENCE</div>
-                <div style='font-size:1.5em;'>{stars_display}</div>
-                <div style='font-size:0.75em;color:#c4b5fd;margin-top:5px;'>{conf_text}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        rd = s['regime_data']
-        st.markdown(f"""
-        <div class='regime-box'>
-            <div style='text-align:center;'>
-                <div style='font-size:0.8em;color:#fca5a5;margin-bottom:5px;'>MARKET REGIME ANALYSIS</div>
-                <div style='font-size:0.7em;color:#fecaca;'>
-                    ADX H4: {rd.get('adx_h4', 0):.1f} | ADX D: {rd.get('adx_d', 0):.1f} | 
-                    ATR Ratio: {rd.get('atr_ratio', 0):.2f} | 
-                    Structure: {rd.get('structure', 'N/A')}
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
         st.write("")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Score", f"{sc:.1f}/10", label)
-        c2.metric("GPS", s['mtf']['alignment'])
-        c3.metric("RSI M5", f"{s['rsi']:.1f}")
-        vol_status = "🔴" if s['atr_pct'] < 0.05 else "🟢"
-        c4.metric("Volatilité", f"{vol_status} {s['atr_pct']:.2f}%")
-        
-        if s['cs']:
-            st.markdown("---")
-            st.markdown("### 📊 Analyse Fondamentale")
-            f1, f2 = st.columns([1, 2])
-            with f1:
-                st.markdown("**Force Devises**")
-                base, quote = s['cs']['base'], s['cs']['quote']
-                sb, sq, gap = s['cs']['sb'], s['cs']['sq'], s['cs']['gap']
-                cb = "#10b981" if sb >= 5.5 else "#ef4444"
-                cq = "#10b981" if sq >= 5.5 else "#ef4444"
-                draw_mini_meter(base, sb, cb)
-                st.write("")
-                draw_mini_meter(quote, sq, cq)
-                st.write("")
-                gap_col = "#10b981" if (is_buy and gap > 0) or (not is_buy and gap < 0) else "#ef4444"
-                st.markdown(f"<div style='text-align:center;color:{gap_col};font-weight:bold;font-size:1.2em;'>⬇️ {abs(gap):.2f}</div>", unsafe_allow_html=True)
-            with f2:
-                st.markdown("**Market Map**")
-                cols = st.columns(6)
-                for i, item in enumerate(s['cs']['map'][:6]):
-                    with cols[i]:
-                        arrow = "▲" if item['raw'] > 0 else "▼"
-                        cl = "#10b981" if item['raw'] > 0 else "#ef4444"
-                        st.markdown(f"<div style='text-align:center;color:{cl};font-size:0.8em;'>{item['vs']}<br>{arrow}<br>{abs(item['raw']):.2f}%</div>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Score Additif", f"{sc:.1f}/10")
+        c2.metric("GPS Bias", f"D:{s['mtf']['analysis']['D'][0]} W:{s['mtf']['analysis']['W'][0]}")
+        c3.metric("Risk:Reward", f"1:{s['rr']:.1f}")
 
         st.markdown("---")
-        st.markdown("### 🛡️ GPS Multi-Timeframe")
-        mtf_analysis = s['mtf']['analysis']
-        timeframes = ['M', 'W', 'D', 'H4', 'H1']
-        cols = st.columns(5)
-        for i, tf in enumerate(timeframes):
-            with cols[i]:
-                trend = mtf_analysis.get(tf, 'N/A')
-                color = "#10b981" if "Bull" in trend else "#ef4444" if "Bear" in trend else "#94a3b8"
-                icon = "🟢" if "Bull" in trend else "🔴" if "Bear" in trend else "⚪"
-                st.markdown(f"<div style='text-align:center;'><div style='font-size:0.8em;color:#94a3b8;'>{tf}</div><div style='font-size:1.5em;'>{icon}</div><div style='font-size:0.6em;color:{color};'>{trend}</div></div>", unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### ⚖️ Risk Management")
-        r1, r2, r3 = st.columns(3)
-        r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;'>{s['sl']:.5f}</div><div style='font-size:0.7em;'>{s['sl_mult']:.1f}x ATR</div></div>", unsafe_allow_html=True)
-        r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div><div style='font-size:0.7em;'>{s['tp_mult']:.1f}x ATR</div></div>", unsafe_allow_html=True)
-        r3.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>RISK:REWARD</div><div style='color:#3b82f6;font-weight:bold;'>1:{s['rr']:.2f}</div><div style='font-size:0.7em;'>Adaptatif</div></div>", unsafe_allow_html=True)
+        r1, r2 = st.columns(2)
+        r1.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div><div style='color:#ef4444;font-weight:bold;'>{s['sl']:.5f}</div></div>", unsafe_allow_html=True)
+        r2.markdown(f"<div class='risk-box'><div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT</div><div style='color:#10b981;font-weight:bold;'>{s['tp']:.5f}</div></div>", unsafe_allow_html=True)
 
 def main():
-    st.title("💎 BLUESTAR SNP3 GPS")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Regime-Aware Edition | Institutional Grade</p>", unsafe_allow_html=True)
+    st.title("💎 BLUESTAR PRO EDGE")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Scoring Additif | Filtres Binaires | Version Simplifiée</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("Paramètres")
-        min_score = st.slider("Score Min", 5.0, 10.0, 6.5, 0.5)
-        strict_mode = st.checkbox("🔥 Mode Sniper", value=True)
-        
-        st.markdown("---")
-        st.markdown("### 🎯 Regime Filter (Optimisé)")
-        st.markdown("""
-        <div style='font-size:0.8em;color:#94a3b8;'>
-        <b>TREND:</b> ✅ Flux Actif<br>
-        <b>WEAK_TREND:</b> ⚠️ Accepté (Calme)<br>
-        <b>RANGE:</b> 🚫 Flatline (Fêtes)<br>
-        <b>TRANSITION:</b> 🚫 No Trade<br>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        if 'regime_stats' in st.session_state:
-            st.markdown("---")
-            st.markdown("### 📈 Stats Régimes")
-            rs = st.session_state['regime_stats']
-            total = sum(rs.values())
-            if total > 0:
-                st.markdown(f"""
-                <div style='font-size:0.75em;color:#94a3b8;'>
-                TREND: {rs.get('TREND', 0)}<br>
-                WEAK: {rs.get('WEAK_TREND', 0)}<br>
-                RANGE: {rs.get('RANGE', 0)}<br>
-                TRANS: {rs.get('TRANSITION', 0)}
-                </div>
-                """, unsafe_allow_html=True)
+        min_score = st.slider("Score Min", 5.0, 10.0, 7.0, 0.5)
+        st.info("ℹ️ **Scoring Additif:**\n\n+2.0 Regime\n+3.0 GPS A\n+1.5 CS Align\n+1.0 Session\n+1.0 RSI\n+0.8 FVG")
     
     if st.button("🚀 LANCER LE SCAN", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
+        with st.spinner("Calcul des points en cours..."):
+            results = run_scan(api, min_score)
         
-        with st.spinner("🔍 Analyse Regime-Aware en cours..."):
-            results = run_scan(api, min_score, strict_mode)
-            
         if not results:
-            st.warning("⚠️ Aucune opportunité. Le marché est totalement à plat.")
-            if 'regime_stats' in st.session_state:
-                rs = st.session_state['regime_stats']
-                st.info(f"Analyse: {rs.get('RANGE', 0)} Ranges, {rs.get('TREND', 0)} Trends")
+            st.warning("⚠️ Aucun setup ne passe les filtres stricts (VETO actifs).")
         else:
-            legendary = [s for s in results if s['score'] >= 9.0]
-            excellent = [s for s in results if 7.5 <= s['score'] < 9.0]
-            good = [s for s in results if s['score'] < 7.5]
-            
-            st.success(f"✅ {len(results)} Signaux détectés")
-            if legendary: st.info(f"💎 {len(legendary)} LEGENDARY")
-            
+            st.success(f"✅ {len(results)} Signaux qualifiés")
             for sig in results:
                 display_sig(sig)
 
