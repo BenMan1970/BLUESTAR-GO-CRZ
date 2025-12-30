@@ -10,7 +10,7 @@ from scipy import stats
 # ==========================================
 # CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar Ultimate v3.1 ADX", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Ultimate V3.1", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -47,7 +47,7 @@ st.markdown("""
     div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.9rem; }
     .badge { color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; margin: 2px; display: inline-block; }
     .badge-regime { background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); }
-    .badge-trend { background: linear-gradient(135deg, #059669 0%, #10b981 100%); } /* ADX Trend Badge */
+    .badge-trend { background: linear-gradient(135deg, #059669 0%, #10b981 100%); }
     .badge-weak { background: linear-gradient(135deg, #ea580c 0%, #f97316 100%); }
     .badge-blue { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); }
     .badge-purple { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); }
@@ -139,7 +139,7 @@ def get_asset_params(symbol):
     return {'type': 'FOREX', 'atr_threshold': 0.035, 'sl_base': 1.5, 'tp_rr': 2.0}
 
 # ==========================================
-# MOTEUR D'INDICATEURS (V3.1 + ADX)
+# MOTEUR D'INDICATEURS
 # ==========================================
 class QuantEngine:
     @staticmethod
@@ -158,7 +158,6 @@ class QuantEngine:
 
     @staticmethod
     def calculate_adx(df, period=14):
-        """Calcul ADX standard sur le dataframe fourni"""
         high, low, close = df['high'], df['low'], df['close']
         plus_dm = high.diff()
         minus_dm = -low.diff()
@@ -339,7 +338,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
     return False
 
 # ==========================================
-# ANALYSE DE PROBABILITÉ (V3.1 + ADX)
+# ANALYSE DE PROBABILITÉ
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors = []
@@ -357,7 +356,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     details['vol_score'] = vol_score
     vol_conf = min(vol_score, 1.2) / 1.2 
     
-    # --- 1. RSI Momentum (Poids: 30%) ---
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     if len(rsi_serie) < 3: return 0, {}, atr_pct
     rsi_val = rsi_serie.iloc[-1]
@@ -377,7 +375,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.30)
     details['rsi_mom'] = abs(rsi_mom)
     
-    # --- 2. Structure Z-Score (Poids: 25%) ---
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0
     if direction == "BUY":
@@ -393,7 +390,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.25)
     details['structure_z'] = z_score_struc
     
-    # --- 3. MTF Bias (Poids: 25%) ---
     mtf_bias = QuantEngine.get_mtf_bias(df_d, df_w)
     mtf_score = 0.5
     if direction == "BUY":
@@ -411,7 +407,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.25)
     details['mtf_bias'] = mtf_bias
     
-    # --- 4. FVG Alignment (Poids: 10%) ---
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     fvg_score = 0
     if fvg_active:
@@ -426,21 +421,17 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.10)
     details['fvg_align'] = fvg_active
 
-    # --- 5. ADX Regime Filter (Poids: 10%) [NOUVEAU V3.1] ---
+    # ADX FILTER (10% weight)
     adx_val = QuantEngine.calculate_adx(df_h4)
     details['adx_val'] = adx_val
     
     adx_prob = 0.0
-    # Configuration Ultimate:
-    # < 18 = Mort (Range)
-    # 18 - 22 = Faible (Pénalisé)
-    # > 22 = Fort (Boosté)
     if adx_val < 18:
-        return 0, details, atr_pct # Rejet direct si trop plat
+        return 0, details, atr_pct 
     elif 18 <= adx_val < 22:
-        adx_prob = 0.6 # Tendance faible, on réduit la confiance
+        adx_prob = 0.6 
     else:
-        adx_prob = 1.0 # Bonne tendance, confiance pleine
+        adx_prob = 1.0 
         
     prob_factors.append(adx_prob)
     weights.append(0.10)
@@ -596,8 +587,6 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
-        
-        # Badge ADX Nouveau
         adx = s['details'].get('adx_val', 0)
         if adx >= 25:
             badges.append(f"<span class='badge badge-trend'>ADX TREND FORTE ({int(adx)})</span>")
@@ -657,12 +646,12 @@ def display_sig(s):
 # INTERFACE PRINCIPALE
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE v3.1 ADX")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Probability Engine | Z-Score Structure | ADX Trend Filter | Dynamic Correlation</p>", 
+    st.title("💎 BLUESTAR ULTIMATE V3.1")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Reference Scanner | 30 Assets | Probability Engine</p>", 
                unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration v3.1")
+        st.header("⚙️ Configuration V3.1")
         
         strict_mode = st.checkbox("🔥 Mode Strict (Z-Score)", value=False, 
                                  help="Filtre agressif : Requiere Z-Score non-neutre et Bias clair.")
@@ -671,13 +660,13 @@ def main():
         min_prob = min_prob_display / 100.0
         
         st.markdown("---")
-        st.markdown("### 📊 Nouveauté v3.1")
+        st.markdown("### 📊 Métriques Actives")
         st.markdown("""
         <div style='font-size:0.85em;color:#94a3b8;line-height:1.8;'>
-        <b>ADX H4 Filter:</b> Évite le marché sans tendance.<br>
-        <b>> 25:</b> Tendance forte (Boost)<br>
-        <b>18 - 22:</b> Tendance faible (Pénalité)<br>
-        <b>< 18:</b> Signal rejeté (Range)
+        <b>ADX H4:</b> Filtrage des ranges (Seuil 18)<br>
+        <b>Z-Score:</b> Puissance structurelle<br>
+        <b>Corrélation:</b> Anti-sur-exposition<br>
+        <b>Currency Strength:</b> Validation devise
         </div>
         """, unsafe_allow_html=True)
         
@@ -685,35 +674,35 @@ def main():
         st.markdown("### 🎯 Échelle de Confiance")
         st.markdown("""
         <div style='font-size:0.8em;color:#94a3b8;line-height:1.6;'>
-        <b>85%+:</b> 💎 Institutional (Alignement parfait)<br>
-        <b>75%-85%:</b> ⭐ Algorithmic (Forte probabilité)<br>
-        <b>65%-75%:</b> ✅ Strategic (Validé)<br>
+        <b>85%+:</b> 💎 Institutional<br>
+        <b>75%-85%:</b> ⭐ Algorithmic<br>
+        <b>65%-75%:</b> ✅ Strategic<br>
         <b>&lt;65%:</b> Filtré par défaut
         </div>
         """, unsafe_allow_html=True)
         
-        st.markdown("---")
         if strict_mode:
-            st.warning("🛡️ **MODE STRICT ACTIF**\n\nRequiere:\n- Z-Score Power (Extension)\n- Bias MTF Non-Neutre\n- Alignement CS")
+            st.warning("🛡️ **MODE STRICT ACTIF**")
     
-    if st.button("🚀 LANCER LE SCAN v3.1", type="primary"):
+    # LE BOUTON MODIFIÉ ICI
+    if st.button("🔍 Calcul sur 30 actifs", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
         
-        with st.spinner(f"🔍 Calcul Probabiliste sur {len(ASSETS)} actifs..."):
+        # Spinner modifié aussi pour être cohérent
+        with st.spinner(f"⏳ Traitement des 30 actifs..."):
             results = run_scan_v31(api, min_prob, strict_mode)
         
         if not results:
-            st.warning("⚠️ Aucun signal ne répond aux critères de haute confiance.")
+            st.warning("⚠️ Aucun signal détecté.")
             
-            with st.expander("🔧 Diagnostic Quant"):
+            with st.expander("🔧 Diagnostic"):
                 st.markdown("""
                 **Raisons possibles :**
                 
-                1. **ADX Trop Bas** : Le marché est en range (ADX < 18).
-                2. **Conflits de Corrélation** : Une paire similaire est déjà en signal.
+                1. **ADX Trop Bas** (< 18).
+                2. **Conflits de Corrélation**.
                 3. **Volatilité insuffisante**.
-                4. **Neutralité du marché** (Z-Score proche de 0).
                 
                 **Actions :**
                 - Baisser la confiance minimale.
@@ -738,7 +727,7 @@ def main():
                 display_sig(sig)
                 
             st.markdown("---")
-            st.caption("💡 **Note Quant v3.1** : Le filtre ADX (H4) élimine maintenant les signaux dans les marchés plats.")
+            st.caption("💎 Bluestar Ultimate V3.1 - Reference Build")
 
 if __name__ == "__main__":
     main()
