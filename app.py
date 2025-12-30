@@ -5,10 +5,10 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import logging
 from datetime import datetime, timezone
-from scipy import stats # Nécessite 'pip install scipy'
+from scipy import stats 
 
 # ==========================================
-# CONFIGURATION & STYLE (Identique)
+# CONFIGURATION & STYLE
 # ==========================================
 st.set_page_config(page_title="Bluestar SNP3 Ultimate v3.0", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
@@ -80,6 +80,7 @@ st.markdown("""
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 if 'signal_history' not in st.session_state: st.session_state.signal_history = {}
+if 'cs_data' not in st.session_state: st.session_state.cs_data = {'data': None, 'time': None}
 
 class OandaClient:
     def __init__(self):
@@ -87,8 +88,8 @@ class OandaClient:
             self.access_token = st.secrets["OANDA_ACCESS_TOKEN"]
             self.environment = st.secrets.get("OANDA_ENVIRONMENT", "practice")
             self.client = oandapyV20.API(access_token=self.access_token, environment=self.environment)
-        except:
-            st.error("⚠️ Configuration API manquante")
+        except Exception as e:
+            st.error(f"⚠️ Configuration API manquante: {e}")
             st.stop()
 
     def get_candles(self, instrument, granularity, count):
@@ -158,20 +159,18 @@ class QuantEngine:
 
     @staticmethod
     def detect_structure_zscore(df, lookback=20):
-        """Détecte la tendance via Z-Score au lieu de compter les HH/LL"""
+        """Détecte la tendance via Z-Score (Scipy)"""
         if len(df) < lookback + 1: return 0
         
         close = df['close'].iloc[-1]
-        mean = df['close'].rolling(window=lookback).mean().iloc[-1]
-        std = df['close'].rolling(window=lookback).std().iloc[-1]
-        
-        if std == 0: return 0
-        z = (close - mean) / std
+        # Utilisation de scipy.stats.zscore pour précision
+        # On prend les 20 dernières bougies
+        window = df['close'].iloc[-lookback:]
+        z_score = stats.zscore(window)[-1]
         
         # Z-Score > 1.5 suggère une extension de tendance (puissance)
-        # Z-Score < 0.5 suggère un retour à la moyenne (range)
-        if z > 1.5: return 1 # Bullish Power
-        if z < -1.5: return -1 # Bearish Power
+        if z_score > 1.5: return 1 # Bullish Power
+        if z_score < -1.5: return -1 # Bearish Power
         return 0 # Neutral/Range
 
     @staticmethod
@@ -181,7 +180,7 @@ class QuantEngine:
         
         curr_close = df['close'].iloc[-1]
         min_gap = atr * 0.5
-        # On regarde la bougie i-2 vs i-1 (Gap entre 1 et 3)
+        # On regarde la bougie i-2 vs i (Gap entre 1 et 3)
         high_1 = df['high'].iloc[-3]
         low_1 = df['low'].iloc[-3]
         high_3 = df['high'].iloc[-1]
@@ -234,6 +233,45 @@ class QuantEngine:
         return "NEUTRAL"
 
 # ==========================================
+# CURRENCY STRENGTH (Version Cache Manuel)
+# ==========================================
+def get_currency_strength(api):
+    # Vérification du cache en session (TTL 60 secondes)
+    now = datetime.now()
+    if st.session_state.cs_data['time'] and (now - st.session_state.cs_data['time']).total_seconds() < 60:
+        return st.session_state.cs_data['data']
+
+    # Calcul si pas de cache ou expiré
+    pct_changes = {}
+    forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
+    
+    for sym in forex_pairs:
+        try:
+            df = api.get_candles(sym, "H1", 50)
+            if not df.empty and len(df) >= 2:
+                pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
+        except:
+            continue
+    
+    if not pct_changes: 
+        st.session_state.cs_data = {'data': None, 'time': now}
+        return None
+    
+    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
+    raw_scores = {c: 0.0 for c in currencies}
+    
+    for curr in currencies:
+        for pair, pct in pct_changes.items():
+            if curr in pair:
+                base, quote = pair.split('_')
+                if base == curr: raw_scores[curr] += pct
+                elif quote == curr: raw_scores[curr] -= pct
+    
+    # Sauvegarde dans le cache
+    st.session_state.cs_data = {'data': raw_scores, 'time': now}
+    return raw_scores
+
+# ==========================================
 # ANALYSE DE PROBABILITÉ (WEIGHT OF EVIDENCE)
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
@@ -258,10 +296,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     vol_conf = min(vol_score, 1.2) / 1.2 
     
     # --- 2. MOMENTUM RSI (Trigger Principal) ---
-    rsi = QuantEngine.calculate_rsi(df_m5)
-    rsi_prev = df_m5['close'].iloc[-2] # Proxy simple si pas série, ou recalcul
-    
-    # Calcul dynamique du momentum RSI
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     if len(rsi_serie) < 3: return 0, {}, atr_pct
     rsi_val = rsi_serie.iloc[-1]
@@ -286,7 +320,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     details['rsi_mom'] = abs(rsi_mom)
     
     # --- 3. STRUCTURE DU MARCHÉ (Z-Score & ADX) ---
-    # Calcul ADX manuel simplifié ou structure
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     
     struc_score = 0
@@ -350,29 +383,10 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
 # ==========================================
 # SCANNER PRINCIPAL
 # ==========================================
-@st.cache_data(ttl=60) # Cache CS pour 60 secondes
-def calculate_currency_strength_wrapper(api):
-    # Fonction simplifiée pour le cache, logique identique à avant
-    pct_changes = {}
-    forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
-    for sym in forex_pairs:
-        df = api.get_candles(sym, "H1", 50)
-        if not df.empty and len(df) >= 2:
-            pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
-    
-    if not pct_changes: return None
-    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
-    raw_scores = {c: 0.0 for c in currencies}
-    for curr in currencies:
-        for pair, pct in pct_changes.items():
-            if curr in pair:
-                base, quote = pair.split('_')
-                if base == curr: raw_scores[curr] += pct
-                elif quote == curr: raw_scores[curr] -= pct
-    return raw_scores
-
 def run_scan_v3(api, min_prob, strict_mode):
-    cs_scores = calculate_currency_strength_wrapper(api)
+    # Utilisation de la fonction corrigée de Currency Strength
+    cs_scores = get_currency_strength(api)
+    
     signals = []
     bar = st.progress(0)
     
@@ -479,7 +493,7 @@ def run_scan_v3(api, min_prob, strict_mode):
     return sorted(signals, key=lambda x: x['prob'], reverse=True)
 
 # ==========================================
-# AFFICHAGE SIGNAL (Identique v2.1)
+# AFFICHAGE SIGNAL
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -662,4 +676,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
