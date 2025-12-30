@@ -76,7 +76,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# CLIENT API & CACHE
+# CLIENT API & SESSION STATE
 # ==========================================
 if 'cache' not in st.session_state: st.session_state.cache = {}
 if 'signal_history' not in st.session_state: st.session_state.signal_history = {}
@@ -140,7 +140,7 @@ def get_asset_params(symbol):
     return {'type': 'FOREX', 'atr_threshold': 0.035, 'sl_base': 1.5, 'tp_rr': 2.0}
 
 # ==========================================
-# MOTEUR D'INDICATEURS (Optimisé)
+# MOTEUR D'INDICATEURS
 # ==========================================
 class QuantEngine:
     @staticmethod
@@ -161,70 +161,48 @@ class QuantEngine:
     def detect_structure_zscore(df, lookback=20):
         """Détecte la tendance via Z-Score (Scipy)"""
         if len(df) < lookback + 1: return 0
-        
-        close = df['close'].iloc[-1]
-        # Utilisation de scipy.stats.zscore pour précision
-        # On prend les 20 dernières bougies
         window = df['close'].iloc[-lookback:]
         z_score = stats.zscore(window)[-1]
-        
-        # Z-Score > 1.5 suggère une extension de tendance (puissance)
-        if z_score > 1.5: return 1 # Bullish Power
-        if z_score < -1.5: return -1 # Bearish Power
-        return 0 # Neutral/Range
+        if z_score > 1.5: return 1 
+        if z_score < -1.5: return -1 
+        return 0 
 
     @staticmethod
     def detect_smart_fvg(df, atr):
-        """FVG validé par le volume relatif"""
         if len(df) < 4: return False, 0
-        
         curr_close = df['close'].iloc[-1]
         min_gap = atr * 0.5
-        # On regarde la bougie i-2 vs i (Gap entre 1 et 3)
         high_1 = df['high'].iloc[-3]
         low_1 = df['low'].iloc[-3]
         high_3 = df['high'].iloc[-1]
         low_3 = df['low'].iloc[-1]
-        
         vol_mean = df['volume'].rolling(20).mean().iloc[-1]
         vol_curr = df['volume'].iloc[-1]
         
-        # FVG Bullish
         gap_bull = low_3 - high_1
-        if gap_bull > min_gap and curr_close > high_1:
-            # Confirmation par volume
-            if vol_curr > vol_mean * 0.8: 
-                return True, "BULL"
-                
-        # FVG Bearish
+        if gap_bull > min_gap and curr_close > high_1 and vol_curr > vol_mean * 0.8: 
+            return True, "BULL"
         gap_bear = low_1 - high_3
-        if gap_bear > min_gap and curr_close < low_1:
-            if vol_curr > vol_mean * 0.8:
-                return True, "BEAR"
-                
+        if gap_bear > min_gap and curr_close < low_1 and vol_curr > vol_mean * 0.8:
+            return True, "BEAR"
         return False, None
 
     @staticmethod
     def get_mtf_bias(df_d, df_w):
-        """Bias institutionnel robuste"""
         def trend_score(df):
             if len(df) < 50: return 0
             sma200 = df['close'].rolling(200).mean().iloc[-1]
             ema50 = df['close'].ewm(span=50).mean().iloc[-1]
             price = df['close'].iloc[-1]
-            
             score = 0
             if price > sma200: score += 1
             if ema50 > sma200: score += 1
-            # Distance prix/SMA200 pour éviter le "noise" près de la moyenne
             dist = abs((price - sma200) / sma200)
-            if dist > 0.005: score += 1 # Au moins 0.5% de marge
-            
-            return score # 0 à 3 (Bearish) à 3 (Bullish), 1.5 est neutre
+            if dist > 0.005: score += 1 
+            return score 
 
         score_d = trend_score(df_d)
         score_w = trend_score(df_w)
-        
         total = score_d + score_w
         if total >= 4: return "STRONG_BULL"
         if total >= 2: return "BULL"
@@ -233,51 +211,120 @@ class QuantEngine:
         return "NEUTRAL"
 
 # ==========================================
-# CURRENCY STRENGTH (Version Cache Manuel)
+# CURRENCY STRENGTH ENGINE (RSI Based)
 # ==========================================
-def get_currency_strength(api):
-    # Vérification du cache en session (TTL 60 secondes)
+def get_currency_strength_rsi(api):
     now = datetime.now()
-    if st.session_state.cs_data['time'] and (now - st.session_state.cs_data['time']).total_seconds() < 60:
+    if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 60:
         return st.session_state.cs_data['data']
 
-    # Calcul si pas de cache ou expiré
-    pct_changes = {}
-    forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
+    forex_pairs = [
+        "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD",
+        "EUR_GBP", "EUR_JPY", "EUR_CHF", "EUR_CAD", "EUR_AUD", "EUR_NZD",
+        "GBP_JPY", "GBP_CHF", "GBP_CAD", "GBP_AUD", "GBP_NZD",
+        "AUD_JPY", "AUD_CAD", "AUD_CHF", "AUD_NZD",
+        "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
+    ]
     
-    for sym in forex_pairs:
+    prices = {}
+    for pair in forex_pairs:
         try:
-            df = api.get_candles(sym, "H1", 50)
-            if not df.empty and len(df) >= 2:
-                pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
-        except:
+            df = api.get_candles(pair, "H1", 100)
+            if df is not None and not df.empty:
+                prices[pair] = df['close']
+        except Exception as e:
             continue
-    
-    if not pct_changes: 
+
+    if not prices:
         st.session_state.cs_data = {'data': None, 'time': now}
         return None
+
+    df_prices = pd.DataFrame(prices).fillna(method='ffill').fillna(method='bfill')
     
-    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
-    raw_scores = {c: 0.0 for c in currencies}
-    
-    for curr in currencies:
-        for pair, pct in pct_changes.items():
-            if curr in pair:
-                base, quote = pair.split('_')
-                if base == curr: raw_scores[curr] += pct
-                elif quote == curr: raw_scores[curr] -= pct
-    
-    # Sauvegarde dans le cache
-    st.session_state.cs_data = {'data': raw_scores, 'time': now}
-    return raw_scores
+    def normalize_score(rsi_value):
+        return ((rsi_value - 50) / 50 + 1) * 5
+
+    def calculate_rsi_series(series, period=14):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).fillna(0)
+        loss = (-delta.where(delta < 0, 0)).fillna(0)
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    final_scores = {c: 0.0 for c in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]}
+    counts = {c: 0 for c in final_scores.keys()}
+
+    for pair in df_prices.columns:
+        if "_" not in pair: continue
+        base, quote = pair.split('_')
+        rsi = calculate_rsi_series(df_prices[pair])
+        if len(rsi) < 2: continue
+        
+        curr_score = normalize_score(rsi.iloc[-1])
+        
+        if base in final_scores:
+            final_scores[base] += curr_score
+            counts[base] += 1
+        if quote in final_scores:
+            final_scores[quote] -= curr_score
+            counts[quote] += 1
+
+    for c in final_scores:
+        if counts[c] > 0:
+            final_scores[c] = final_scores[c] / counts[c]
+
+    st.session_state.cs_data = {'data': final_scores, 'time': now}
+    return final_scores
 
 # ==========================================
-# ANALYSE DE PROBABILITÉ (WEIGHT OF EVIDENCE)
+# FILTRE DE CORRÉLATION DYNAMIQUE
+# ==========================================
+def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
+    if not existing_signals: return False
+    
+    new_sym = new_signal['symbol']
+    new_type = new_signal['type']
+    
+    if "_" not in new_sym: return False
+    base, quote = new_sym.split('_')
+    
+    CORRELATION_MAP = {
+        'EUR_USD':  { 'GBP_USD': 0.9, 'AUD_USD': 0.85, 'NZD_USD': 0.8, 'USD_CHF': -0.9 },
+        'GBP_USD':  { 'EUR_USD': 0.9, 'EUR_GBP': -0.8, 'AUD_USD': 0.8 },
+        'USD_JPY':  { 'EUR_JPY': 0.9, 'GBP_JPY': 0.9, 'USD_CHF': 0.7 },
+        'AUD_USD':  { 'EUR_USD': 0.85, 'GBP_USD': 0.8, 'NZD_USD': 0.9 },
+        'XAU_USD':  { 'USD_CHF': -0.7, 'EUR_USD': 0.6 } 
+    }
+    
+    for existing in existing_signals:
+        ex_sym = existing['symbol']
+        ex_type = existing['type']
+        
+        if new_sym == ex_sym: return True # Doublon exact
+        
+        if new_sym in CORRELATION_MAP and ex_sym in CORRELATION_MAP[new_sym]:
+            corr = CORRELATION_MAP[new_sym][ex_sym]
+            if corr > 0.8 and new_type != ex_type: return True # Conflit directionnel
+            if corr < -0.8 and new_type == ex_type: return True # Surexposition currency
+
+        # Filtre Currency Strength Intelligence
+        shared_currency = None
+        if base in ex_sym or quote in ex_sym:
+            shared_currency = base if (base in ex_sym) else quote
+            
+            if cs_scores and shared_currency in cs_scores:
+                cs_val = cs_scores[shared_currency]
+                if cs_val < 4.0 and new_type == "BUY" and base == shared_currency: return True
+                if cs_val > 6.0 and new_type == "SELL" and base == shared_currency: return True
+
+    return False
+
+# ==========================================
+# ANALYSE DE PROBABILITÉ
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
-    """
-    Calcule une probabilité de succès (0.0 - 1.0) au lieu d'un score additif.
-    """
     prob_factors = []
     weights = []
     details = {}
@@ -286,16 +333,13 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     atr = QuantEngine.calculate_atr(df_m5)
     atr_pct = (atr / df_m5['close'].iloc[-1]) * 100
     
-    # --- 1. VOLATILITÉ ADÉQUATE (Filtre Binaire) ---
     if atr_pct < params['atr_threshold'] * 0.5:
-        return 0, {}, atr_pct # Marché trop mort
+        return 0, {}, atr_pct 
     
-    vol_score = min(atr_pct / params['atr_threshold'], 2.0) # Cap à 2.0
+    vol_score = min(atr_pct / params['atr_threshold'], 2.0)
     details['vol_score'] = vol_score
-    # On ajoute la volatilité comme facteur de confiance multiplicatif
     vol_conf = min(vol_score, 1.2) / 1.2 
     
-    # --- 2. MOMENTUM RSI (Trigger Principal) ---
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     if len(rsi_serie) < 3: return 0, {}, atr_pct
     rsi_val = rsi_serie.iloc[-1]
@@ -304,78 +348,65 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     
     rsi_prob = 0
     if direction == "BUY":
-        if rsi_prev_val < 50 and rsi_val >= 50 and rsi_mom > 1.5:
-            rsi_prob = 0.85 # Trigger fort
-        elif rsi_val > 50 and rsi_mom > 0:
-            rsi_prob = 0.60 # Momentum continu
-    else: # SELL
-        if rsi_prev_val > 50 and rsi_val <= 50 and rsi_mom < -1.5:
-            rsi_prob = 0.85
-        elif rsi_val < 50 and rsi_mom < 0:
-            rsi_prob = 0.60
+        if rsi_prev_val < 50 and rsi_val >= 50 and rsi_mom > 1.5: rsi_prob = 0.85
+        elif rsi_val > 50 and rsi_mom > 0: rsi_prob = 0.60
+    else:
+        if rsi_prev_val > 50 and rsi_val <= 50 and rsi_mom < -1.5: rsi_prob = 0.85
+        elif rsi_val < 50 and rsi_mom < 0: rsi_prob = 0.60
             
-    if rsi_prob == 0: return 0, {}, atr_pct # Pas de trigger valide
+    if rsi_prob == 0: return 0, {}, atr_pct
     prob_factors.append(rsi_prob)
-    weights.append(0.35) # 35% du poids total
+    weights.append(0.35)
     details['rsi_mom'] = abs(rsi_mom)
     
-    # --- 3. STRUCTURE DU MARCHÉ (Z-Score & ADX) ---
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
-    
     struc_score = 0
     if direction == "BUY":
-        if z_score_struc == 1: struc_score = 0.8 # Extension Haussière
-        elif z_score_struc == 0: struc_score = 0.4 # Neutre
-        else: struc_score = 0.0 # Contre extension Baissière
+        if z_score_struc == 1: struc_score = 0.8
+        elif z_score_struc == 0: struc_score = 0.4
+        else: struc_score = 0.0
     else:
         if z_score_struc == -1: struc_score = 0.8
         elif z_score_struc == 0: struc_score = 0.4
         else: struc_score = 0.0
         
     prob_factors.append(struc_score)
-    weights.append(0.25) # 25% du poids
+    weights.append(0.25)
     details['structure_z'] = z_score_struc
     
-    # --- 4. BIAS MULTI-TIMEFRAME (GPS) ---
     mtf_bias = QuantEngine.get_mtf_bias(df_d, df_w)
-    
-    mtf_score = 0.5 # Neutre par défaut
+    mtf_score = 0.5
     if direction == "BUY":
         if mtf_bias == "STRONG_BULL": mtf_score = 0.95
         elif mtf_bias == "BULL": mtf_score = 0.80
         elif mtf_bias == "NEUTRAL": mtf_score = 0.60
-        else: mtf_score = 0.20 # Contre tendance
-    else: # SELL
+        else: mtf_score = 0.20
+    else:
         if mtf_bias == "STRONG_BEAR": mtf_score = 0.95
         elif mtf_bias == "BEAR": mtf_score = 0.80
         elif mtf_bias == "NEUTRAL": mtf_score = 0.60
         else: mtf_score = 0.20
         
     prob_factors.append(mtf_score)
-    weights.append(0.30) # 30% du poids
+    weights.append(0.30)
     details['mtf_bias'] = mtf_bias
     
-    # --- 5. VALIDATION FVG (Confluence) ---
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     fvg_score = 0
     if fvg_active:
         if (direction == "BUY" and fvg_type == "BULL") or (direction == "SELL" and fvg_type == "BEAR"):
-            fvg_score = 0.9 # FVG aligné
+            fvg_score = 0.9
         else:
-            fvg_score = 0.2 # FVG contre trade (ignorable)
+            fvg_score = 0.2
     else:
-        fvg_score = 0.6 # Pas de FVG, neutre
+        fvg_score = 0.6
         
     prob_factors.append(fvg_score)
-    weights.append(0.10) # 10% du poids (Bonus)
+    weights.append(0.10)
     details['fvg_align'] = fvg_active
     
-    # --- CALCUL FINAL ---
-    # Moyenne pondérée
     total_weight = sum(weights)
     weighted_prob = sum(p * w for p, w in zip(prob_factors, weights)) / total_weight
-    
-    # Ajustement par volatilité (Confiance de marché)
     final_score = weighted_prob * vol_conf
     
     return final_score, details, atr_pct
@@ -384,42 +415,35 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
 # SCANNER PRINCIPAL
 # ==========================================
 def run_scan_v3(api, min_prob, strict_mode):
-    # Utilisation de la fonction corrigée de Currency Strength
-    cs_scores = get_currency_strength(api)
-    
+    cs_scores = get_currency_strength_rsi(api)
     signals = []
     bar = st.progress(0)
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
         
-        # Cache cooldown simple
         if sym in st.session_state.signal_history:
             if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 3600: 
                 continue
         
         try:
-            # Récupération Multi-Timeframe
             df_m5 = api.get_candles(sym, "M5", 150)
             df_h4 = api.get_candles(sym, "H4", 100)
             df_d = api.get_candles(sym, "D", 100)
-            df_w_raw = api.get_candles(sym, "D", 300) # On resample nous-même
+            df_w_raw = api.get_candles(sym, "D", 300) 
             
             if df_m5.empty or df_h4.empty or df_d.empty: continue
             
-            # Resample Weekly manuel pour assurer la qualité
             df_w = df_w_raw.set_index('time').resample('W-FRI').agg({
                 'open':'first', 'high':'max', 'low':'min', 'close':'last'
             }).dropna().reset_index()
             
-            # Détection direction via RSI Momentum (Scan Bi-directionnel)
             rsi_serie = QuantEngine.calculate_rsi(df_m5)
             if len(rsi_serie) < 3: continue
             
             rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
             
             scan_direction = None
-            # Trigger conditionnel
             if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 1.0:
                 scan_direction = "BUY"
             elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -1.0:
@@ -427,20 +451,26 @@ def run_scan_v3(api, min_prob, strict_mode):
             
             if not scan_direction: continue
             
-            # Calcul de la probabilité
             prob, details, atr_pct = calculate_signal_probability(
                 df_m5, df_h4, df_d, df_w, sym, scan_direction
             )
             
-            # Score Minimum Check
             if prob < min_prob: continue
             
-            # Veto Strict Mode
             if strict_mode:
                 if details['mtf_bias'] == "NEUTRAL" and details['structure_z'] == 0:
                     continue
             
-            # Currency Strength Check
+            # --- CHECK CORRELATION & CS ---
+            # Construction d'un dict temporaire pour le check
+            temp_signal_obj = {'symbol': sym, 'type': scan_direction}
+            
+            # Appel du filtre intelligent
+            if check_dynamic_correlation_conflict(temp_signal_obj, signals, cs_scores):
+                logging.info(f"Signal {sym} rejeté : Corrélation/CS Conflit.")
+                continue
+            # --------------------------------
+            
             cs_aligned = False
             base, quote = sym.split('_')
             if cs_scores and base and quote:
@@ -448,23 +478,19 @@ def run_scan_v3(api, min_prob, strict_mode):
                 if scan_direction == "BUY" and gap > 0.3: cs_aligned = True
                 elif scan_direction == "SELL" and gap < -0.3: cs_aligned = True
             elif "XAU" in sym or "US30" in sym:
-                cs_aligned = True # Indices/Commodités moins dépendants du CS simple
+                cs_aligned = True 
 
             if strict_mode and not cs_aligned: continue
             
-            # Calcul SL/TP
             price = df_m5['close'].iloc[-1]
             atr = QuantEngine.calculate_atr(df_m5)
             params = get_asset_params(sym)
             
-            # SL Adaptatif
             sl_mult = params['sl_base']
-            if details['structure_z'] != 0: sl_mult -= 0.2 # SL plus serré si structure claire
+            if details['structure_z'] != 0: sl_mult -= 0.2
             sl_mult = max(sl_mult, 1.0)
             
             sl = price - (atr * sl_mult) if scan_direction == "BUY" else price + (atr * sl_mult)
-            
-            # TP Basé sur le RR paramétré de l'actif
             tp_mult = params['tp_rr']
             tp = price + (atr * tp_mult) if scan_direction == "BUY" else price - (atr * tp_mult)
             
@@ -472,8 +498,8 @@ def run_scan_v3(api, min_prob, strict_mode):
                 'symbol': sym,
                 'type': scan_direction,
                 'price': price,
-                'prob': prob, # Probabilité 0-1
-                'score_display': prob * 10, # Pour affichage 0-10
+                'prob': prob,
+                'score_display': prob * 10,
                 'details': details,
                 'atr_pct': atr_pct,
                 'time': df_m5['time'].iloc[-1],
@@ -501,7 +527,6 @@ def display_sig(s):
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
     sc = s['score_display']
-    # Mapping Probabilité -> Label
     if sc >= 8.5: 
         label = "💎 INSTITUTIONAL"
         quality_badge = "quality-high"
@@ -534,11 +559,9 @@ def display_sig(s):
             </div>
         </div>""", unsafe_allow_html=True)
         
-        # Badges
         badges = []
         badges.append(f"<span class='badge badge-regime'>{s['details']['mtf_bias']}</span>")
         
-        # Z-Score Interpretation
         z_val = s['details']['structure_z']
         z_text = "NEUTRAL"
         if z_val > 0: z_text = "BULL POWER"
@@ -562,7 +585,6 @@ def display_sig(s):
 
         st.markdown("---")
         
-        # Métriques techniques
         t1, t2, t3 = st.columns(3)
         t1.metric("Z-Score", f"{z_val:.1f}")
         t2.metric("Vol Score", f"{s['details']['vol_score']:.2f}")
@@ -570,7 +592,6 @@ def display_sig(s):
         
         st.markdown("---")
         
-        # Risk Management
         r1, r2 = st.columns(2)
         r1.markdown(f"""<div class='risk-box'>
             <div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div>
@@ -593,7 +614,7 @@ def display_sig(s):
 # ==========================================
 def main():
     st.title("💎 BLUESTAR ULTIMATE v3.0")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Probability Engine | Z-Score Structure | Institutional Risk</p>", 
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Probability Engine | Z-Score Structure | Dynamic Correlation Filter</p>", 
                unsafe_allow_html=True)
     
     with st.sidebar:
@@ -602,7 +623,6 @@ def main():
         strict_mode = st.checkbox("🔥 Mode Strict (Z-Score)", value=False, 
                                  help="Filtre agressif : Requiere Z-Score non-neutre et Bias clair.")
         
-        # Slider de probabilité (0.0 à 1.0 converti en 0-10 pour l'UI)
         min_prob_display = st.slider("Confiance Minimale (%)", 50, 95, 75, 5)
         min_prob = min_prob_display / 100.0
         
@@ -611,8 +631,8 @@ def main():
         st.markdown("""
         <div style='font-size:0.85em;color:#94a3b8;line-height:1.8;'>
         <b>Z-Score Structure:</b> Puissance de la tendance<br>
-        <b>Weight of Evidence:</b> Score pondéré (RSI, MTF)<br>
-        <b>Volatility Adjusted:</b> Score ajusté au bruit
+        <b>Corrélation Dynamique:</b> Filtre les conflits de paires<br>
+        <b>Currency Strength (RSI):</b> Validation de la devise
         </div>
         """, unsafe_allow_html=True)
         
@@ -645,13 +665,13 @@ def main():
                 st.markdown("""
                 **Raisons possibles :**
                 
-                1. **Volatilité insuffisante** pour générer un Z-Score significatif.
-                2. **Neutralité du marché** : Les Bias MTF sont probablement "NEUTRAL".
-                3. **Divergence Structurelle** : Le RSI donne un signal mais le prix est dans une zone de consolidation (Z-Score proche de 0).
+                1. **Conflits de Corrélation** : Il se peut qu'un bon signal ait été rejeté car une autre paire similaire (ex: EUR/USD vs GBP/USD) est déjà active.
+                2. **Volatilité insuffisante**.
+                3. **Neutralité du marché** (Z-Score proche de 0).
                 
                 **Actions :**
                 - Baisser la confiance minimale à **65%**.
-                - Désactiver le "Mode Strict" pour autoriser les marchés neutres.
+                - Désactiver le "Mode Strict".
                 """)
         else:
             st.success(f"✅ {len(results)} Signal{'s' if len(results) > 1 else ''} Détecté{'s' if len(results) > 1 else ''}")
@@ -672,7 +692,7 @@ def main():
                 display_sig(sig)
                 
             st.markdown("---")
-            st.caption("💡 **Note Quant** : Ce scanner utilise une approche probabiliste. Un score de 85% signifie que les facteurs internes (RSI, MTF, Structure) sont fortement alignés.")
+            st.caption("💡 **Note Quant** : Ce scanner filtre automatiquement les signaux corrélés pour éviter la sur-exposition.")
 
 if __name__ == "__main__":
     main()
