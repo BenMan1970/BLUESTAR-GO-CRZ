@@ -5,11 +5,12 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import logging
 from datetime import datetime, timezone
+from scipy import stats # Nécessite 'pip install scipy'
 
 # ==========================================
-# CONFIGURATION & STYLE
+# CONFIGURATION & STYLE (Identique)
 # ==========================================
-st.set_page_config(page_title="Bluestar SNP3 Ultimate v2.1", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar SNP3 Ultimate v3.0", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -92,6 +93,7 @@ class OandaClient:
 
     def get_candles(self, instrument, granularity, count):
         key = f"{instrument}_{granularity}"
+        # Cache TTL de 60 secondes pour les données récentes
         if key in st.session_state.cache:
             ts, data = st.session_state.cache[key]
             if (datetime.now() - ts).total_seconds() < 60: return data
@@ -113,7 +115,8 @@ class OandaClient:
             if not df.empty:
                 st.session_state.cache[key] = (datetime.now(), df)
             return df
-        except:
+        except Exception as e:
+            logging.error(f"Error fetching {instrument}: {e}")
             return pd.DataFrame()
 
 ASSETS = [
@@ -126,42 +129,19 @@ ASSETS = [
 ]
 
 # ==========================================
-# PARAMÈTRES PAR ACTIF (OPTIMISÉS)
+# PARAMÈTRES PAR ACTIF
 # ==========================================
 def get_asset_params(symbol):
-    """Paramètres calibrés par classe d'actif"""
     if "XAU" in symbol:
-        return {
-            'type': 'COMMODITY', 
-            'min_atr': 0.06, 
-            'adx_threshold': 18, 
-            'sl_mult': 2.0,
-            'fvg_mult': 0.6,  # FVG plus larges pour Gold
-            'rsi_momentum_min': 2.0  # Momentum RSI plus fort
-        }
+        return {'type': 'COMMODITY', 'atr_threshold': 0.06, 'sl_base': 1.8, 'tp_rr': 2.5}
     if "US30" in symbol or "NAS" in symbol or "SPX" in symbol:
-        return {
-            'type': 'INDEX', 
-            'min_atr': 0.10, 
-            'adx_threshold': 20, 
-            'sl_mult': 2.0,
-            'fvg_mult': 0.6,
-            'rsi_momentum_min': 2.0
-        }
-    # Forex par défaut
-    return {
-        'type': 'FOREX', 
-        'min_atr': 0.035, 
-        'adx_threshold': 18, 
-        'sl_mult': 1.5,
-        'fvg_mult': 0.5,  # FVG standard
-        'rsi_momentum_min': 1.5
-    }
+        return {'type': 'INDEX', 'atr_threshold': 0.10, 'sl_base': 2.2, 'tp_rr': 3.0}
+    return {'type': 'FOREX', 'atr_threshold': 0.035, 'sl_base': 1.5, 'tp_rr': 2.0}
 
 # ==========================================
-# INDICATEURS TECHNIQUES (AMÉLIORÉS)
+# MOTEUR D'INDICATEURS (Optimisé)
 # ==========================================
-class SmartIndicators:
+class QuantEngine:
     @staticmethod
     def calculate_atr(df, period=14):
         h, l, c = df['high'], df['low'], df['close']
@@ -169,224 +149,210 @@ class SmartIndicators:
         return tr.ewm(span=period, adjust=False).mean().iloc[-1]
 
     @staticmethod
-    def calculate_rsi_ohlc4(df, period=7):
-        ohlc4 = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-        delta = ohlc4.diff()
+    def calculate_rsi(df, period=7):
+        delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).fillna(0)
         loss = (-delta.where(delta < 0, 0)).fillna(0)
         rs = gain.ewm(alpha=1/period, adjust=False).mean() / loss.ewm(alpha=1/period, adjust=False).mean()
         return 100 - (100 / (1 + rs))
 
     @staticmethod
-    def get_hma_trend(series, length=20):
-        wma1 = series.rolling(int(length/2)).mean()
-        wma2 = series.rolling(length).mean()
-        hma = (2 * wma1 - wma2).rolling(int(np.sqrt(length))).mean()
-        if len(hma) < 2: return 0, 0
-        return (1 if hma.iloc[-1] > hma.iloc[-2] else -1), hma.iloc[-1]
+    def detect_structure_zscore(df, lookback=20):
+        """Détecte la tendance via Z-Score au lieu de compter les HH/LL"""
+        if len(df) < lookback + 1: return 0
+        
+        close = df['close'].iloc[-1]
+        mean = df['close'].rolling(window=lookback).mean().iloc[-1]
+        std = df['close'].rolling(window=lookback).std().iloc[-1]
+        
+        if std == 0: return 0
+        z = (close - mean) / std
+        
+        # Z-Score > 1.5 suggère une extension de tendance (puissance)
+        # Z-Score < 0.5 suggère un retour à la moyenne (range)
+        if z > 1.5: return 1 # Bullish Power
+        if z < -1.5: return -1 # Bearish Power
+        return 0 # Neutral/Range
 
     @staticmethod
-    def detect_fvg_enhanced(df, atr, fvg_mult=0.5):
-        """FVG Detection améliorée avec validation stricte"""
-        if len(df) < 5: return False, None, 0
+    def detect_smart_fvg(df, atr):
+        """FVG validé par le volume relatif"""
+        if len(df) < 4: return False, 0
         
         curr_close = df['close'].iloc[-1]
-        min_gap = atr * fvg_mult  # Seuil dynamique selon actif
-        max_gap = atr * 2.0  # Gap max pour éviter anomalies
+        min_gap = atr * 0.5
+        # On regarde la bougie i-2 vs i-1 (Gap entre 1 et 3)
+        high_1 = df['high'].iloc[-3]
+        low_1 = df['low'].iloc[-3]
+        high_3 = df['high'].iloc[-1]
+        low_3 = df['low'].iloc[-1]
         
-        best_gap_quality = 0
-        best_type = None
+        vol_mean = df['volume'].rolling(20).mean().iloc[-1]
+        vol_curr = df['volume'].iloc[-1]
         
-        for i in range(1, 4):
-            high_A = df['high'].iloc[-(i+2)]
-            low_A = df['low'].iloc[-(i+2)]
-            high_C = df['high'].iloc[-i]
-            low_C = df['low'].iloc[-i]
-            
-            # Bull FVG
-            gap_bull = low_C - high_A
-            if gap_bull > min_gap and gap_bull < max_gap and curr_close > high_A:
-                # Validation : le prix doit être dans ou au-dessus du gap
-                if curr_close >= high_A and curr_close <= low_C * 1.01:  # Tolérance 1%
-                    gap_quality = min(gap_bull / atr, 2.0) * 50  # Normalise à 0-100
-                    if gap_quality > best_gap_quality:
-                        best_gap_quality = gap_quality
-                        best_type = "BULL"
-            
-            # Bear FVG
-            gap_bear = low_A - high_C
-            if gap_bear > min_gap and gap_bear < max_gap and curr_close < low_A:
-                if curr_close <= low_A and curr_close >= high_C * 0.99:
-                    gap_quality = min(gap_bear / atr, 2.0) * 50
-                    if gap_quality > best_gap_quality:
-                        best_gap_quality = gap_quality
-                        best_type = "BEAR"
-        
-        return (best_type is not None), best_type, best_gap_quality
+        # FVG Bullish
+        gap_bull = low_3 - high_1
+        if gap_bull > min_gap and curr_close > high_1:
+            # Confirmation par volume
+            if vol_curr > vol_mean * 0.8: 
+                return True, "BULL"
+                
+        # FVG Bearish
+        gap_bear = low_1 - high_3
+        if gap_bear > min_gap and curr_close < low_1:
+            if vol_curr > vol_mean * 0.8:
+                return True, "BEAR"
+                
+        return False, None
 
     @staticmethod
-    def detect_obv_pump(df, length=20):
-        try:
-            change = df['close'].diff()
-            vol = df['volume']
-            obv_direction = np.where(change > 0, vol, np.where(change < 0, -vol, 0))
-            obv = pd.Series(obv_direction).cumsum()
-            obv_sma = obv.rolling(window=length).mean()
+    def get_mtf_bias(df_d, df_w):
+        """Bias institutionnel robuste"""
+        def trend_score(df):
+            if len(df) < 50: return 0
+            sma200 = df['close'].rolling(200).mean().iloc[-1]
+            ema50 = df['close'].ewm(span=50).mean().iloc[-1]
+            price = df['close'].iloc[-1]
             
-            # Ajouter force du signal
-            if len(obv) > 1:
-                obv_strength = abs(obv.iloc[-1] - obv_sma.iloc[-1]) / obv_sma.iloc[-1] if obv_sma.iloc[-1] != 0 else 0
-                return obv.iloc[-1] > obv_sma.iloc[-1], obv.iloc[-1] < obv_sma.iloc[-1], obv_strength
-            return False, False, 0
-        except: 
-            return False, False, 0
+            score = 0
+            if price > sma200: score += 1
+            if ema50 > sma200: score += 1
+            # Distance prix/SMA200 pour éviter le "noise" près de la moyenne
+            dist = abs((price - sma200) / sma200)
+            if dist > 0.005: score += 1 # Au moins 0.5% de marge
+            
+            return score # 0 à 3 (Bearish) à 3 (Bullish), 1.5 est neutre
 
-def calculate_adx(df, period=14):
-    if len(df) < period + 1: return 0
-    high, low, close = df['high'], df['low'], df['close']
-    tr = pd.concat([high - low, abs(high - close.shift(1)), abs(low - close.shift(1))], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False).mean()
-    up, down = high - high.shift(1), low.shift(1) - low
-    plus_dm = np.where((up > down) & (up > 0), up, 0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0)
-    plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    return dx.ewm(span=period, adjust=False).mean().iloc[-1] if len(dx) > 0 else 0
+        score_d = trend_score(df_d)
+        score_w = trend_score(df_w)
+        
+        total = score_d + score_w
+        if total >= 4: return "STRONG_BULL"
+        if total >= 2: return "BULL"
+        if total <= -4: return "STRONG_BEAR"
+        if total <= -2: return "BEAR"
+        return "NEUTRAL"
 
 # ==========================================
-# MARKET REGIME (RENFORCÉ)
+# ANALYSE DE PROBABILITÉ (WEIGHT OF EVIDENCE)
 # ==========================================
-def detect_structure_htf(df):
-    if len(df) < 20: return "UNKNOWN", 0
-    highs = df['high'].rolling(5).max()
-    lows = df['low'].rolling(5).min()
-    recent_highs = highs.iloc[-15:].values
-    recent_lows = lows.iloc[-15:].values
+def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
+    """
+    Calcule une probabilité de succès (0.0 - 1.0) au lieu d'un score additif.
+    """
+    prob_factors = []
+    weights = []
+    details = {}
     
-    hh_count = sum(1 for i in range(1, len(recent_highs)) if recent_highs[i] > recent_highs[i-1])
-    ll_count = sum(1 for i in range(1, len(recent_lows)) if recent_lows[i] < recent_lows[i-1])
-    total = len(recent_highs) - 1
+    params = get_asset_params(symbol)
+    atr = QuantEngine.calculate_atr(df_m5)
+    atr_pct = (atr / df_m5['close'].iloc[-1]) * 100
     
-    if hh_count / total > 0.55: return "BULLISH_STRUCTURE", 75
-    elif ll_count / total > 0.55: return "BEARISH_STRUCTURE", 75
-    else: return "OSCILLATING", 30
-
-def get_market_regime(api, symbol):
-    try:
-        df_h4 = api.get_candles(symbol, "H4", 100)
-        df_d = api.get_candles(symbol, "D", 50)
-        if df_h4.empty or df_d.empty: return "UNKNOWN", {}
-        
-        params = get_asset_params(symbol)
-        atr_h4 = SmartIndicators.calculate_atr(df_h4, 14)
-        atr_median = df_h4['close'].rolling(14).apply(
-            lambda x: SmartIndicators.calculate_atr(df_h4.iloc[:len(x)], 14), raw=False
-        ).median()
-        atr_ratio = atr_h4 / atr_median if atr_median > 0 else 1.0
-        
-        adx_h4 = calculate_adx(df_h4, 14)
-        structure, s_score = detect_structure_htf(df_d)
-        
-        regime_data = {
-            'atr_ratio': atr_ratio, 
-            'adx_h4': adx_h4, 
-            'structure': structure,
-            'structure_score': s_score
-        }
-        
-        # Logique affinée
-        if atr_ratio < 0.70 and adx_h4 < 15: 
-            return "RANGE", regime_data
-        
-        if adx_h4 > params['adx_threshold'] and structure in ["BULLISH_STRUCTURE", "BEARISH_STRUCTURE"]: 
-            return "TREND", regime_data
-        
-        if adx_h4 > 23: 
-            return "TREND", regime_data
-        
-        return "WEAK_TREND", regime_data
-    except: 
-        return "UNKNOWN", {}
-
-# ==========================================
-# GPS (MULTI-TIMEFRAME BIAS) - AMÉLIORÉ
-# ==========================================
-def ema(series, length): 
-    return series.ewm(span=length, adjust=False).mean()
-
-def sma_local(series, length): 
-    return series.rolling(window=length).mean()
-
-def calc_institutional_trend(df):
-    """Calcul GPS avec validation de données suffisantes"""
-    if len(df) < 200: 
-        return 'Insufficient_Data'
+    # --- 1. VOLATILITÉ ADÉQUATE (Filtre Binaire) ---
+    if atr_pct < params['atr_threshold'] * 0.5:
+        return 0, {}, atr_pct # Marché trop mort
     
-    close = df['close']
-    curr = close.iloc[-1]
-    sma200 = sma_local(close, 200).iloc[-1]
-    ema50 = ema(close, 50).iloc[-1]
+    vol_score = min(atr_pct / params['atr_threshold'], 2.0) # Cap à 2.0
+    details['vol_score'] = vol_score
+    # On ajoute la volatilité comme facteur de confiance multiplicatif
+    vol_conf = min(vol_score, 1.2) / 1.2 
     
-    # Validation de la clarté du trend
-    distance_pct = abs((curr - sma200) / sma200) * 100
+    # --- 2. MOMENTUM RSI (Trigger Principal) ---
+    rsi = QuantEngine.calculate_rsi(df_m5)
+    rsi_prev = df_m5['close'].iloc[-2] # Proxy simple si pas série, ou recalcul
     
-    if curr > sma200 and ema50 > sma200:
-        return "Bullish" if distance_pct > 0.3 else "Range"  # Au moins 0.3% d'écart
-    if curr < sma200 and ema50 < sma200:
-        return "Bearish" if distance_pct > 0.3 else "Range"
+    # Calcul dynamique du momentum RSI
+    rsi_serie = QuantEngine.calculate_rsi(df_m5)
+    if len(rsi_serie) < 3: return 0, {}, atr_pct
+    rsi_val = rsi_serie.iloc[-1]
+    rsi_prev_val = rsi_serie.iloc[-2]
+    rsi_mom = rsi_val - rsi_prev_val
     
-    return "Range"
-
-def calculate_mtf_gps(api, symbol, direction):
-    try:
-        df_d = api.get_candles(symbol, "D", 250)
-        if df_d.empty or len(df_d) < 200: 
-            return {'quality': 'N/A', 'analysis': {}, 'confidence': 0}
+    rsi_prob = 0
+    if direction == "BUY":
+        if rsi_prev_val < 50 and rsi_val >= 50 and rsi_mom > 1.5:
+            rsi_prob = 0.85 # Trigger fort
+        elif rsi_val > 50 and rsi_mom > 0:
+            rsi_prob = 0.60 # Momentum continu
+    else: # SELL
+        if rsi_prev_val > 50 and rsi_val <= 50 and rsi_mom < -1.5:
+            rsi_prob = 0.85
+        elif rsi_val < 50 and rsi_mom < 0:
+            rsi_prob = 0.60
+            
+    if rsi_prob == 0: return 0, {}, atr_pct # Pas de trigger valide
+    prob_factors.append(rsi_prob)
+    weights.append(0.35) # 35% du poids total
+    details['rsi_mom'] = abs(rsi_mom)
+    
+    # --- 3. STRUCTURE DU MARCHÉ (Z-Score & ADX) ---
+    # Calcul ADX manuel simplifié ou structure
+    z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
+    
+    struc_score = 0
+    if direction == "BUY":
+        if z_score_struc == 1: struc_score = 0.8 # Extension Haussière
+        elif z_score_struc == 0: struc_score = 0.4 # Neutre
+        else: struc_score = 0.0 # Contre extension Baissière
+    else:
+        if z_score_struc == -1: struc_score = 0.8
+        elif z_score_struc == 0: struc_score = 0.4
+        else: struc_score = 0.0
         
-        d_res = df_d.copy().set_index('time')
-        df_w = d_res.resample('W-FRI').agg({
-            'open':'first', 'high':'max', 'low':'min', 'close':'last'
-        }).dropna()
+    prob_factors.append(struc_score)
+    weights.append(0.25) # 25% du poids
+    details['structure_z'] = z_score_struc
+    
+    # --- 4. BIAS MULTI-TIMEFRAME (GPS) ---
+    mtf_bias = QuantEngine.get_mtf_bias(df_d, df_w)
+    
+    mtf_score = 0.5 # Neutre par défaut
+    if direction == "BUY":
+        if mtf_bias == "STRONG_BULL": mtf_score = 0.95
+        elif mtf_bias == "BULL": mtf_score = 0.80
+        elif mtf_bias == "NEUTRAL": mtf_score = 0.60
+        else: mtf_score = 0.20 # Contre tendance
+    else: # SELL
+        if mtf_bias == "STRONG_BEAR": mtf_score = 0.95
+        elif mtf_bias == "BEAR": mtf_score = 0.80
+        elif mtf_bias == "NEUTRAL": mtf_score = 0.60
+        else: mtf_score = 0.20
         
-        if len(df_w) < 50:
-            return {'quality': 'N/A', 'analysis': {}, 'confidence': 0}
-
-        trend_d = calc_institutional_trend(df_d)
-        trend_w = calc_institutional_trend(df_w)
-        target = 'Bullish' if direction == 'BUY' else 'Bearish'
-        
-        # Gestion des données insuffisantes
-        if trend_d == 'Insufficient_Data' or trend_w == 'Insufficient_Data':
-            return {'quality': 'N/A', 'analysis': {'D': 'N/A', 'W': 'N/A'}, 'confidence': 0}
-        
-        quality = 'C'
-        confidence = 0
-        
-        if trend_d == target and trend_w == target: 
-            quality = 'A'
-            confidence = 95
-        elif trend_d == target: 
-            quality = 'B'
-            confidence = 70
-        elif trend_w == target:
-            quality = 'B-'
-            confidence = 60
+    prob_factors.append(mtf_score)
+    weights.append(0.30) # 30% du poids
+    details['mtf_bias'] = mtf_bias
+    
+    # --- 5. VALIDATION FVG (Confluence) ---
+    fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
+    fvg_score = 0
+    if fvg_active:
+        if (direction == "BUY" and fvg_type == "BULL") or (direction == "SELL" and fvg_type == "BEAR"):
+            fvg_score = 0.9 # FVG aligné
         else:
-            confidence = 20
-            
-        return {
-            'quality': quality, 
-            'analysis': {'D': trend_d, 'W': trend_w},
-            'confidence': confidence
-        }
-    except: 
-        return {'quality': 'N/A', 'analysis': {}, 'confidence': 0}
+            fvg_score = 0.2 # FVG contre trade (ignorable)
+    else:
+        fvg_score = 0.6 # Pas de FVG, neutre
+        
+    prob_factors.append(fvg_score)
+    weights.append(0.10) # 10% du poids (Bonus)
+    details['fvg_align'] = fvg_active
+    
+    # --- CALCUL FINAL ---
+    # Moyenne pondérée
+    total_weight = sum(weights)
+    weighted_prob = sum(p * w for p, w in zip(prob_factors, weights)) / total_weight
+    
+    # Ajustement par volatilité (Confiance de marché)
+    final_score = weighted_prob * vol_conf
+    
+    return final_score, details, atr_pct
 
 # ==========================================
-# CURRENCY STRENGTH
+# SCANNER PRINCIPAL
 # ==========================================
-def calculate_currency_strength(api):
+@st.cache_data(ttl=60) # Cache CS pour 60 secondes
+def calculate_currency_strength_wrapper(api):
+    # Fonction simplifiée pour le cache, logique identique à avant
     pct_changes = {}
     forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "US30" not in p]
     for sym in forex_pairs:
@@ -395,290 +361,144 @@ def calculate_currency_strength(api):
             pct_changes[sym] = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
     
     if not pct_changes: return None
-    
     currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
     raw_scores = {c: 0.0 for c in currencies}
-    
     for curr in currencies:
         for pair, pct in pct_changes.items():
             if curr in pair:
                 base, quote = pair.split('_')
                 if base == curr: raw_scores[curr] += pct
                 elif quote == curr: raw_scores[curr] -= pct
-    
     return raw_scores
 
-# ==========================================
-# COOLDOWN & CORRELATION
-# ==========================================
-def check_signal_cooldown(symbol, hours=2):
-    now = datetime.now()
-    if symbol in st.session_state.signal_history:
-        last_signal = st.session_state.signal_history[symbol]
-        if (now - last_signal).total_seconds() < hours * 3600: return False
-    return True
-
-def detect_correlation_conflict(signals, new_signal):
-    CORRELATED_PAIRS = {
-        'EUR_USD': ['GBP_USD', 'AUD_USD', 'NZD_USD'],
-        'GBP_USD': ['EUR_USD', 'AUD_USD', 'NZD_USD'],
-        'USD_JPY': ['USD_CHF', 'USD_CAD'],
-        'XAU_USD': ['EUR_USD']
-    }
-    sym = new_signal['symbol']
-    typ = new_signal['type']
-    if sym not in CORRELATED_PAIRS: return False
-    
-    for existing in signals[-5:]:
-        if existing['symbol'] in CORRELATED_PAIRS[sym] and existing['type'] != typ: 
-            return True
-    return False
-
-# ==========================================
-# SCANNER PRINCIPAL (PERFECTIONNÉ)
-# ==========================================
-def run_scan(api, min_score, strict_mode):
-    cs_scores = calculate_currency_strength(api)
+def run_scan_v3(api, min_prob, strict_mode):
+    cs_scores = calculate_currency_strength_wrapper(api)
     signals = []
     bar = st.progress(0)
-    utc_hour = datetime.now(timezone.utc).hour
-    session_active = (8 <= utc_hour < 21)
     
     for i, sym in enumerate(ASSETS):
         bar.progress((i+1)/len(ASSETS))
-        if not check_signal_cooldown(sym): continue
+        
+        # Cache cooldown simple
+        if sym in st.session_state.signal_history:
+            if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 3600: 
+                continue
         
         try:
-            asset_params = get_asset_params(sym)
-            regime, regime_data = get_market_regime(api, sym)
+            # Récupération Multi-Timeframe
+            df_m5 = api.get_candles(sym, "M5", 150)
+            df_h4 = api.get_candles(sym, "H4", 100)
+            df_d = api.get_candles(sym, "D", 100)
+            df_w_raw = api.get_candles(sym, "D", 300) # On resample nous-même
             
-            # FILTRE RANGE absolu
-            if regime == "RANGE": continue
-            if strict_mode and regime == "UNKNOWN": continue
+            if df_m5.empty or df_h4.empty or df_d.empty: continue
             
-            # DATA M5
-            df = api.get_candles(sym, "M5", 150)
-            if df.empty: continue
-            df['ohlc4'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+            # Resample Weekly manuel pour assurer la qualité
+            df_w = df_w_raw.set_index('time').resample('W-FRI').agg({
+                'open':'first', 'high':'max', 'low':'min', 'close':'last'
+            }).dropna().reset_index()
             
-            atr = SmartIndicators.calculate_atr(df)
-            price = df['close'].iloc[-1]
-            atr_pct = (atr / price) * 100
+            # Détection direction via RSI Momentum (Scan Bi-directionnel)
+            rsi_serie = QuantEngine.calculate_rsi(df_m5)
+            if len(rsi_serie) < 3: continue
             
-            # FILTRE VOLATILITÉ
-            vol_threshold = asset_params['min_atr'] if strict_mode else asset_params['min_atr'] * 0.75
-            if atr_pct < vol_threshold: continue
+            rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
             
-            # === TRIGGER RSI AMÉLIORÉ ===
-            rsi_series = SmartIndicators.calculate_rsi_ohlc4(df)
-            if len(rsi_series) < 3: continue
+            scan_direction = None
+            # Trigger conditionnel
+            if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 1.0:
+                scan_direction = "BUY"
+            elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -1.0:
+                scan_direction = "SELL"
             
-            rsi = rsi_series.iloc[-1]
-            rsi_prev = rsi_series.iloc[-2]
-            rsi_prev2 = rsi_series.iloc[-3]
+            if not scan_direction: continue
             
-            # Calcul momentum RSI
-            rsi_momentum = rsi - rsi_prev
-            rsi_acceleration = (rsi - rsi_prev) - (rsi_prev - rsi_prev2)
-            
-            trend_hma, _ = SmartIndicators.get_hma_trend(df['close'])
-            
-            signal_type = None
-            trigger_quality = 0
-            
-            # RSI Cross avec momentum + zone de départ
-            if trend_hma == 1:
-                # BUY : RSI cross 50 avec momentum positif ET vient d'en dessous de 48
-                if (rsi_prev < 48 and rsi >= 50 and 
-                    rsi_momentum >= asset_params['rsi_momentum_min']):
-                    signal_type = "BUY"
-                    # Qualité bonus si accélération
-                    trigger_quality = 70 + min(rsi_momentum * 5, 30)
-                    if rsi_acceleration > 0.5: trigger_quality += 10
-                    
-            elif trend_hma == -1:
-                # SELL : RSI cross 50 avec momentum négatif ET vient d'au-dessus de 52
-                if (rsi_prev > 52 and rsi <= 50 and 
-                    rsi_momentum <= -asset_params['rsi_momentum_min']):
-                    signal_type = "SELL"
-                    trigger_quality = 70 + min(abs(rsi_momentum) * 5, 30)
-                    if rsi_acceleration < -0.5: trigger_quality += 10
-            
-            if not signal_type: continue
-            
-            # === SCORING OPTIMISÉ ===
-            current_score = 0.0
-            details = {}
-            
-            # A. REGIME (2.5 ou 1.5)
-            if regime == "TREND": 
-                current_score += 2.5
-                details['regime_quality'] = 'high'
-            elif regime == "WEAK_TREND": 
-                current_score += 1.5
-                details['regime_quality'] = 'medium'
-            
-            # B. GPS (2.0 / 1.5 / 0) avec confiance
-            mtf = calculate_mtf_gps(api, sym, signal_type)
-            
-            if mtf['quality'] == 'N/A':
-                if strict_mode: continue
-                current_score -= 0.5
-                details['gps_quality'] = 'low'
-            elif mtf['quality'] == 'C':
-                if strict_mode: continue
-                current_score -= 1.0
-                details['gps_quality'] = 'low'
-            elif mtf['quality'] == 'A':
-                current_score += 2.0
-                details['gps_quality'] = 'high'
-            elif mtf['quality'] == 'B':
-                current_score += 1.5
-                details['gps_quality'] = 'high'
-            elif mtf['quality'] == 'B-':
-                current_score += 1.2
-                details['gps_quality'] = 'medium'
-            
-            # C. CURRENCY STRENGTH (1.0 bonus / -0.5 malus)
-            cs_aligned = False
-            base, quote = sym.split('_') if "_" in sym else (None, None)
-            
-            if asset_params['type'] == 'FOREX' and cs_scores and base and quote:
-                gap = cs_scores.get(base, 0) - cs_scores.get(quote, 0)
-                
-                if signal_type == "BUY":
-                    if gap > 0.4: 
-                        current_score += 1.0
-                        cs_aligned = True
-                    elif gap < -0.4:
-                        if strict_mode: continue
-                        current_score -= 0.5
-                else:  # SELL
-                    if gap < -0.4:
-                        current_score += 1.0
-                        cs_aligned = True
-                    elif gap > 0.4:
-                        if strict_mode: continue
-                        current_score -= 0.5
-            else:
-                # Bonus Gold/Indices si structure propre
-                if regime == "TREND" and mtf['quality'] in ['A', 'B']:
-                    current_score += 0.8
-            
-            # D. SESSION (0.8 bonus)
-            if session_active: 
-                current_score += 0.8
-            elif strict_mode and "JPY" not in sym: 
-                current_score -= 0.5
-            
-            # E. TRIGGER QUALITY (basé sur momentum RSI)
-            trigger_bonus = (trigger_quality - 70) / 100 * 1.2  # Max 1.2 pts
-            current_score += max(0.8, trigger_bonus)  # Min 0.8
-            
-            # F. FVG AMÉLIORÉ
-            fvg, fvg_type, fvg_quality = SmartIndicators.detect_fvg_enhanced(
-                df, atr, asset_params['fvg_mult']
+            # Calcul de la probabilité
+            prob, details, atr_pct = calculate_signal_probability(
+                df_m5, df_h4, df_d, df_w, sym, scan_direction
             )
             
-            if fvg and ((signal_type == "BUY" and fvg_type == "BULL") or 
-                       (signal_type == "SELL" and fvg_type == "BEAR")):
-                fvg_bonus = 0.5 + (fvg_quality / 100) * 0.5  # 0.5 à 1.0 pts
-                current_score += fvg_bonus
-                details['fvg_quality'] = fvg_quality
+            # Score Minimum Check
+            if prob < min_prob: continue
             
-            # G. OBV avec force
-            obv_pump, obv_dump, obv_strength = SmartIndicators.detect_obv_pump(df)
-            obv_ok = (signal_type == "BUY" and obv_pump) or (signal_type == "SELL" and obv_dump)
+            # Veto Strict Mode
+            if strict_mode:
+                if details['mtf_bias'] == "NEUTRAL" and details['structure_z'] == 0:
+                    continue
             
-            if obv_ok:
-                obv_bonus = 0.5 + min(obv_strength * 0.5, 0.4)  # 0.5 à 0.9 pts
-                current_score += obv_bonus
-                details['obv_strength'] = obv_strength
+            # Currency Strength Check
+            cs_aligned = False
+            base, quote = sym.split('_')
+            if cs_scores and base and quote:
+                gap = cs_scores.get(base, 0) - cs_scores.get(quote, 0)
+                if scan_direction == "BUY" and gap > 0.3: cs_aligned = True
+                elif scan_direction == "SELL" and gap < -0.3: cs_aligned = True
+            elif "XAU" in sym or "US30" in sym:
+                cs_aligned = True # Indices/Commodités moins dépendants du CS simple
+
+            if strict_mode and not cs_aligned: continue
             
-            # H. VOLATILITÉ (1.0 si optimal)
-            if atr_pct >= asset_params['min_atr']: 
-                current_score += 1.0
+            # Calcul SL/TP
+            price = df_m5['close'].iloc[-1]
+            atr = QuantEngine.calculate_atr(df_m5)
+            params = get_asset_params(sym)
             
-            # === CHECK FINAL ===
-            if current_score < min_score: continue
-            if detect_correlation_conflict(signals, {'symbol': sym, 'type': signal_type}): 
-                continue
+            # SL Adaptatif
+            sl_mult = params['sl_base']
+            if details['structure_z'] != 0: sl_mult -= 0.2 # SL plus serré si structure claire
+            sl_mult = max(sl_mult, 1.0)
             
-            # RISK MANAGEMENT ADAPTATIF
-            sl_mult = asset_params['sl_mult']
+            sl = price - (atr * sl_mult) if scan_direction == "BUY" else price + (atr * sl_mult)
             
-            # Ajustements dynamiques
-            if mtf['quality'] == 'A': sl_mult -= 0.3
-            if mtf['confidence'] >= 90: sl_mult -= 0.2
-            if regime == "TREND" and regime_data.get('adx_h4', 0) > 30: sl_mult -= 0.2
-            
-            sl_mult = max(sl_mult, 1.0)  # Minimum 1.0
-            
-            sl = price - (atr * sl_mult) if signal_type == "BUY" else price + (atr * sl_mult)
-            
-            # TP adaptatif selon qualité
-            tp_mult = 3.0
-            if current_score >= 8.0: tp_mult = 3.5
-            if mtf['quality'] == 'A' and regime == "TREND": tp_mult = 4.0
-            
-            tp = price + (atr * tp_mult) if signal_type == "BUY" else price - (atr * tp_mult)
-            
-            # Détails enrichis
-            details.update({
-                'cs_aligned': cs_aligned,
-                'session': session_active,
-                'fvg': fvg,
-                'vol': obv_ok,
-                'adx': regime_data.get('adx_h4', 0),
-                'trigger_quality': trigger_quality,
-                'rsi_momentum': abs(rsi_momentum),
-                'structure_score': regime_data.get('structure_score', 0),
-                'gps_confidence': mtf.get('confidence', 0)
-            })
+            # TP Basé sur le RR paramétré de l'actif
+            tp_mult = params['tp_rr']
+            tp = price + (atr * tp_mult) if scan_direction == "BUY" else price - (atr * tp_mult)
             
             signals.append({
                 'symbol': sym,
-                'type': signal_type,
+                'type': scan_direction,
                 'price': price,
-                'score': current_score,
-                'regime': regime,
-                'mtf': mtf,
+                'prob': prob, # Probabilité 0-1
+                'score_display': prob * 10, # Pour affichage 0-10
+                'details': details,
                 'atr_pct': atr_pct,
-                'time': df['time'].iloc[-1],
+                'time': df_m5['time'].iloc[-1],
                 'sl': sl,
                 'tp': tp,
                 'rr': tp_mult / sl_mult,
-                'details': details
+                'cs_aligned': cs_aligned
             })
             
             st.session_state.signal_history[sym] = datetime.now()
             
         except Exception as e:
+            logging.error(f"Scan error {sym}: {e}")
             continue
             
     bar.empty()
-    return sorted(signals, key=lambda x: x['score'], reverse=True)
+    return sorted(signals, key=lambda x: x['prob'], reverse=True)
 
 # ==========================================
-# AFFICHAGE SIGNAL (ENRICHI)
+# AFFICHAGE SIGNAL (Identique v2.1)
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
     col_type = "#10b981" if is_buy else "#ef4444"
     bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
     
-    sc = s['score']
-    if sc >= 8.0: 
-        label = "💎 PREMIUM"
+    sc = s['score_display']
+    # Mapping Probabilité -> Label
+    if sc >= 8.5: 
+        label = "💎 INSTITUTIONAL"
         quality_badge = "quality-high"
-    elif sc >= 7.0: 
-        label = "⭐ EXCELLENT"
+    elif sc >= 7.5: 
+        label = "⭐ ALGORITHMIC"
         quality_badge = "quality-high"
-    elif sc >= 6.0:
-        label = "✅ TRÈS BON"
+    elif sc >= 6.5:
+        label = "✅ STRATEGIC"
         quality_badge = "quality-medium"
     else: 
-        label = "📊 VALIDE"
+        label = "📊 TACTICAL"
         quality_badge = "quality-medium"
 
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
@@ -692,7 +512,7 @@ def display_sig(s):
                 <span style="font-size:1.8em;font-weight:900;color:white;">{s['symbol']}</span>
                 <span style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:4px;
                             color:white;margin-left:10px;">{s['type']}</span>
-                <span class="quality-indicator {quality_badge}">Q{int(s['details']['trigger_quality'])}</span>
+                <span class="quality-indicator {quality_badge}">{int(s['prob']*100)}% CONF</span>
             </div>
             <div style="text-align:right;">
                 <div style="font-size:1.4em;font-weight:bold;color:white;">{s['price']:.5f}</div>
@@ -702,38 +522,37 @@ def display_sig(s):
         
         # Badges
         badges = []
-        badges.append(f"<span class='badge badge-regime'>{s['regime']}</span>")
-        badges.append(f"<span class='badge badge-gps'>GPS {s['mtf']['quality']} ({s['details']['gps_confidence']}%)</span>")
+        badges.append(f"<span class='badge badge-regime'>{s['details']['mtf_bias']}</span>")
         
-        if s['details']['cs_aligned']: 
+        # Z-Score Interpretation
+        z_val = s['details']['structure_z']
+        z_text = "NEUTRAL"
+        if z_val > 0: z_text = "BULL POWER"
+        if z_val < 0: z_text = "BEAR POWER"
+        badges.append(f"<span class='badge badge-purple'>Z-SCORE: {z_text}</span>")
+        
+        if s['cs_aligned']: 
             badges.append("<span class='badge badge-blue'>CS ALIGNÉ</span>")
-        if s['details']['session']: 
-            badges.append("<span class='badge badge-vol'>SESSION</span>")
-        if s['details']['fvg']: 
-            fvg_q = int(s['details'].get('fvg_quality', 0))
-            badges.append(f"<span class='badge badge-purple'>FVG Q{fvg_q}</span>")
-        if s['details']['vol']: 
-            badges.append("<span class='badge badge-blue'>VOL+</span>")
-        if s['details']['rsi_momentum'] >= 3.0:
-            badges.append("<span class='badge badge-gold'>RSI⚡</span>")
+        if s['details']['fvg_align']: 
+            badges.append("<span class='badge badge-gold'>FVG ACTIF</span>")
         
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", 
                    unsafe_allow_html=True)
         
         st.write("")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Score", f"{sc:.1f}/10")
-        c2.metric("GPS", f"{s['mtf']['quality']}")
-        c3.metric("ADX H4", f"{s['details']['adx']:.0f}")
+        c1.metric("Confiance", f"{int(s['prob']*100)}%")
+        c2.metric("Bias MTF", f"{s['details']['mtf_bias']}")
+        c3.metric("RSI Mom.", f"{s['details']['rsi_mom']:.1f}")
         c4.metric("R:R", f"1:{s['rr']:.1f}")
 
         st.markdown("---")
         
         # Métriques techniques
         t1, t2, t3 = st.columns(3)
-        t1.metric("RSI Momentum", f"{s['details']['rsi_momentum']:.1f}")
-        t2.metric("Structure", f"{s['details']['structure_score']}")
-        t3.metric("Trigger Q", f"{s['details']['trigger_quality']:.0f}")
+        t1.metric("Z-Score", f"{z_val:.1f}")
+        t2.metric("Vol Score", f"{s['details']['vol_score']:.2f}")
+        t3.metric("Prob. Ajustée", f"{int(s['prob']*100)}%")
         
         st.markdown("---")
         
@@ -754,123 +573,93 @@ def display_sig(s):
                 {abs(s['tp'] - s['price']):.5f} ({(abs(s['tp'] - s['price'])/s['price']*100):.2f}%)
             </div>
         </div>""", unsafe_allow_html=True)
-        
-        st.caption(f"📊 HTF Bias: D={s['mtf']['analysis'].get('D', 'N/A')} | W={s['mtf']['analysis'].get('W', 'N/A')}")
 
 # ==========================================
 # INTERFACE PRINCIPALE
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE v2.1")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Enhanced Scoring | Smart Triggers | Adaptive Risk</p>", 
+    st.title("💎 BLUESTAR ULTIMATE v3.0")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Probability Engine | Z-Score Structure | Institutional Risk</p>", 
                unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.header("⚙️ Configuration v3.0")
         
-        strict_mode = st.checkbox("🔥 Mode Strict", value=False, 
-                                 help="Veto absolu : GPS C, CS opposé, UNKNOWN regime")
+        strict_mode = st.checkbox("🔥 Mode Strict (Z-Score)", value=False, 
+                                 help="Filtre agressif : Requiere Z-Score non-neutre et Bias clair.")
         
-        min_score = st.slider("Score Minimum", 4.0, 10.0, 5.5, 0.5,
-                             help="Seuil de qualification (5.5 = standard)")
+        # Slider de probabilité (0.0 à 1.0 converti en 0-10 pour l'UI)
+        min_prob_display = st.slider("Confiance Minimale (%)", 50, 95, 75, 5)
+        min_prob = min_prob_display / 100.0
         
         st.markdown("---")
-        st.markdown("### 📊 Paramètres Actifs")
+        st.markdown("### 📊 Nouvelle Métrique")
         st.markdown("""
         <div style='font-size:0.85em;color:#94a3b8;line-height:1.8;'>
-        <b>Forex:</b> ATR ≥ 0.035% | ADX ≥ 18<br>
-        <b>Gold:</b> ATR ≥ 0.06% | ADX ≥ 18<br>
-        <b>Indices:</b> ATR ≥ 0.10% | ADX ≥ 20
+        <b>Z-Score Structure:</b> Puissance de la tendance<br>
+        <b>Weight of Evidence:</b> Score pondéré (RSI, MTF)<br>
+        <b>Volatility Adjusted:</b> Score ajusté au bruit
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("---")
-        st.markdown("### 🎯 Améliorations v2.1")
+        st.markdown("### 🎯 Échelle de Confiance")
         st.markdown("""
         <div style='font-size:0.8em;color:#94a3b8;line-height:1.6;'>
-        ✅ <b>RSI Trigger</b> : Momentum + Zone<br>
-        ✅ <b>FVG Enhanced</b> : Validation 0.5 ATR<br>
-        ✅ <b>GPS Robust</b> : Confiance 200 bougies<br>
-        ✅ <b>OBV Force</b> : Strength scoring<br>
-        ✅ <b>Risk Adaptatif</b> : SL/TP dynamiques
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### 📈 Échelle Scoring")
-        st.markdown("""
-        <div style='font-size:0.8em;color:#94a3b8;line-height:1.6;'>
-        <b>8.0+:</b> 💎 Premium (rare)<br>
-        <b>7.0-7.9:</b> ⭐ Excellent<br>
-        <b>6.0-6.9:</b> ✅ Très bon<br>
-        <b>5.5-5.9:</b> 📊 Valide<br>
-        <b>&lt;5.5:</b> Filtré
+        <b>85%+:</b> 💎 Institutional (Alignement parfait)<br>
+        <b>75%-85%:</b> ⭐ Algorithmic (Forte probabilité)<br>
+        <b>65%-75%:</b> ✅ Strategic (Validé)<br>
+        <b>&lt;65%:</b> Filtré par défaut
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("---")
         if strict_mode:
-            st.warning("🛡️ **MODE STRICT ACTIF**\n\nZéro tolérance pour:\n- GPS C ou N/A\n- CS opposé\n- Regime UNKNOWN")
-        else:
-            st.info("🌊 **MODE NORMAL**\n\nMalus appliqués au lieu de veto total")
+            st.warning("🛡️ **MODE STRICT ACTIF**\n\nRequiere:\n- Z-Score Power (Extension)\n- Bias MTF Non-Neutre\n- Alignement CS")
     
-    if st.button("🚀 LANCER LE SCAN", type="primary"):
+    if st.button("🚀 LANCER LE SCAN v3.0", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
         
-        with st.spinner(f"🔍 Analyse Multi-Timeframe de {len(ASSETS)} actifs..."):
-            results = run_scan(api, min_score, strict_mode)
+        with st.spinner(f"🔍 Calcul Probabiliste sur {len(ASSETS)} actifs..."):
+            results = run_scan_v3(api, min_prob, strict_mode)
         
         if not results:
-            st.warning("⚠️ Aucun signal qualifié détecté")
+            st.warning("⚠️ Aucun signal ne répond aux critères de haute confiance.")
             
-            # Diagnostic
-            with st.expander("🔧 Diagnostic & Suggestions"):
+            with st.expander("🔧 Diagnostic Quant"):
                 st.markdown("""
                 **Raisons possibles :**
                 
-                1. **Période de faible liquidité** (vacances, week-end)
-                2. **Marchés en consolidation** (Range détecté sur plusieurs actifs)
-                3. **Score minimum trop élevé** pour les conditions actuelles
+                1. **Volatilité insuffisante** pour générer un Z-Score significatif.
+                2. **Neutralité du marché** : Les Bias MTF sont probablement "NEUTRAL".
+                3. **Divergence Structurelle** : Le RSI donne un signal mais le prix est dans une zone de consolidation (Z-Score proche de 0).
                 
-                **Actions recommandées :**
-                
-                - 📉 Réduire le score minimum à **5.0**
-                - 🔓 Désactiver le **Mode Strict** temporairement
-                - ⏰ Réessayer pendant les **heures de session active** (8h-21h UTC)
-                - 📅 Attendre le **retour de liquidité** (période post-vacances)
+                **Actions :**
+                - Baisser la confiance minimale à **65%**.
+                - Désactiver le "Mode Strict" pour autoriser les marchés neutres.
                 """)
         else:
-            st.success(f"✅ {len(results)} Signal{'s' if len(results) > 1 else ''} Qualifié{'s' if len(results) > 1 else ''}")
+            st.success(f"✅ {len(results)} Signal{'s' if len(results) > 1 else ''} Détecté{'s' if len(results) > 1 else ''}")
             
-            # Statistiques globales
-            avg_score = sum(s['score'] for s in results) / len(results)
-            premium = sum(1 for s in results if s['score'] >= 8.0)
-            excellent = sum(1 for s in results if 7.0 <= s['score'] < 8.0)
-            avg_rr = sum(s['rr'] for s in results) / len(results)
+            avg_conf = sum(s['prob'] for s in results) / len(results)
+            inst = sum(1 for s in results if s['prob'] >= 0.85)
+            algo = sum(1 for s in results if 0.75 <= s['prob'] < 0.85)
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Signaux", len(results))
-            col2.metric("Score Moyen", f"{avg_score:.1f}")
-            col3.metric("Premium", premium, help="Score ≥ 8.0")
-            col4.metric("R:R Moyen", f"1:{avg_rr:.1f}")
-            
-            # Distribution qualité
-            st.markdown("---")
-            dist_col1, dist_col2, dist_col3 = st.columns(3)
-            dist_col1.metric("💎 Premium", f"{premium}")
-            dist_col2.metric("⭐ Excellent", f"{excellent}")
-            dist_col3.metric("✅ Valides", f"{len(results) - premium - excellent}")
+            col2.metric("Conf. Moyenne", f"{int(avg_conf*100)}%")
+            col3.metric("Institutional", inst)
+            col4.metric("Algorithmic", algo)
             
             st.markdown("---")
             
-            # Affichage des signaux
             for sig in results:
                 display_sig(sig)
                 
-            # Résumé en bas
             st.markdown("---")
-            st.caption("💡 **Conseil** : Priorisez les signaux Premium et Excellent pour un meilleur ratio risque/rendement")
+            st.caption("💡 **Note Quant** : Ce scanner utilise une approche probabiliste. Un score de 85% signifie que les facteurs internes (RSI, MTF, Structure) sont fortement alignés.")
 
 if __name__ == "__main__":
     main()
+
