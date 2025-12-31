@@ -1,76 +1,130 @@
-# ==========================================
-# AFFICHAGE SIGNAL (V3.4 - UI)
-# ==========================================
-def display_sig(s):
-    is_buy = s['type'] == 'BUY'
-    col_type = "#10b981" if is_buy else "#ef4444"
-    bg = "linear-gradient(90deg, #064e3b 0%, #065f46 100%)" if is_buy else "linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%)"
-    
-    sc = s['score_display']
-    mid_status = s['details']['midnight_status']
-    
-    # Ajustement des labels de qualité
-    if sc >= 8.0: label, q_badge = "💎 INSTITUTIONAL", "quality-high"
-    elif sc >= 7.0: label, q_badge = "⭐ ALGORITHMIC", "quality-high"
-    elif sc >= 6.0: label, q_badge = "✅ STRATEGIC", "quality-medium"
-    else: label, q_badge = "📊 TACTICAL", "quality-medium"
+import time  # <--- AJOUTER CECI TOUT EN HAUT DU FICHIER
 
-    with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
-        st.markdown(f"<div class='timestamp-box'>⚡ SIGNAL : {s['exact_time']}</div>", unsafe_allow_html=True)
+# ... (Le reste du code ne change pas jusqu'à la fonction run_scan) ...
+
+# ==========================================
+# SCANNER PRINCIPAL (CORRIGÉ ANTI-FREEZE)
+# ==========================================
+def run_scan_v32(api, min_prob, strict_mode):
+    cs_scores = get_currency_strength_rsi(api)
+    signals = []
+    
+    # Création des éléments d'interface
+    progress_bar = st.progress(0)
+    status_text = st.empty() # Texte qui va changer dynamiquement
+    
+    for i, sym in enumerate(ASSETS):
+        # Mise à jour de la barre et du texte
+        progress = (i + 1) / len(ASSETS)
+        progress_bar.progress(progress)
+        status_text.markdown(f"⏳ Analyse en cours : **{sym}** ({i+1}/{len(ASSETS)})")
         
-        st.markdown(f"""
-        <div style="background:{bg};padding:15px;border-radius:8px;border:2px solid {col_type};
-                    display:flex;justify-content:space-between;align-items:center;">
-            <div>
-                <span style="font-size:1.8em;font-weight:900;color:white;">{s['symbol']}</span>
-                <span style="background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:4px;
-                            color:white;margin-left:10px;">{s['type']}</span>
-                <span class="quality-indicator {q_badge}">{int(s['prob']*100)}% CONF</span>
-            </div>
-            <div style="text-align:right;">
-                <div style="font-size:1.4em;font-weight:bold;color:white;">{s['price']:.5f}</div>
-                <div style="font-size:0.75em;color:#cbd5e1;">ATR: {s['atr_pct']:.3f}%</div>
-            </div>
-        </div>""", unsafe_allow_html=True)
+        # --- PROTECTION ANTI-FREEZE ---
+        # On évite de spammer l'actif s'il a été scanné il y a moins de 5 min
+        if sym in st.session_state.signal_history:
+            if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 300: 
+                time.sleep(0.05) # Petite pause quand même
+                continue
         
-        # --- BADGES ---
-        badges = []
-        
-        # Badge Midnight Informatif
-        if "OPTIMAL" in mid_status:
-            # C'est le top : Bleu/Violet pour signifier "Smart Money"
-            badges.append(f"<span class='badge badge-midnight'>🌑 {mid_status}</span>")
-        else:
-            # C'est standard : Couleur neutre ou attention
-            # On informe l'utilisateur qu'il n'est pas en zone optimale mais que le trade reste valide
-            badges.append(f"<span class='badge' style='background:#475569;border:1px solid #64748b'>🌗 {mid_status}</span>")
+        try:
+            # 1. OPTIMISATION : On récupère Daily et Weekly en une seule fois (300 bougies D)
+            # Ça économise 30 requêtes API au total
+            df_d_raw = api.get_candles(sym, "D", 300)
             
-        adx = s['details'].get('adx_val', 0)
-        if adx >= 25: badges.append(f"<span class='badge badge-trend'>ADX FORT ({int(adx)})</span>")
-        
-        badges.append(f"<span class='badge badge-regime'>{s['details']['mtf_bias']}</span>")
-        
-        if s['cs_aligned']: badges.append("<span class='badge badge-blue'>CS ALIGNÉ</span>")
-        if s['details']['fvg_align']: badges.append("<span class='badge badge-gold'>FVG ACTIF</span>")
-        
-        st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        c1, c2, c3 = st.columns(3)
-        # Affichage du prix Midnight dans les détails pour référence
-        mid_price_disp = s['details']['midnight_val']
-        c1.metric("Midnight Open", f"{mid_price_disp:.5f}" if mid_price_disp else "N/A")
-        c2.metric("RSI Mom.", f"{s['details']['rsi_mom']:.1f}")
-        c3.metric("Z-Score", f"{s['details']['structure_z']:.1f}")
+            # Pause de sécurité pour ne pas bloquer l'API Oanda
+            time.sleep(0.15) 
+            
+            df_m5 = api.get_candles(sym, "M5", 288)
+            time.sleep(0.15) # Pause entre les requêtes
+            
+            df_h4 = api.get_candles(sym, "H4", 100)
+            
+            if df_m5.empty or df_h4.empty or df_d_raw.empty: 
+                continue
+            
+            # Préparation des DataFrames D et W à partir de la même source
+            df_d = df_d_raw.iloc[-100:].copy() # Les 100 derniers jours
+            
+            # Reconstruction Weekly
+            df_w = df_d_raw.set_index('time').resample('W-FRI').agg({
+                'open':'first', 'high':'max', 'low':'min', 'close':'last'
+            }).dropna().reset_index()
+            
+            # Détection Basique RSI (Trigger)
+            rsi_serie = QuantEngine.calculate_rsi(df_m5)
+            if len(rsi_serie) < 3: continue
+            
+            rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
+            scan_direction = None
+            
+            # Logique Trigger
+            if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 0.5:
+                scan_direction = "BUY"
+            elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -0.5:
+                scan_direction = "SELL"
+            
+            if not scan_direction: continue
+            
+            # Calcul Probabilité
+            prob, details, atr_pct = calculate_signal_probability(
+                df_m5, df_h4, df_d, df_w, sym, scan_direction
+            )
+            
+            if prob < min_prob: continue
+            
+            # Mode Strict
+            if strict_mode:
+                if details['mtf_bias'] == "NEUTRAL": continue
+            
+            # Filtre Corrélation
+            temp_signal_obj = {'symbol': sym, 'type': scan_direction}
+            if check_dynamic_correlation_conflict(temp_signal_obj, signals, cs_scores):
+                continue
+            
+            # Filtre CS
+            cs_aligned = False
+            if "_" in sym:
+                base, quote = sym.split('_')
+                if cs_scores and base in cs_scores and quote in cs_scores:
+                    gap = cs_scores.get(base, 0) - cs_scores.get(quote, 0)
+                    if scan_direction == "BUY" and gap > 0: cs_aligned = True
+                    elif scan_direction == "SELL" and gap < 0: cs_aligned = True
+            elif "XAU" in sym or "US30" in sym:
+                cs_aligned = True 
 
-        st.write("")
-        r1, r2 = st.columns(2)
-        r1.markdown(f"""<div class='risk-box'>
-            <div style='color:#94a3b8;font-size:0.8em;'>STOP LOSS</div>
-            <div style='color:#ef4444;font-weight:bold;font-size:1.2em;'>{s['sl']:.5f}</div>
-        </div>""", unsafe_allow_html=True)
-        r2.markdown(f"""<div class='risk-box'>
-            <div style='color:#94a3b8;font-size:0.8em;'>TAKE PROFIT (1:{s['rr']})</div>
-            <div style='color:#10b981;font-weight:bold;font-size:1.2em;'>{s['tp']:.5f}</div>
-        </div>""", unsafe_allow_html=True)
+            price = df_m5['close'].iloc[-1]
+            atr = QuantEngine.calculate_atr(df_m5)
+            params = get_asset_params(sym)
+            
+            sl_mult = params['sl_base']
+            if details['structure_z'] != 0: sl_mult -= 0.2
+            sl = price - (atr * sl_mult) if scan_direction == "BUY" else price + (atr * sl_mult)
+            tp = price + (atr * params['tp_rr']) if scan_direction == "BUY" else price - (atr * params['tp_rr'])
+            
+            signals.append({
+                'symbol': sym,
+                'type': scan_direction,
+                'price': price,
+                'prob': prob,
+                'score_display': prob * 10,
+                'details': details,
+                'atr_pct': atr_pct,
+                'exact_time': datetime.now().strftime("%H:%M:%S"),
+                'sl': sl,
+                'tp': tp,
+                'rr': params['tp_rr'],
+                'cs_aligned': cs_aligned
+            })
+            
+            st.session_state.signal_history[sym] = datetime.now()
+            
+        except Exception as e:
+            # En cas d'erreur sur un actif, on l'affiche dans la console (pas sur l'app) et on passe au suivant
+            print(f"Erreur sur {sym}: {e}")
+            time.sleep(1) # Pause de sécurité en cas d'erreur
+            continue
+            
+    progress_bar.empty()
+    status_text.empty()
+    return sorted(signals, key=lambda x: x['prob'], reverse=True)
+     
