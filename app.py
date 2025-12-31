@@ -4,14 +4,14 @@ import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 import logging
-import time # Indispensable pour éviter le blocage
+import time
 from datetime import datetime, timedelta
 from scipy import stats 
 
 # ==========================================
 # CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar Ultimate V3.5", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Ultimate V3.6", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -134,7 +134,7 @@ def get_asset_params(symbol):
     return {'type': 'FOREX', 'atr_threshold': 0.035, 'sl_base': 1.5, 'tp_rr': 2.0}
 
 # ==========================================
-# MOTEUR D'INDICATEURS (SIMPLIFIÉ)
+# MOTEUR D'INDICATEURS
 # ==========================================
 class QuantEngine:
     @staticmethod
@@ -217,19 +217,12 @@ class QuantEngine:
         if total <= -2: return "BEAR"
         return "NEUTRAL"
 
-    # --- MIDNIGHT SANS PYTZ (Version Robuste) ---
     @staticmethod
     def get_midnight_open_ny(df):
         try:
-            # Approximation simple : Oanda est en UTC.
-            # NY est généralement UTC-5. On recule l'heure de 5h pour simuler NY.
             df_utc = df.copy()
             df_utc['time'] = df_utc['time'] - pd.Timedelta(hours=5)
-            
-            # On cherche la dernière bougie dont l'heure est 00:xx
-            # Cela évite les erreurs de fuseaux horaires complexes
             midnight_candle = df_utc[df_utc['time'].dt.hour == 0]
-            
             if not midnight_candle.empty:
                 return midnight_candle.iloc[-1]['open']
             else:
@@ -340,7 +333,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
     return False
 
 # ==========================================
-# PROBABILITÉ (LOGIQUE CONFLUENCE V3.5)
+# PROBABILITÉ (LOGIQUE V3.6)
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors = []
@@ -354,12 +347,12 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if atr_pct < params['atr_threshold'] * 0.5:
         return 0, {}, atr_pct 
     
-    # 1. VOLATILITY SCORE
+    # 1. VOLATILITY
     vol_score = min(atr_pct / params['atr_threshold'], 2.0)
     details['vol_score'] = vol_score
     vol_conf = min(vol_score, 1.2) / 1.2 
     
-    # 2. RSI MOMENTUM (30%)
+    # 2. RSI (30%)
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     rsi_val = rsi_serie.iloc[-1]
     rsi_mom = rsi_val - rsi_serie.iloc[-2]
@@ -376,7 +369,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.30)
     details['rsi_mom'] = abs(rsi_mom)
     
-    # 3. STRUCTURE Z-SCORE (20%)
+    # 3. Z-SCORE (20%)
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0
     if direction == "BUY":
@@ -406,11 +399,10 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.20)
     details['mtf_bias'] = mtf_bias
     
-    # 5. MIDNIGHT LOGIC (15% - CONFLUENCE)
+    # 5. MIDNIGHT (15%)
     midnight_price = QuantEngine.get_midnight_open_ny(df_m5)
     midnight_score = 0.5 
     curr_price = df_m5['close'].iloc[-1]
-    
     details['midnight_val'] = midnight_price
     details['midnight_status'] = "UNKNOWN"
     
@@ -436,7 +428,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     # 6. FVG/ADX (15%)
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     details['fvg_align'] = fvg_active
-    
     adx_val = QuantEngine.calculate_adx(df_h4)
     details['adx_val'] = adx_val
     if adx_val < 18: return 0, details, atr_pct 
@@ -445,7 +436,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if adx_val > 22: extra_score += 0.2
     if fvg_active and ((direction=="BUY" and fvg_type=="BULL") or (direction=="SELL" and fvg_type=="BEAR")):
         extra_score += 0.3
-    
     prob_factors.append(min(extra_score, 1.0))
     weights.append(0.15)
 
@@ -456,9 +446,26 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     return final_score, details, atr_pct
 
 # ==========================================
-# SCANNER PRINCIPAL (ANTI-FREEZE)
+# UTILITAIRE: FORMAT "IL Y A X MIN"
 # ==========================================
-def run_scan_v35(api, min_prob, strict_mode):
+def format_time_ago(detection_time):
+    now = datetime.now()
+    diff = now - detection_time
+    minutes = int(diff.total_seconds() / 60)
+    
+    if minutes < 1:
+        return "À l'instant"
+    elif minutes < 60:
+        return f"Il y a {minutes} min"
+    else:
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"Il y a {hours}h {mins}m"
+
+# ==========================================
+# SCANNER PRINCIPAL
+# ==========================================
+def run_scan_v36(api, min_prob, strict_mode):
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -475,11 +482,10 @@ def run_scan_v35(api, min_prob, strict_mode):
                 continue
         
         try:
-            # OPTIMISATION REQUETES & PAUSE
             df_d_raw = api.get_candles(sym, "D", 300)
-            time.sleep(0.1) # Pause anti-ban Oanda
+            time.sleep(0.1)
             df_m5 = api.get_candles(sym, "M5", 288)
-            time.sleep(0.1) # Pause anti-ban Oanda
+            time.sleep(0.1)
             df_h4 = api.get_candles(sym, "H4", 100)
             
             if df_m5.empty or df_h4.empty or df_d_raw.empty: continue
@@ -540,7 +546,8 @@ def run_scan_v35(api, min_prob, strict_mode):
                 'score_display': prob * 10,
                 'details': details,
                 'atr_pct': atr_pct,
-                'exact_time': datetime.now().strftime("%H:%M:%S"),
+                # On stocke l'objet datetime réel pour le calcul relatif
+                'detection_time': datetime.now(),
                 'sl': sl,
                 'tp': tp,
                 'rr': params['tp_rr'],
@@ -568,13 +575,17 @@ def display_sig(s):
     sc = s['score_display']
     mid_status = s['details']['midnight_status']
     
+    # Calcul du temps écoulé
+    time_ago_str = format_time_ago(s['detection_time'])
+    
     if sc >= 8.0: label, q_badge = "💎 INSTITUTIONAL", "quality-high"
     elif sc >= 7.0: label, q_badge = "⭐ ALGORITHMIC", "quality-high"
     elif sc >= 6.0: label, q_badge = "✅ STRATEGIC", "quality-medium"
     else: label, q_badge = "📊 TACTICAL", "quality-medium"
 
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
-        st.markdown(f"<div class='timestamp-box'>⚡ SIGNAL : {s['exact_time']}</div>", unsafe_allow_html=True)
+        # Affichage Relatif (Il y a X min)
+        st.markdown(f"<div class='timestamp-box'>⚡ SIGNAL DÉTECTÉ : {time_ago_str}</div>", unsafe_allow_html=True)
         
         st.markdown(f"""
         <div style="background:{bg};padding:15px;border-radius:8px;border:2px solid {col_type};
@@ -630,21 +641,20 @@ def display_sig(s):
 # INTERFACE
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE V3.5")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Stable Core | Midnight Confluence | 30 Assets</p>", unsafe_allow_html=True)
+    st.title("💎 BLUESTAR ULTIMATE V3.6")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | Anti-Freeze | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration V3.5")
+        st.header("⚙️ Configuration V3.6")
         strict_mode = st.checkbox("🔥 Mode Strict", value=False)
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
-        st.info(f"**Heure:** {datetime.now().strftime('%H:%M')}")
-    
+        
     if st.button("🔍 Lancer le Scan (30 Actifs)", type="primary"):
         st.session_state.cache = {}
         api = OandaClient()
         
         with st.spinner("Analyse du marché en cours..."):
-            results = run_scan_v35(api, min_prob_display/100.0, strict_mode)
+            results = run_scan_v36(api, min_prob_display/100.0, strict_mode)
         
         if not results:
             st.warning("Aucun signal détecté pour le moment.")
