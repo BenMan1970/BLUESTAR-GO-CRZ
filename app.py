@@ -114,7 +114,7 @@ class OandaClient:
                 st.session_state.cache[key] = (datetime.now(), df)
             return df
         except Exception as e:
-            logging.error(f"Error fetching {instrument}: {e}")
+            # logging.error(f"Error fetching {instrument}: {e}")
             return pd.DataFrame()
 
 ASSETS = [
@@ -231,10 +231,11 @@ class QuantEngine:
             return None
 
 # ==========================================
-# CURRENCY STRENGTH
+# CURRENCY STRENGTH (CORRIGÉ & OPTIMISÉ)
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
+    # Cache de 1 minute
     if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 60:
         return st.session_state.cs_data['data']
 
@@ -246,22 +247,27 @@ def get_currency_strength_rsi(api):
         "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
     ]
     
+    # Récupération des données H1 pour une meilleure stabilité de tendance
     prices = {}
     for pair in forex_pairs:
         try:
             df = api.get_candles(pair, "H1", 100)
             if df is not None and not df.empty:
                 prices[pair] = df['close']
-        except Exception as e:
+        except Exception:
             continue
 
     if not prices:
-        st.session_state.cs_data = {'data': None, 'time': now}
         return None
 
     df_prices = pd.DataFrame(prices).fillna(method='ffill').fillna(method='bfill')
     
+    # ----------------------------------------------------
+    # LOGIQUE CORRIGÉE : Inversion Mathématique
+    # ----------------------------------------------------
+    
     def normalize_score(rsi_value):
+        # Transforme RSI 50 -> 5.0, RSI 70 -> 7.0, RSI 30 -> 3.0
         return ((rsi_value - 50) / 50 + 1) * 5
 
     def calculate_rsi_series(series, period=14):
@@ -270,28 +276,45 @@ def get_currency_strength_rsi(api):
         loss = (-delta.where(delta < 0, 0)).fillna(0)
         avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-        rs = avg_gain / avg_loss
+        
+        # Protection division par zéro
+        rs = avg_gain / avg_loss.replace(0, 0.0001)
         return 100 - (100 / (1 + rs))
 
-    final_scores = {c: 0.0 for c in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]}
-    counts = {c: 0 for c in final_scores.keys()}
+    currencies = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD", "CHF"]
+    final_scores = {}
 
-    for pair in df_prices.columns:
-        if "_" not in pair: continue
-        base, quote = pair.split('_')
-        rsi = calculate_rsi_series(df_prices[pair])
-        if len(rsi) < 2: continue
-        curr_score = normalize_score(rsi.iloc[-1])
-        if base in final_scores:
-            final_scores[base] += curr_score
-            counts[base] += 1
-        if quote in final_scores:
-            final_scores[quote] -= curr_score
-            counts[quote] += 1
-
-    for c in final_scores:
-        if counts[c] > 0:
-            final_scores[c] = final_scores[c] / counts[c]
+    for curr in currencies:
+        total_score = 0.0
+        count = 0
+        opponents = [c for c in currencies if c != curr]
+        
+        for opp in opponents:
+            pair_direct = f"{curr}_{opp}"
+            pair_inverse = f"{opp}_{curr}"
+            
+            rsi_val = None
+            
+            if pair_direct in df_prices.columns:
+                # Cas direct : On calcule le RSI du prix normal
+                rsi_series = calculate_rsi_series(df_prices[pair_direct])
+                rsi_val = rsi_series.iloc[-1]
+                
+            elif pair_inverse in df_prices.columns:
+                # Cas inversé : On calcule le RSI de (1 / Prix)
+                # C'est la clé pour avoir un score correct !
+                inverted_price = 1 / df_prices[pair_inverse]
+                rsi_series = calculate_rsi_series(inverted_price)
+                rsi_val = rsi_series.iloc[-1]
+            
+            if rsi_val is not None:
+                total_score += normalize_score(rsi_val)
+                count += 1
+        
+        if count > 0:
+            final_scores[curr] = total_score / count
+        else:
+            final_scores[curr] = 5.0 # Valeur neutre par défaut
 
     st.session_state.cs_data = {'data': final_scores, 'time': now}
     return final_scores
@@ -323,12 +346,18 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
             if corr > 0.8 and new_type != ex_type: return True 
             if corr < -0.8 and new_type == ex_type: return True 
 
+        # Utilisation des nouveaux scores précis (0-10)
         shared_currency = None
         if base in ex_sym or quote in ex_sym:
             shared_currency = base if (base in ex_sym) else quote
             if cs_scores and shared_currency in cs_scores:
                 cs_val = cs_scores[shared_currency]
+                # Logique :
+                # Si la devise commune est TRES FAIBLE (<4.0)
+                # et qu'on essaie de l'acheter (BUY Base), c'est risqué.
                 if cs_val < 4.0 and new_type == "BUY" and base == shared_currency: return True
+                # Si la devise commune est TRES FORTE (>6.0)
+                # et qu'on essaie de la vendre (SELL Base), c'est risqué.
                 if cs_val > 6.0 and new_type == "SELL" and base == shared_currency: return True
     return False
 
@@ -466,6 +495,7 @@ def format_time_ago(detection_time):
 # SCANNER PRINCIPAL
 # ==========================================
 def run_scan_v36(api, min_prob, strict_mode):
+    # Appel de la nouvelle fonction corrigée
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -517,6 +547,7 @@ def run_scan_v36(api, min_prob, strict_mode):
             if strict_mode and details['mtf_bias'] == "NEUTRAL": continue
             
             temp_signal_obj = {'symbol': sym, 'type': scan_direction}
+            # Vérification avec les nouveaux scores CS corrects
             if check_dynamic_correlation_conflict(temp_signal_obj, signals, cs_scores): continue
             
             cs_aligned = False
@@ -546,7 +577,6 @@ def run_scan_v36(api, min_prob, strict_mode):
                 'score_display': prob * 10,
                 'details': details,
                 'atr_pct': atr_pct,
-                # On stocke l'objet datetime réel pour le calcul relatif
                 'detection_time': datetime.now(),
                 'sl': sl,
                 'tp': tp,
@@ -575,7 +605,6 @@ def display_sig(s):
     sc = s['score_display']
     mid_status = s['details']['midnight_status']
     
-    # Calcul du temps écoulé
     time_ago_str = format_time_ago(s['detection_time'])
     
     if sc >= 8.0: label, q_badge = "💎 INSTITUTIONAL", "quality-high"
@@ -584,7 +613,6 @@ def display_sig(s):
     else: label, q_badge = "📊 TACTICAL", "quality-medium"
 
     with st.expander(f"{s['symbol']}  |  {s['type']}  |  {label}  [{sc:.1f}/10]", expanded=True):
-        # Affichage Relatif (Il y a X min)
         st.markdown(f"<div class='timestamp-box'>⚡ SIGNAL DÉTECTÉ : {time_ago_str}</div>", unsafe_allow_html=True)
         
         st.markdown(f"""
@@ -642,7 +670,7 @@ def display_sig(s):
 # ==========================================
 def main():
     st.title("💎 BLUESTAR ULTIMATE V3.6")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | Anti-Freeze | 30 Assets</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | CS Fixed | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("⚙️ Configuration V3.6")
@@ -665,3 +693,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+       
