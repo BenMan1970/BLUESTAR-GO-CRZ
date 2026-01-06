@@ -7,6 +7,11 @@ import logging
 import time
 from datetime import datetime, timedelta
 from scipy import stats 
+import pytz  # Ajouté pour la gestion précise des Timezones (DST)
+import warnings
+
+# Configuration silencieuse pour Pandas (propreté des logs)
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==========================================
 # CONFIGURATION & STYLE
@@ -91,9 +96,10 @@ class OandaClient:
             st.stop()
 
     def get_candles(self, instrument, granularity, count):
-        key = f"{instrument}_{granularity}"
+        key = f"{instrument}_{granularity}_{count}" # Clé plus spécifique pour éviter les conflits de cache
         if key in st.session_state.cache:
             ts, data = st.session_state.cache[key]
+            # Cache de 60 secondes pour les bougies de prix standard
             if (datetime.now() - ts).total_seconds() < 60: return data
 
         try:
@@ -114,6 +120,7 @@ class OandaClient:
                 st.session_state.cache[key] = (datetime.now(), df)
             return df
         except Exception as e:
+            logging.warning(f"Erreur API get_candles {instrument}: {e}")
             return pd.DataFrame()
 
 ASSETS = [
@@ -138,20 +145,25 @@ def get_asset_params(symbol):
 class QuantEngine:
     @staticmethod
     def calculate_atr(df, period=14):
+        if len(df) < period + 1: return 0
         h, l, c = df['high'], df['low'], df['close']
         tr = pd.concat([h-l, abs(h-c.shift(1)), abs(l-c.shift(1))], axis=1).max(axis=1)
         return tr.ewm(span=period, adjust=False).mean().iloc[-1]
 
     @staticmethod
     def calculate_rsi(df, period=7):
+        if len(df) < period + 1: return pd.Series([50]) # Retour neutre si pas assez de données
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).fillna(0)
         loss = (-delta.where(delta < 0, 0)).fillna(0)
-        rs = gain.ewm(alpha=1/period, adjust=False).mean() / loss.ewm(alpha=1/period, adjust=False).mean()
+        avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, 0.0001)
         return 100 - (100 / (1 + rs))
 
     @staticmethod
     def calculate_adx(df, period=14):
+        if len(df) < period * 2: return 0
         high, low, close = df['high'], df['low'], df['close']
         plus_dm = high.diff()
         minus_dm = -low.diff()
@@ -169,9 +181,12 @@ class QuantEngine:
     def detect_structure_zscore(df, lookback=20):
         if len(df) < lookback + 1: return 0
         window = df['close'].iloc[-lookback:]
-        z_score = stats.zscore(window)[-1]
-        if z_score > 1.5: return 1 
-        if z_score < -1.5: return -1 
+        try:
+            z_score = stats.zscore(window)[-1]
+            if z_score > 1.5: return 1 
+            if z_score < -1.5: return -1 
+        except:
+            return 0
         return 0 
 
     @staticmethod
@@ -218,15 +233,27 @@ class QuantEngine:
 
     @staticmethod
     def get_midnight_open_ny(df):
+        """
+        AMÉLIORATION: Utilisation de pytz pour gérer l'heure d'été/hiver (DST) automatiquement.
+        """
         try:
-            df_utc = df.copy()
-            df_utc['time'] = df_utc['time'] - pd.Timedelta(hours=5)
-            midnight_candle = df_utc[df_utc['time'].dt.hour == 0]
+            # Définir les timezones
+            utc_tz = pytz.UTC
+            ny_tz = pytz.timezone('America/New_York')
+            
+            # Convertir la colonne time en datetime UTC aware
+            df_ny = df.copy()
+            df_ny['time'] = pd.to_datetime(df_ny['time']).dt.tz_localize(utc_tz).dt.tz_convert(ny_tz)
+            
+            # Filtrer l'heure à 00:00 (Minuit NY)
+            midnight_candle = df_ny[df_ny['time'].dt.hour == 0]
+            
             if not midnight_candle.empty:
                 return midnight_candle.iloc[-1]['open']
             else:
                 return None
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Erreur timezone midnight: {e}")
             return None
 
 # ==========================================
@@ -234,7 +261,8 @@ class QuantEngine:
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
-    if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 60:
+    # AMÉLIORATION: Cache porté à 15 minutes (900s) pour économiser les appels API
+    if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 900:
         return st.session_state.cs_data['data']
 
     forex_pairs = [
@@ -246,11 +274,13 @@ def get_currency_strength_rsi(api):
     ]
     
     prices = {}
+    # Pour éviter de faire 28 appels d'un coup qui bloqueraient, on peut les faire une par une
     for pair in forex_pairs:
         try:
             df = api.get_candles(pair, "H1", 100)
             if df is not None and not df.empty:
                 prices[pair] = df['close']
+            time.sleep(0.05) # Petit délai pour respecter les limites
         except Exception:
             continue
 
@@ -285,11 +315,11 @@ def get_currency_strength_rsi(api):
             rsi_val = None
             if pair_direct in df_prices.columns:
                 rsi_series = calculate_rsi_series(df_prices[pair_direct])
-                rsi_val = rsi_series.iloc[-1]
+                if not rsi_series.empty: rsi_val = rsi_series.iloc[-1]
             elif pair_inverse in df_prices.columns:
                 inverted_price = 1 / df_prices[pair_inverse]
                 rsi_series = calculate_rsi_series(inverted_price)
-                rsi_val = rsi_series.iloc[-1]
+                if not rsi_series.empty: rsi_val = rsi_series.iloc[-1]
             
             if rsi_val is not None:
                 total_score += normalize_score(rsi_val)
@@ -359,6 +389,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     vol_conf = min(vol_score, 1.2) / 1.2 
     
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
+    if rsi_serie.empty: return 0, {}, atr_pct
     rsi_val = rsi_serie.iloc[-1]
     rsi_mom = rsi_val - rsi_serie.iloc[-2]
     
@@ -462,6 +493,7 @@ def format_time_ago(detection_time):
 # SCANNER
 # ==========================================
 def run_scan_v36(api, min_prob, strict_mode):
+    # On lance la récupération de la force des devises une seule fois par scan, mais le cache gère la durée
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -472,21 +504,24 @@ def run_scan_v36(api, min_prob, strict_mode):
         progress_bar.progress((i+1)/len(ASSETS))
         status_text.markdown(f"⏳ Analyse: **{sym}** ({i+1}/{len(ASSETS)})")
         
+        # Vérification cooldown par symbole (300s = 5 min)
         if sym in st.session_state.signal_history:
             if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 300: 
-                time.sleep(0.05) 
+                time.sleep(0.02) 
                 continue
         
         try:
+            # Optimisation de l'ordre des requêtes
             df_d_raw = api.get_candles(sym, "D", 300)
-            time.sleep(0.1)
+            time.sleep(0.05) # Délai réduit mais suffisant pour ne pas spammer
             df_m5 = api.get_candles(sym, "M5", 288)
-            time.sleep(0.1)
+            time.sleep(0.05)
             df_h4 = api.get_candles(sym, "H4", 100)
             
             if df_m5.empty or df_h4.empty or df_d_raw.empty: continue
             
             df_d = df_d_raw.iloc[-100:].copy()
+            # Resample hebdomadaire robuste
             df_w = df_d_raw.set_index('time').resample('W-FRI').agg({
                 'open':'first', 'high':'max', 'low':'min', 'close':'last'
             }).dropna().reset_index()
@@ -551,7 +586,8 @@ def run_scan_v36(api, min_prob, strict_mode):
             st.session_state.signal_history[sym] = datetime.now()
             
         except Exception as e:
-            time.sleep(1)
+            logging.warning(f"Erreur scan {sym}: {e}")
+            time.sleep(0.5)
             continue
             
     progress_bar.empty()
@@ -643,7 +679,9 @@ def main():
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         
     if st.button("🔍 Lancer le Scan (30 Actifs)", type="primary"):
-        st.session_state.cache = {}
+        # On reset le cache uniquement si l'utilisateur force (via le bouton ou une sidebar dédiée si on voulait)
+        # Ici on garde le cache pour perfs, sauf si on veut forcer un refresh total
+        # st.session_state.cache = {} # Commenté pour garder les perf
         api = OandaClient()
         
         with st.spinner("Analyse du marché en cours..."):
