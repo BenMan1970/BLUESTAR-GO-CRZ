@@ -7,7 +7,8 @@ import logging
 import time
 from datetime import datetime, timedelta
 from scipy import stats 
-import pytz  # Ajouté pour la gestion précise des Timezones (DST)
+from scipy.signal import argrelextrema # Ajouté pour la détection précise des pics
+import pytz
 import warnings
 
 # Configuration silencieuse pour Pandas (propreté des logs)
@@ -16,7 +17,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar Ultimate V3.6.1", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Ultimate V3.7", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -56,7 +57,7 @@ st.markdown("""
     .badge-trend { background: linear-gradient(135deg, #059669 0%, #10b981 100%); }
     .badge-weak { background: linear-gradient(135deg, #ea580c 0%, #f97316 100%); }
     .badge-blue { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); }
-    .badge-purple { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); }
+    .badge-purple { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); border: 1px solid #d8b4fe; } /* Badge Divergence */
     .badge-gold { background: linear-gradient(135deg, #ca8a04 0%, #eab308 100%); }
     .badge-midnight { background: linear-gradient(135deg, #4338ca 0%, #6366f1 100%); border: 1px solid #818cf8; }
     .risk-box {
@@ -232,21 +233,11 @@ class QuantEngine:
 
     @staticmethod
     def get_midnight_open_ny(df):
-        """
-        CORRECTION V3.6.1: Utilisation de utc=True pour éviter le conflit 'Already tz-aware'.
-        Gère correctement les timestamps déjà fournis en UTC par l'API OANDA.
-        """
         try:
             ny_tz = pytz.timezone('America/New_York')
-            
-            # On force la conversion en UTC 'aware'. Si l'heure est naive, elle devient UTC. Si elle est déjà UTC, elle reste UTC.
-            # Cela corrige l'erreur "Already tz-aware" car on n'utilise plus tz_localize.
             df_ny = df.copy()
             df_ny['time'] = pd.to_datetime(df_ny['time'], utc=True).dt.tz_convert(ny_tz)
-            
-            # Filtrer l'heure à 00:00 (Minuit NY)
             midnight_candle = df_ny[df_ny['time'].dt.hour == 0]
-            
             if not midnight_candle.empty:
                 return midnight_candle.iloc[-1]['open']
             else:
@@ -255,12 +246,59 @@ class QuantEngine:
             logging.warning(f"Erreur timezone midnight: {e}")
             return None
 
+    @staticmethod
+    def detect_rsi_divergence(df, rsi_series, lookback=15):
+        """
+        AMÉLIORATION V3.7: Détection de divergence RSI (Bullish & Bearish)
+        Utilise scipy.signal.argrelextrema pour une précision mathématique.
+        """
+        if len(df) < lookback + 2: return False, None
+        
+        try:
+            price = df['close'].values
+            rsi = rsi_series.values
+            
+            # Détection des extremums locaux (pics et creux)
+            # order=5 signifie qu'on vérifie 5 bougies de chaque côté pour confirmer un pivot
+            # Cela donne un bon équilibre pour le scalping M5
+            order = 5
+            min_idx = argrelextrema(rsi, np.less, order=order)[0]
+            max_idx = argrelextrema(rsi, np.greater, order=order)[0]
+            
+            # --- Bullish Divergence ---
+            # On cherche les derniers creux RSI
+            if len(min_idx) >= 2:
+                idx1 = min_idx[-2] # Dernier creux avant l'actuel
+                idx2 = min_idx[-1] # Dernier creux actuel
+                
+                # Vérifier si c'est dans la fenêtre de lookback
+                if idx2 > len(df) - 5: 
+                    # Condition: Prix fait Lower Low (LL) mais RSI fait Higher Low (HL)
+                    # On compare les prix correspondants aux creux RSI
+                    if price[idx2] < price[idx1] and rsi[idx2] > rsi[idx1]:
+                        return True, "BULL"
+            
+            # --- Bearish Divergence ---
+            # On cherche les derniers pics RSI
+            if len(max_idx) >= 2:
+                idx1 = max_idx[-2]
+                idx2 = max_idx[-1]
+                
+                if idx2 > len(df) - 5:
+                    # Condition: Prix fait Higher High (HH) mais RSI fait Lower High (LH)
+                    if price[idx2] > price[idx1] and rsi[idx2] < rsi[idx1]:
+                        return True, "BEAR"
+                        
+        except Exception:
+            pass
+            
+        return False, None
+
 # ==========================================
 # CURRENCY STRENGTH
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
-    # Cache porté à 15 minutes (900s) pour économiser les appels API
     if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 900:
         return st.session_state.cs_data['data']
 
@@ -456,16 +494,26 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors.append(midnight_score)
     weights.append(0.15)
 
+    # --- NOUVEAU: DIVERGENCE CHECK ---
+    has_div, div_type = QuantEngine.detect_rsi_divergence(df_m5, rsi_serie)
+    details['divergence'] = has_div
+    
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     details['fvg_align'] = fvg_active
     adx_val = QuantEngine.calculate_adx(df_h4)
     details['adx_val'] = adx_val
+    
     if adx_val < 18: return 0, details, atr_pct 
     
     extra_score = 0.5
     if adx_val > 22: extra_score += 0.2
     if fvg_active and ((direction=="BUY" and fvg_type=="BULL") or (direction=="SELL" and fvg_type=="BEAR")):
         extra_score += 0.3
+    
+    # Ajout du bonus Divergence (+0.15 au score extra)
+    if has_div and ((direction=="BUY" and div_type=="BULL") or (direction=="SELL" and div_type=="BEAR")):
+        extra_score += 0.15
+    
     prob_factors.append(min(extra_score, 1.0))
     weights.append(0.15)
 
@@ -490,7 +538,7 @@ def format_time_ago(detection_time):
 # ==========================================
 # SCANNER
 # ==========================================
-def run_scan_v36(api, min_prob, strict_mode):
+def run_scan_v37(api, min_prob, strict_mode):
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -625,6 +673,10 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
+        # Affichage Divergence si présente
+        if s['details'].get('divergence'):
+            badges.append(f"<span class='badge badge-purple'>📉 DIVERGENCE</span>")
+            
         if "OPTIMAL" in mid_status:
             badges.append(f"<span class='badge badge-midnight'>🌑 {mid_status}</span>")
         else:
@@ -663,11 +715,11 @@ def display_sig(s):
 # MAIN
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE V3.6.1")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | 30 Assets</p>", unsafe_allow_html=True)
+    st.title("💎 BLUESTAR ULTIMATE V3.7")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Divergence Detection Engine | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration V3.6.1")
+        st.header("⚙️ Configuration V3.7")
         strict_mode = st.checkbox("🔥 Mode Strict", value=False)
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         
@@ -675,7 +727,7 @@ def main():
         api = OandaClient()
         
         with st.spinner("Analyse du marché en cours..."):
-            results = run_scan_v36(api, min_prob_display/100.0, strict_mode)
+            results = run_scan_v37(api, min_prob_display/100.0, strict_mode)
         
         if not results:
             st.warning("Aucun signal détecté pour le moment (Marché calme).")
