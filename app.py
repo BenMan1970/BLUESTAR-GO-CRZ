@@ -230,7 +230,7 @@ class QuantEngine:
             return None
 
 # ==========================================
-# CURRENCY STRENGTH (CORRIGÉ & SANS WARNING)
+# CURRENCY STRENGTH
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
@@ -256,7 +256,6 @@ def get_currency_strength_rsi(api):
 
     if not prices: return None
 
-    # CORRECTIF PANDAS ICI : ffill().bfill() au lieu de fillna(method)
     df_prices = pd.DataFrame(prices).ffill().bfill()
     
     def normalize_score(rsi_value):
@@ -288,7 +287,6 @@ def get_currency_strength_rsi(api):
                 rsi_series = calculate_rsi_series(df_prices[pair_direct])
                 rsi_val = rsi_series.iloc[-1]
             elif pair_inverse in df_prices.columns:
-                # Inversion mathématique pour contrepartie
                 inverted_price = 1 / df_prices[pair_inverse]
                 rsi_series = calculate_rsi_series(inverted_price)
                 rsi_val = rsi_series.iloc[-1]
@@ -337,9 +335,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
             shared_currency = base if (base in ex_sym) else quote
             if cs_scores and shared_currency in cs_scores:
                 cs_val = cs_scores[shared_currency]
-                # Si devise faible et on veut acheter -> Danger
                 if cs_val < 4.0 and new_type == "BUY" and base == shared_currency: return True
-                # Si devise forte et on veut vendre -> Danger
                 if cs_val > 6.0 and new_type == "SELL" and base == shared_currency: return True
     return False
 
@@ -501,7 +497,6 @@ def run_scan_v36(api, min_prob, strict_mode):
             rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
             scan_direction = None
             
-            # Logique de signal : croisement précis du RSI 50
             if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 0.5:
                 scan_direction = "BUY"
             elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -0.5:
@@ -639,7 +634,8 @@ def display_sig(s):
 # ==========================================
 def main():
     st.title("💎 BLUESTAR ULTIMATE V3.6")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | CS Corrected | 30 Assets</p>", unsafe_allow_html=True)
+    # Mention "CS Corrected" supprimée comme demandé
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("⚙️ Configuration V3.6")
