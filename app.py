@@ -114,7 +114,6 @@ class OandaClient:
                 st.session_state.cache[key] = (datetime.now(), df)
             return df
         except Exception as e:
-            # logging.error(f"Error fetching {instrument}: {e}")
             return pd.DataFrame()
 
 ASSETS = [
@@ -231,11 +230,10 @@ class QuantEngine:
             return None
 
 # ==========================================
-# CURRENCY STRENGTH (CORRIGÉ & OPTIMISÉ)
+# CURRENCY STRENGTH (CORRIGÉ & SANS WARNING)
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
-    # Cache de 1 minute
     if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 60:
         return st.session_state.cs_data['data']
 
@@ -247,7 +245,6 @@ def get_currency_strength_rsi(api):
         "CAD_JPY", "CAD_CHF", "NZD_JPY", "NZD_CAD", "NZD_CHF", "CHF_JPY"
     ]
     
-    # Récupération des données H1 pour une meilleure stabilité de tendance
     prices = {}
     for pair in forex_pairs:
         try:
@@ -257,17 +254,12 @@ def get_currency_strength_rsi(api):
         except Exception:
             continue
 
-    if not prices:
-        return None
+    if not prices: return None
 
-    df_prices = pd.DataFrame(prices).fillna(method='ffill').fillna(method='bfill')
-    
-    # ----------------------------------------------------
-    # LOGIQUE CORRIGÉE : Inversion Mathématique
-    # ----------------------------------------------------
+    # CORRECTIF PANDAS ICI : ffill().bfill() au lieu de fillna(method)
+    df_prices = pd.DataFrame(prices).ffill().bfill()
     
     def normalize_score(rsi_value):
-        # Transforme RSI 50 -> 5.0, RSI 70 -> 7.0, RSI 30 -> 3.0
         return ((rsi_value - 50) / 50 + 1) * 5
 
     def calculate_rsi_series(series, period=14):
@@ -276,8 +268,6 @@ def get_currency_strength_rsi(api):
         loss = (-delta.where(delta < 0, 0)).fillna(0)
         avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-        
-        # Protection division par zéro
         rs = avg_gain / avg_loss.replace(0, 0.0001)
         return 100 - (100 / (1 + rs))
 
@@ -294,15 +284,11 @@ def get_currency_strength_rsi(api):
             pair_inverse = f"{opp}_{curr}"
             
             rsi_val = None
-            
             if pair_direct in df_prices.columns:
-                # Cas direct : On calcule le RSI du prix normal
                 rsi_series = calculate_rsi_series(df_prices[pair_direct])
                 rsi_val = rsi_series.iloc[-1]
-                
             elif pair_inverse in df_prices.columns:
-                # Cas inversé : On calcule le RSI de (1 / Prix)
-                # C'est la clé pour avoir un score correct !
+                # Inversion mathématique pour contrepartie
                 inverted_price = 1 / df_prices[pair_inverse]
                 rsi_series = calculate_rsi_series(inverted_price)
                 rsi_val = rsi_series.iloc[-1]
@@ -314,7 +300,7 @@ def get_currency_strength_rsi(api):
         if count > 0:
             final_scores[curr] = total_score / count
         else:
-            final_scores[curr] = 5.0 # Valeur neutre par défaut
+            final_scores[curr] = 5.0
 
     st.session_state.cs_data = {'data': final_scores, 'time': now}
     return final_scores
@@ -346,23 +332,19 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
             if corr > 0.8 and new_type != ex_type: return True 
             if corr < -0.8 and new_type == ex_type: return True 
 
-        # Utilisation des nouveaux scores précis (0-10)
         shared_currency = None
         if base in ex_sym or quote in ex_sym:
             shared_currency = base if (base in ex_sym) else quote
             if cs_scores and shared_currency in cs_scores:
                 cs_val = cs_scores[shared_currency]
-                # Logique :
-                # Si la devise commune est TRES FAIBLE (<4.0)
-                # et qu'on essaie de l'acheter (BUY Base), c'est risqué.
+                # Si devise faible et on veut acheter -> Danger
                 if cs_val < 4.0 and new_type == "BUY" and base == shared_currency: return True
-                # Si la devise commune est TRES FORTE (>6.0)
-                # et qu'on essaie de la vendre (SELL Base), c'est risqué.
+                # Si devise forte et on veut vendre -> Danger
                 if cs_val > 6.0 and new_type == "SELL" and base == shared_currency: return True
     return False
 
 # ==========================================
-# PROBABILITÉ (LOGIQUE V3.6)
+# PROBABILITÉ
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors = []
@@ -376,12 +358,10 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if atr_pct < params['atr_threshold'] * 0.5:
         return 0, {}, atr_pct 
     
-    # 1. VOLATILITY
     vol_score = min(atr_pct / params['atr_threshold'], 2.0)
     details['vol_score'] = vol_score
     vol_conf = min(vol_score, 1.2) / 1.2 
     
-    # 2. RSI (30%)
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     rsi_val = rsi_serie.iloc[-1]
     rsi_mom = rsi_val - rsi_serie.iloc[-2]
@@ -398,7 +378,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.30)
     details['rsi_mom'] = abs(rsi_mom)
     
-    # 3. Z-SCORE (20%)
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0
     if direction == "BUY":
@@ -411,7 +390,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.20)
     details['structure_z'] = z_score_struc
     
-    # 4. MTF BIAS (20%)
     mtf_bias = QuantEngine.get_mtf_bias(df_d, df_w)
     mtf_score = 0.5
     if direction == "BUY":
@@ -428,7 +406,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.20)
     details['mtf_bias'] = mtf_bias
     
-    # 5. MIDNIGHT (15%)
     midnight_price = QuantEngine.get_midnight_open_ny(df_m5)
     midnight_score = 0.5 
     curr_price = df_m5['close'].iloc[-1]
@@ -438,23 +415,22 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if midnight_price:
         if direction == "BUY":
             if curr_price <= midnight_price: 
-                midnight_score = 1.0 # BONUS
+                midnight_score = 1.0
                 details['midnight_status'] = "OPTIMAL (Discount)"
             else:
-                midnight_score = 0.5 # NEUTRE
+                midnight_score = 0.5
                 details['midnight_status'] = "STANDARD (Premium)"
-        else: # SELL
+        else:
             if curr_price >= midnight_price:
-                midnight_score = 1.0 # BONUS
+                midnight_score = 1.0
                 details['midnight_status'] = "OPTIMAL (Premium)"
             else:
-                midnight_score = 0.5 # NEUTRE
+                midnight_score = 0.5
                 details['midnight_status'] = "STANDARD (Discount)"
     
     prob_factors.append(midnight_score)
     weights.append(0.15)
 
-    # 6. FVG/ADX (15%)
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     details['fvg_align'] = fvg_active
     adx_val = QuantEngine.calculate_adx(df_h4)
@@ -475,27 +451,21 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     return final_score, details, atr_pct
 
 # ==========================================
-# UTILITAIRE: FORMAT "IL Y A X MIN"
+# UTILITAIRE
 # ==========================================
 def format_time_ago(detection_time):
     now = datetime.now()
     diff = now - detection_time
     minutes = int(diff.total_seconds() / 60)
     
-    if minutes < 1:
-        return "À l'instant"
-    elif minutes < 60:
-        return f"Il y a {minutes} min"
-    else:
-        hours = minutes // 60
-        mins = minutes % 60
-        return f"Il y a {hours}h {mins}m"
+    if minutes < 1: return "À l'instant"
+    elif minutes < 60: return f"Il y a {minutes} min"
+    else: return f"Il y a {minutes // 60}h {minutes % 60}m"
 
 # ==========================================
-# SCANNER PRINCIPAL
+# SCANNER
 # ==========================================
 def run_scan_v36(api, min_prob, strict_mode):
-    # Appel de la nouvelle fonction corrigée
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -531,6 +501,7 @@ def run_scan_v36(api, min_prob, strict_mode):
             rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
             scan_direction = None
             
+            # Logique de signal : croisement précis du RSI 50
             if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 0.5:
                 scan_direction = "BUY"
             elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -0.5:
@@ -543,11 +514,9 @@ def run_scan_v36(api, min_prob, strict_mode):
             )
             
             if prob < min_prob: continue
-            
             if strict_mode and details['mtf_bias'] == "NEUTRAL": continue
             
             temp_signal_obj = {'symbol': sym, 'type': scan_direction}
-            # Vérification avec les nouveaux scores CS corrects
             if check_dynamic_correlation_conflict(temp_signal_obj, signals, cs_scores): continue
             
             cs_aligned = False
@@ -595,7 +564,7 @@ def run_scan_v36(api, min_prob, strict_mode):
     return sorted(signals, key=lambda x: x['prob'], reverse=True)
 
 # ==========================================
-# AFFICHAGE SIGNAL
+# AFFICHAGE
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -666,11 +635,11 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
 
 # ==========================================
-# INTERFACE
+# MAIN
 # ==========================================
 def main():
     st.title("💎 BLUESTAR ULTIMATE V3.6")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | CS Fixed | 30 Assets</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | CS Corrected | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("⚙️ Configuration V3.6")
@@ -685,7 +654,7 @@ def main():
             results = run_scan_v36(api, min_prob_display/100.0, strict_mode)
         
         if not results:
-            st.warning("Aucun signal détecté pour le moment.")
+            st.warning("Aucun signal détecté pour le moment (Marché calme).")
         else:
             st.success(f"{len(results)} Opportunités détectées")
             for sig in results:
@@ -693,4 +662,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-       
