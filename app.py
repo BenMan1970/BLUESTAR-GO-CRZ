@@ -16,7 +16,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar Ultimate V3.6", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Ultimate V3.6.1", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -96,10 +96,9 @@ class OandaClient:
             st.stop()
 
     def get_candles(self, instrument, granularity, count):
-        key = f"{instrument}_{granularity}_{count}" # Clé plus spécifique pour éviter les conflits de cache
+        key = f"{instrument}_{granularity}_{count}" 
         if key in st.session_state.cache:
             ts, data = st.session_state.cache[key]
-            # Cache de 60 secondes pour les bougies de prix standard
             if (datetime.now() - ts).total_seconds() < 60: return data
 
         try:
@@ -152,7 +151,7 @@ class QuantEngine:
 
     @staticmethod
     def calculate_rsi(df, period=7):
-        if len(df) < period + 1: return pd.Series([50]) # Retour neutre si pas assez de données
+        if len(df) < period + 1: return pd.Series([50])
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).fillna(0)
         loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -234,16 +233,16 @@ class QuantEngine:
     @staticmethod
     def get_midnight_open_ny(df):
         """
-        AMÉLIORATION: Utilisation de pytz pour gérer l'heure d'été/hiver (DST) automatiquement.
+        CORRECTION V3.6.1: Utilisation de utc=True pour éviter le conflit 'Already tz-aware'.
+        Gère correctement les timestamps déjà fournis en UTC par l'API OANDA.
         """
         try:
-            # Définir les timezones
-            utc_tz = pytz.UTC
             ny_tz = pytz.timezone('America/New_York')
             
-            # Convertir la colonne time en datetime UTC aware
+            # On force la conversion en UTC 'aware'. Si l'heure est naive, elle devient UTC. Si elle est déjà UTC, elle reste UTC.
+            # Cela corrige l'erreur "Already tz-aware" car on n'utilise plus tz_localize.
             df_ny = df.copy()
-            df_ny['time'] = pd.to_datetime(df_ny['time']).dt.tz_localize(utc_tz).dt.tz_convert(ny_tz)
+            df_ny['time'] = pd.to_datetime(df_ny['time'], utc=True).dt.tz_convert(ny_tz)
             
             # Filtrer l'heure à 00:00 (Minuit NY)
             midnight_candle = df_ny[df_ny['time'].dt.hour == 0]
@@ -261,7 +260,7 @@ class QuantEngine:
 # ==========================================
 def get_currency_strength_rsi(api):
     now = datetime.now()
-    # AMÉLIORATION: Cache porté à 15 minutes (900s) pour économiser les appels API
+    # Cache porté à 15 minutes (900s) pour économiser les appels API
     if st.session_state.cs_data.get('time') and (now - st.session_state.cs_data['time']).total_seconds() < 900:
         return st.session_state.cs_data['data']
 
@@ -274,13 +273,12 @@ def get_currency_strength_rsi(api):
     ]
     
     prices = {}
-    # Pour éviter de faire 28 appels d'un coup qui bloqueraient, on peut les faire une par une
     for pair in forex_pairs:
         try:
             df = api.get_candles(pair, "H1", 100)
             if df is not None and not df.empty:
                 prices[pair] = df['close']
-            time.sleep(0.05) # Petit délai pour respecter les limites
+            time.sleep(0.05) 
         except Exception:
             continue
 
@@ -493,7 +491,6 @@ def format_time_ago(detection_time):
 # SCANNER
 # ==========================================
 def run_scan_v36(api, min_prob, strict_mode):
-    # On lance la récupération de la force des devises une seule fois par scan, mais le cache gère la durée
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -504,16 +501,14 @@ def run_scan_v36(api, min_prob, strict_mode):
         progress_bar.progress((i+1)/len(ASSETS))
         status_text.markdown(f"⏳ Analyse: **{sym}** ({i+1}/{len(ASSETS)})")
         
-        # Vérification cooldown par symbole (300s = 5 min)
         if sym in st.session_state.signal_history:
             if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 300: 
                 time.sleep(0.02) 
                 continue
         
         try:
-            # Optimisation de l'ordre des requêtes
             df_d_raw = api.get_candles(sym, "D", 300)
-            time.sleep(0.05) # Délai réduit mais suffisant pour ne pas spammer
+            time.sleep(0.05)
             df_m5 = api.get_candles(sym, "M5", 288)
             time.sleep(0.05)
             df_h4 = api.get_candles(sym, "H4", 100)
@@ -521,7 +516,6 @@ def run_scan_v36(api, min_prob, strict_mode):
             if df_m5.empty or df_h4.empty or df_d_raw.empty: continue
             
             df_d = df_d_raw.iloc[-100:].copy()
-            # Resample hebdomadaire robuste
             df_w = df_d_raw.set_index('time').resample('W-FRI').agg({
                 'open':'first', 'high':'max', 'low':'min', 'close':'last'
             }).dropna().reset_index()
@@ -669,19 +663,15 @@ def display_sig(s):
 # MAIN
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE V3.6")
-    # Mention "CS Corrected" supprimée comme demandé
+    st.title("💎 BLUESTAR ULTIMATE V3.6.1")
     st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Relative Time | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration V3.6")
+        st.header("⚙️ Configuration V3.6.1")
         strict_mode = st.checkbox("🔥 Mode Strict", value=False)
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         
     if st.button("🔍 Lancer le Scan (30 Actifs)", type="primary"):
-        # On reset le cache uniquement si l'utilisateur force (via le bouton ou une sidebar dédiée si on voulait)
-        # Ici on garde le cache pour perfs, sauf si on veut forcer un refresh total
-        # st.session_state.cache = {} # Commenté pour garder les perf
         api = OandaClient()
         
         with st.spinner("Analyse du marché en cours..."):
