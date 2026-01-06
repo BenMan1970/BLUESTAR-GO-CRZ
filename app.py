@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from scipy import stats 
-from scipy.signal import argrelextrema # Ajouté pour la détection précise des pics
+from scipy.signal import argrelextrema 
 import pytz
 import warnings
 
@@ -249,8 +249,7 @@ class QuantEngine:
     @staticmethod
     def detect_rsi_divergence(df, rsi_series, lookback=15):
         """
-        AMÉLIORATION V3.7: Détection de divergence RSI (Bullish & Bearish)
-        Utilise scipy.signal.argrelextrema pour une précision mathématique.
+        Détection de divergence RSI (Bullish & Bearish) avec Scipy.
         """
         if len(df) < lookback + 2: return False, None
         
@@ -258,34 +257,23 @@ class QuantEngine:
             price = df['close'].values
             rsi = rsi_series.values
             
-            # Détection des extremums locaux (pics et creux)
-            # order=5 signifie qu'on vérifie 5 bougies de chaque côté pour confirmer un pivot
-            # Cela donne un bon équilibre pour le scalping M5
             order = 5
             min_idx = argrelextrema(rsi, np.less, order=order)[0]
             max_idx = argrelextrema(rsi, np.greater, order=order)[0]
             
             # --- Bullish Divergence ---
-            # On cherche les derniers creux RSI
             if len(min_idx) >= 2:
-                idx1 = min_idx[-2] # Dernier creux avant l'actuel
-                idx2 = min_idx[-1] # Dernier creux actuel
-                
-                # Vérifier si c'est dans la fenêtre de lookback
+                idx1 = min_idx[-2]
+                idx2 = min_idx[-1]
                 if idx2 > len(df) - 5: 
-                    # Condition: Prix fait Lower Low (LL) mais RSI fait Higher Low (HL)
-                    # On compare les prix correspondants aux creux RSI
                     if price[idx2] < price[idx1] and rsi[idx2] > rsi[idx1]:
                         return True, "BULL"
             
             # --- Bearish Divergence ---
-            # On cherche les derniers pics RSI
             if len(max_idx) >= 2:
                 idx1 = max_idx[-2]
                 idx2 = max_idx[-1]
-                
                 if idx2 > len(df) - 5:
-                    # Condition: Prix fait Higher High (HH) mais RSI fait Lower High (LH)
                     if price[idx2] > price[idx1] and rsi[idx2] < rsi[idx1]:
                         return True, "BEAR"
                         
@@ -494,7 +482,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors.append(midnight_score)
     weights.append(0.15)
 
-    # --- NOUVEAU: DIVERGENCE CHECK ---
+    # DIVERGENCE CHECK
     has_div, div_type = QuantEngine.detect_rsi_divergence(df_m5, rsi_serie)
     details['divergence'] = has_div
     
@@ -510,7 +498,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if fvg_active and ((direction=="BUY" and fvg_type=="BULL") or (direction=="SELL" and fvg_type=="BEAR")):
         extra_score += 0.3
     
-    # Ajout du bonus Divergence (+0.15 au score extra)
+    # Bonus Divergence (+0.15)
     if has_div and ((direction=="BUY" and div_type=="BULL") or (direction=="SELL" and div_type=="BEAR")):
         extra_score += 0.15
     
@@ -673,7 +661,6 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
-        # Affichage Divergence si présente
         if s['details'].get('divergence'):
             badges.append(f"<span class='badge badge-purple'>📉 DIVERGENCE</span>")
             
@@ -716,7 +703,8 @@ def display_sig(s):
 # ==========================================
 def main():
     st.title("💎 BLUESTAR ULTIMATE V3.7")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Divergence Detection Engine | 30 Assets</p>", unsafe_allow_html=True)
+    # Titre mis à jour pour refléter la nature multi-facteurs
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Ultimate Multi-Factor Scanner | 30 Assets</p>", unsafe_allow_html=True)
     
     with st.sidebar:
         st.header("⚙️ Configuration V3.7")
