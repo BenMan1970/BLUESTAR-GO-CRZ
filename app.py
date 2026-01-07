@@ -282,6 +282,78 @@ class QuantEngine:
             
         return False, None
 
+    # ✅ AMÉLIORATION 1 — HMA SLOPE (M5)
+    @staticmethod
+    def calculate_hma(series, period=20):
+        if len(series) < period:
+            return pd.Series([])
+        half = int(period / 2)
+        sqrt_p = int(np.sqrt(period))
+
+        wma_half = series.rolling(half).apply(
+            lambda x: np.dot(x, np.arange(1, half+1)) / np.arange(1, half+1).sum(), raw=True
+        )
+        wma_full = series.rolling(period).apply(
+            lambda x: np.dot(x, np.arange(1, period+1)) / np.arange(1, period+1).sum(), raw=True
+        )
+
+        diff = 2 * wma_half - wma_full
+        hma = diff.rolling(sqrt_p).apply(
+            lambda x: np.dot(x, np.arange(1, sqrt_p+1)) / np.arange(1, sqrt_p+1).sum(), raw=True
+        )
+        return hma
+
+    @staticmethod
+    def hma_slope(hma_series, lookback=5, min_slope=0):
+        if len(hma_series) < lookback + 1:
+            return 0
+        slope = hma_series.iloc[-1] - hma_series.iloc[-1 - lookback]
+        if slope > min_slope:
+            return 1
+        elif slope < -min_slope:
+            return -1
+        return 0
+
+    # ✅ AMÉLIORATION 2 — RSI COMPRESSION / EXPANSION
+    @staticmethod
+    def rsi_compression_expansion(rsi_series, window=14, compression=8, expansion=3):
+        if len(rsi_series) < window + 2:
+            return 0
+        recent = rsi_series.iloc[-window:]
+        rsi_range = recent.max() - recent.min()
+        if rsi_range > compression:
+            return 0
+        delta = rsi_series.iloc[-1] - rsi_series.iloc[-2]
+        if delta > expansion:
+            return 1
+        elif delta < -expansion:
+            return -1
+        return 0
+
+    # ✅ AMÉLIORATION 3A — EMA50 SLOPE
+    @staticmethod
+    def ema_slope(series, period=50, lookback=10):
+        if len(series) < period + lookback:
+            return 0
+        ema = series.ewm(span=period).mean()
+        slope = ema.iloc[-1] - ema.iloc[-1 - lookback]
+        if slope > 0:
+            return 1
+        elif slope < 0:
+            return -1
+        return 0
+
+    # ✅ AMÉLIORATION 3B — WEEKLY RANGE POSITION
+    @staticmethod
+    def weekly_range_position(price, df_w):
+        if df_w.empty:
+            return 0.5
+        high = df_w['high'].iloc[-1]
+        low = df_w['low'].iloc[-1]
+        if high == low:
+            return 0.5
+        return (price - low) / (high - low)
+
 # ==========================================
 # CURRENCY STRENGTH
 # ==========================================
@@ -428,6 +500,34 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors.append(rsi_prob)
     weights.append(0.30)
     details['rsi_mom'] = abs(rsi_mom)
+
+    # ✅ AMÉLIORATION 1 — INTÉGRATION HMA20 SLOPE (M5)
+    hma_series = QuantEngine.calculate_hma(df_m5['close'], 20)
+    hma_dir = QuantEngine.hma_slope(hma_series)
+
+    details['hma_slope'] = hma_dir
+
+    if direction == "BUY" and hma_dir < 0:
+        prob_factors.append(0.3)
+        weights.append(0.10)
+    elif direction == "SELL" and hma_dir > 0:
+        prob_factors.append(0.3)
+        weights.append(0.10)
+    else:
+        prob_factors.append(0.7)
+        weights.append(0.10)
+
+    # ✅ AMÉLIORATION 2 — INTÉGRATION RSI COMPRESSION / EXPANSION
+    rsi_ce = QuantEngine.rsi_compression_expansion(rsi_serie)
+    details['rsi_ce'] = rsi_ce
+
+    if rsi_ce != 0:
+        if (direction == "BUY" and rsi_ce == 1) or (direction == "SELL" and rsi_ce == -1):
+            prob_factors.append(0.9)
+            weights.append(0.10)
+        else:
+            prob_factors.append(0.2)
+            weights.append(0.10)
     
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0
@@ -453,6 +553,25 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
         elif mtf_bias == "BEAR": mtf_score = 0.80
         elif mtf_bias == "NEUTRAL": mtf_score = 0.50
         else: mtf_score = 0.10
+    
+    # ✅ AMÉLIORATION 3C — INTÉGRATION MTF (EMA50 + WEEKLY)
+    ema50_dir = QuantEngine.ema_slope(df_d['close'])
+    details['ema50_slope'] = ema50_dir
+
+    if direction == "BUY" and ema50_dir < 0:
+        mtf_score *= 0.7
+    elif direction == "SELL" and ema50_dir > 0:
+        mtf_score *= 0.7
+
+    range_pos = QuantEngine.weekly_range_position(df_m5['close'].iloc[-1], df_w)
+    details['weekly_pos'] = range_pos
+
+    if direction == "BUY" and range_pos > 0.65:
+        mtf_score *= 0.8
+    if direction == "SELL" and range_pos < 0.35:
+        mtf_score *= 0.8
+    # ✅ FIN AMÉLIORATION 3C
+    
     prob_factors.append(mtf_score)
     weights.append(0.20)
     details['mtf_bias'] = mtf_bias
