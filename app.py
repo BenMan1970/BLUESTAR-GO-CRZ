@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
-import oandapyV20.endpoints.pricing as pricing # ✅ NOUVEAU IMPORT
+import oandapyV20.endpoints.pricing as pricing
 import logging
 import time
 import csv
@@ -18,16 +18,17 @@ import warnings
 # CONFIGURATION & STYLE
 # ==========================================
 warnings.simplefilter(action='ignore', category=FutureWarning)
-st.set_page_config(page_title="Bluestar Ultimate V3.9.5", layout="centered", page_icon="🛡️")
+st.set_page_config(page_title="Bluestar Ultimate V4.0 GPS", layout="centered", page_icon="🏛️")
 
-LOG_FILE = "bluestar_signals_log.csv"
+LOG_FILE = "bluestar_v4_gps_log.csv"
 
+# Initialisation du CSV avec les nouvelles colonnes (Grade)
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow([
             "timestamp", "symbol", "direction", "price", "score", "spread_pips", 
-            "atr_pct", "mtf_bias", "hma_slope", "sl", "tp", "session"
+            "atr_pct", "mtf_grade", "hma_slope", "sl", "tp", "session"
         ])
 
 st.markdown("""
@@ -40,7 +41,7 @@ st.markdown("""
     }
     .main .block-container { max-width: 950px; padding-top: 2rem; }
     h1 {
-        background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
+        background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 900; font-size: 2.5em; text-align: center; margin-bottom: 0.2em;
@@ -48,7 +49,7 @@ st.markdown("""
     .stButton>button {
         width: 100%; border-radius: 12px; height: 3.5em; font-weight: 700; font-size: 1.1em;
         border: 1px solid rgba(255,255,255,0.1);
-        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+        background: linear-gradient(180deg, #d97706 0%, #b45309 100%);
         color: white; transition: all 0.2s ease;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
     }
@@ -70,14 +71,17 @@ st.markdown("""
     .badge-gold { background: linear-gradient(135deg, #ca8a04 0%, #eab308 100%); }
     .badge-midnight { background: linear-gradient(135deg, #4338ca 0%, #6366f1 100%); border: 1px solid #818cf8; }
     .badge-session { background: linear-gradient(135deg, #db2777 0%, #ec4899 100%); }
+    .grade-a-plus { background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%); border: 2px solid #fff; box-shadow: 0 0 10px #d97706; } 
+    .grade-a { background: linear-gradient(135deg, #a3e635 0%, #4ade80 100%); color: black; }
+    .grade-b { background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%); }
     .risk-box {
         background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px;
         text-align: center; border: 1px solid rgba(255,255,255,0.05);
     }
     .timestamp-box {
-        background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6;
+        background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b;
         padding: 8px 12px; border-radius: 6px; font-size: 0.85em;
-        color: #93c5fd; margin: 10px 0; font-family: 'Courier New', monospace;
+        color: #fcd34d; margin: 10px 0; font-family: 'Courier New', monospace;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -93,7 +97,7 @@ class OandaClient:
     def __init__(self):
         try:
             self.access_token = st.secrets["OANDA_ACCESS_TOKEN"]
-            self.account_id = st.secrets["OANDA_ACCOUNT_ID"] # ✅ NÉCESSAIRE POUR LE SPREAD
+            self.account_id = st.secrets["OANDA_ACCOUNT_ID"]
             self.environment = st.secrets.get("OANDA_ENVIRONMENT", "practice")
             self.client = oandapyV20.API(access_token=self.access_token, environment=self.environment)
         except Exception as e:
@@ -127,7 +131,6 @@ class OandaClient:
             logging.warning(f"Erreur API get_candles {instrument}: {e}")
             return pd.DataFrame()
 
-    # ✅ NOUVEAU : CHECK SPREAD
     def get_realtime_spread(self, instrument):
         try:
             params = {"instruments": instrument}
@@ -138,16 +141,14 @@ class OandaClient:
             ask = float(price['closeoutAsk'])
             spread_raw = ask - bid
             
-            # Calcul en pips standard
             if "JPY" in instrument: pip_mult = 100
-            elif ("XAU" in instrument or "XAG" in instrument or "XPT" in instrument): pip_mult = 100 # ou 10 selon le broker, ici standard Oanda
+            elif ("XAU" in instrument or "XAG" in instrument or "XPT" in instrument): pip_mult = 100
             else: pip_mult = 10000
             
             return spread_raw, spread_raw * pip_mult
         except Exception:
             return 0, 0
 
-# ✅ LISTE ÉTENDUE D'ACTIFS
 ASSETS = [
     # 28 Forex Pairs
     "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF", "AUD_USD", "USD_CAD", "NZD_USD",
@@ -162,7 +163,6 @@ ASSETS = [
 ]
 
 def get_asset_params(symbol):
-    # ✅ LOGIQUE MISE À JOUR POUR LES NOUVEAUX ACTIFS
     if any(idx in symbol for idx in ["US30", "NAS100", "SPX500", "DE30"]):
         return {'type': 'INDEX', 'atr_threshold': 0.10, 'sl_base': 2.0, 'tp_rr': 3.0}
     if any(met in symbol for met in ["XAU", "XPT", "XAG"]):
@@ -238,31 +238,65 @@ class QuantEngine:
             return True, "BEAR"
         return False, None
 
+    # ✅ NOUVEAU MOTEUR INSTITUTIONNEL GPS (ADAPTÉ)
     @staticmethod
-    def get_mtf_bias(df_d, df_w):
-        def trend_score(df):
-            if len(df) < 50: return 0
-            sma200 = df['close'].rolling(200).mean().iloc[-1]
-            ema50 = df['close'].ewm(span=50).mean().iloc[-1]
-            price = df['close'].iloc[-1]
-            score = 0
-            if price > sma200: score += 1
-            else: score -= 1
-            if ema50 > sma200: score += 1
-            else: score -= 1
-            dist = abs((price - sma200) / sma200)
-            if dist > 0.005:
-                if score > 0: score += 1
-                elif score < 0: score -= 1
-            return score 
-        score_d = trend_score(df_d)
-        score_w = trend_score(df_w)
-        total = score_d + score_w
-        if total >= 4: return "STRONG_BULL"
-        if total >= 2: return "BULL"
-        if total <= -4: return "STRONG_BEAR"
-        if total <= -2: return "BEAR"
-        return "NEUTRAL"
+    def get_institutional_grade(df_d, df_w):
+        """
+        Analyse Daily/Weekly avec logique GPS (SMA200/EMA50/EMA21).
+        Attribue un Grade (A+, A, B, C) et détecte les Retracements.
+        """
+        def analyze_tf(df):
+            if len(df) < 50: return "C", "NEUTRAL", 0
+            
+            close = df['close']
+            price = close.iloc[-1]
+            
+            # Indicateurs GPS
+            sma200 = close.rolling(200).mean().iloc[-1] if len(df) >= 200 else close.rolling(50).mean().iloc[-1]
+            ema50 = close.ewm(span=50).mean().iloc[-1]
+            ema21 = close.ewm(span=21).mean().iloc[-1]
+            
+            # Conditions
+            above_sma = price > sma200
+            ema50_above_sma = ema50 > sma200
+            ema21_above_50 = ema21 > ema50
+            price_above_21 = price > ema21
+            
+            # PERFECT ALIGNMENT (Grade A+)
+            if above_sma and ema50_above_sma and ema21_above_50 and price_above_21:
+                return "A+", "BULLISH", 100
+            if not above_sma and not ema50_above_sma and not ema21_above_50 and not price_above_21:
+                return "A+", "BEARISH", 100
+            
+            # STRONG STRUCTURE (Grade A)
+            if above_sma and ema50_above_sma: return "A", "BULLISH", 85
+            if not above_sma and not ema50_above_sma: return "A", "BEARISH", 85
+            
+            # RETRACEMENT DIRECTIONNEL (Grade B)
+            # Prix sous SMA mais EMA50 dessus (Structure Bull intacte)
+            if not above_sma and ema50_above_sma: return "B", "RETRACEMENT_BULL", 70
+            # Prix sur SMA mais EMA50 dessous (Structure Bear intacte)
+            if above_sma and not ema50_above_sma: return "B", "RETRACEMENT_BEAR", 70
+            
+            # WEAK (Grade C)
+            return "C", "NEUTRAL", 50
+
+        grade_d, trend_d, score_d = analyze_tf(df_d)
+        grade_w, trend_w, score_w = analyze_tf(df_w)
+        
+        # Règle : Si Weekly est C, le setup est dégradé
+        if grade_w == "C": return "C", "NEUTRAL", 0
+        
+        # Score pondéré (Daily compte plus)
+        final_score = (score_d * 0.6) + (score_w * 0.4)
+        
+        # Grade Final
+        if final_score >= 95: final_grade = "A+"
+        elif final_score >= 85: final_grade = "A"
+        elif final_score >= 70: final_grade = "B"
+        else: final_grade = "C"
+        
+        return final_grade, trend_d, final_score
 
     @staticmethod
     def get_midnight_open_ny(df):
@@ -320,17 +354,6 @@ class QuantEngine:
         return 0
 
     @staticmethod
-    def rsi_compression_expansion(rsi_series, window=14, compression=8, expansion=3):
-        if len(rsi_series) < window + 2: return 0
-        recent = rsi_series.iloc[-window:]
-        rsi_range = recent.max() - recent.min()
-        if rsi_range > compression: return 2
-        delta = rsi_series.iloc[-1] - rsi_series.iloc[-2]
-        if delta > expansion: return 1
-        elif delta < -expansion: return -1
-        return 0
-
-    @staticmethod
     def ema_slope(series, period=50, lookback=10):
         if len(series) < period + lookback: return 0
         ema = series.ewm(span=period).mean()
@@ -369,7 +392,7 @@ def log_signal_to_csv(signal_data):
                 round(signal_data['score'], 4),
                 round(signal_data['spread_pips'], 1),
                 round(signal_data['atr_pct'], 4),
-                signal_data['mtf_bias'],
+                signal_data['mtf_grade'], # ✅ NOUVELLE COLONNE
                 signal_data['hma_slope'],
                 signal_data['sl'],
                 signal_data['tp'],
@@ -481,7 +504,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
     return False
 
 # ==========================================
-# PROBABILITÉ
+# PROBABILITÉ (AVEC LOGIQUE GPS INTÉGRÉE)
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, current_time_utc, spread_pips):
     prob_factors = []
@@ -501,10 +524,10 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     if session is None:
         return 0, {}, atr_pct 
     
-    # ✅ AJOUT SPREAD : Pénalité si le spread est trop large (contextuel)
-    spread_limit = 3.0 if params['type'] == 'FOREX' else 30.0 # 30 pts pour Or/Indices
+    # ✅ CHECK SPREAD
+    spread_limit = 3.0 if params['type'] == 'FOREX' else 30.0
     if spread_pips > spread_limit:
-        return 0, {}, atr_pct # Rejet pur si spread abusif
+        return 0, {}, atr_pct
     
     vol_score = min(atr_pct / params['atr_threshold'], 2.0)
     details['vol_score'] = vol_score
@@ -537,17 +560,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
         prob_factors.append(0.3); weights.append(0.10)
     else:
         prob_factors.append(0.7); weights.append(0.10)
-
-    rsi_ce = QuantEngine.rsi_compression_expansion(rsi_serie)
-    details['rsi_ce'] = rsi_ce
-
-    if rsi_ce == 2:
-        prob_factors.append(0.55); weights.append(0.05)
-    elif rsi_ce != 0:
-        if (direction == "BUY" and rsi_ce == 1) or (direction == "SELL" and rsi_ce == -1):
-            prob_factors.append(0.9); weights.append(0.10)
-        else:
-            prob_factors.append(0.2); weights.append(0.10)
     
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0
@@ -561,35 +573,60 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     weights.append(0.20)
     details['structure_z'] = z_score_struc
     
-    mtf_bias = QuantEngine.get_mtf_bias(df_d, df_w)
-    mtf_score = 0.5
-    if direction == "BUY":
-        if mtf_bias == "STRONG_BULL": mtf_score = 0.95
-        elif mtf_bias == "BULL": mtf_score = 0.80
-        elif mtf_bias == "NEUTRAL": mtf_score = 0.50
-        else: mtf_score = 0.10
-    else:
-        if mtf_bias == "STRONG_BEAR": mtf_score = 0.95
-        elif mtf_bias == "BEAR": mtf_score = 0.80
-        elif mtf_bias == "NEUTRAL": mtf_score = 0.50
-        else: mtf_score = 0.10
+    # ✅ LOGIQUE INSTITUTIONNELLE GPS INTÉGRÉE
+    inst_grade, inst_trend, inst_raw_score = QuantEngine.get_institutional_grade(df_d, df_w)
+    details['mtf_grade'] = inst_grade
     
+    mtf_score = 0.5 # Base
+    
+    if inst_grade == "A+":
+        mtf_score = 0.95
+    elif inst_grade == "A":
+        mtf_score = 0.85
+    elif inst_grade == "B":
+        mtf_score = 0.75
+    else: # C
+        mtf_score = 0.20
+
+    # Filtre anti-moulinette Grade C
+    if inst_grade == "C": mtf_score *= 0.5
+
+    # LOGIQUE DIRECTIONNELLE AMÉLIORÉE
+    is_buy_signal = (direction == "BUY")
+    is_bull_structure = ("BULLISH" in inst_trend)
+    is_bull_retracement = ("RETRACEMENT_BULL" in inst_trend)
+    
+    if is_buy_signal and is_bull_structure:
+        pass # mtf_score déjà élevé
+    elif is_buy_signal and is_bull_retracement:
+        mtf_score += 0.05 # Bonus Retracement
+    elif is_buy_signal and not is_bull_structure:
+        mtf_score *= 0.3 # Pénalité Contre-Tendance
+
+    is_sell_signal = (direction == "SELL")
+    is_bear_structure = ("BEARISH" in inst_trend)
+    is_bear_retracement = ("RETRACEMENT_BEAR" in inst_trend)
+
+    if is_sell_signal and is_bear_structure:
+        pass
+    elif is_sell_signal and is_bear_retracement:
+        mtf_score += 0.05
+    elif is_sell_signal and not is_bear_structure:
+        mtf_score *= 0.3
+
+    # Safety Net EMA50 Slope
     ema50_dir = QuantEngine.ema_slope(df_d['close'])
-    details['ema50_slope'] = ema50_dir
-
-    if direction == "BUY" and ema50_dir < 0: mtf_score *= 0.7
-    elif direction == "SELL" and ema50_dir > 0: mtf_score *= 0.7
-
+    if is_buy_signal and ema50_dir < 0: mtf_score *= 0.8
+    if is_sell_signal and ema50_dir > 0: mtf_score *= 0.8
+    
+    # Weekly Range Position
     range_pos = QuantEngine.weekly_range_position(df_m5['close'].iloc[-1], df_w)
-    details['weekly_pos'] = range_pos
-
-    if direction == "BUY" and range_pos > 0.65: mtf_score *= 0.8
-    elif direction == "SELL" and range_pos < 0.35: mtf_score *= 0.8
+    if is_buy_signal and range_pos > 0.65: mtf_score *= 0.8
+    if is_sell_signal and range_pos < 0.35: mtf_score *= 0.8
     elif 0.35 <= range_pos <= 0.55: mtf_score *= 1.05
     
-    prob_factors.append(mtf_score)
+    prob_factors.append(min(mtf_score, 1.0))
     weights.append(0.20)
-    details['mtf_bias'] = mtf_bias
     
     midnight_price = QuantEngine.get_midnight_open_ny(df_m5)
     midnight_score = 0.5 
@@ -598,7 +635,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     details['midnight_status'] = "UNKNOWN"
     
     if midnight_price:
-        if direction == "BUY":
+        if is_buy_signal:
             if curr_price <= midnight_price: 
                 midnight_score = 1.0
                 details['midnight_status'] = "OPTIMAL (Discount)"
@@ -656,7 +693,7 @@ def format_time_ago(detection_time):
 # ==========================================
 # SCANNER
 # ==========================================
-def run_scan_v395(api, min_prob, strict_mode, current_time_utc):
+def run_scan_v40(api, min_prob, strict_mode, current_time_utc):
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -665,7 +702,7 @@ def run_scan_v395(api, min_prob, strict_mode, current_time_utc):
     
     for i, sym in enumerate(ASSETS):
         progress_bar.progress((i+1)/len(ASSETS))
-        status_text.markdown(f"⏳ Analyse: **{sym}** ({i+1}/{len(ASSETS)})")
+        status_text.markdown(f"⏳ Analyse GPS: **{sym}** ({i+1}/{len(ASSETS)})")
         
         if sym in st.session_state.signal_history:
             if (datetime.now() - st.session_state.signal_history[sym]).total_seconds() < 300: 
@@ -680,13 +717,13 @@ def run_scan_v395(api, min_prob, strict_mode, current_time_utc):
             
             if df_m5.empty or df_h4.empty or df_d_raw.empty: continue
             
-            # ✅ CHECK SPREAD AVANT CALCUL LOURD
-            _, spread_pips = api.get_realtime_spread(sym)
-            
             df_d = df_d_raw.iloc[-100:].copy()
             df_w = df_d_raw.set_index('time').resample('W-FRI').agg({
                 'open':'first', 'high':'max', 'low':'min', 'close':'last'
             }).dropna().reset_index()
+            
+            # ✅ CHECK SPREAD AVANT CALCUL
+            _, spread_pips = api.get_realtime_spread(sym)
             
             rsi_serie = QuantEngine.calculate_rsi(df_m5)
             if len(rsi_serie) < 3: continue
@@ -706,7 +743,7 @@ def run_scan_v395(api, min_prob, strict_mode, current_time_utc):
             )
             
             if prob < min_prob: continue
-            if strict_mode and details['mtf_bias'] == "NEUTRAL": continue
+            if strict_mode and details['mtf_grade'] in ["C", "NEUTRAL"]: continue
             
             temp_signal_obj = {'symbol': sym, 'type': scan_direction}
             if check_dynamic_correlation_conflict(temp_signal_obj, signals, cs_scores): continue
@@ -729,12 +766,11 @@ def run_scan_v395(api, min_prob, strict_mode, current_time_utc):
             sl = price - (atr * sl_mult) if scan_direction == "BUY" else price + (atr * sl_mult)
             tp = price + (atr * params['tp_rr']) if scan_direction == "BUY" else price - (atr * params['tp_rr'])
             
-            # Logging CSV
             log_entry = {
                 'timestamp': current_time_utc.strftime('%Y-%m-%d %H:%M:%S'),
                 'symbol': sym, 'direction': scan_direction, 'price': price,
                 'score': prob, 'spread_pips': spread_pips, 'atr_pct': atr_pct, 
-                'mtf_bias': details['mtf_bias'], 'hma_slope': details['hma_slope'], 
+                'mtf_grade': details['mtf_grade'], 'hma_slope': details['hma_slope'], 
                 'sl': sl, 'tp': tp, 'session': details['session']
             }
             log_signal_to_csv(log_entry)
@@ -777,8 +813,15 @@ def display_sig(s):
     sc = s['score_display']
     session_badge = s['details']['session']
     spread_badge = s['spread']
+    mtf_grade = s['details']['mtf_grade'] # ✅ EXTRACT GRADE
     
     time_ago_str = format_time_ago(s['detection_time'])
+    
+    # ✅ LOGIQUE CSS POUR LE GRADE
+    grade_class = ""
+    if mtf_grade == "A+": grade_class = "grade-a-plus"
+    elif mtf_grade == "A": grade_class = "grade-a"
+    elif mtf_grade == "B": grade_class = "grade-b"
     
     if sc >= 8.0: label, q_badge = "💎 INSTITUTIONAL", "quality-high"
     elif sc >= 7.0: label, q_badge = "⭐ ALGORITHMIC", "quality-high"
@@ -804,12 +847,14 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
+        # ✅ BADGE GRADE INSTITUTIONNEL
+        if mtf_grade: badges.append(f"<span class='badge {grade_class}'>🏛️ {mtf_grade}</span>")
+        
         if session_badge: badges.append(f"<span class='badge badge-session'>⚡ {session_badge}</span>")
         if s['details'].get('divergence'): badges.append(f"<span class='badge badge-purple'>📉 DIVERGENCE</span>")
         if "OPTIMAL" in s['details'].get('midnight_status', ""): badges.append(f"<span class='badge badge-midnight'>🌑 OPTIMAL</span>")
         adx = s['details'].get('adx_val', 0)
         if adx >= 25: badges.append(f"<span class='badge badge-trend'>ADX FORT ({int(adx)})</span>")
-        badges.append(f"<span class='badge badge-regime'>{s['details']['mtf_bias']}</span>")
         if s['cs_aligned']: badges.append("<span class='badge badge-blue'>CS ALIGNÉ</span>")
         if s['details']['fvg_align']: badges.append("<span class='badge badge-gold'>FVG ACTIF</span>")
         
@@ -837,24 +882,24 @@ def display_sig(s):
 # MAIN
 # ==========================================
 def main():
-    st.title("🛡️ BLUESTAR ULTIMATE V3.9.5")
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Production Grade | CS Filter + Spread Check + Audit Ready</p>", unsafe_allow_html=True)
+    st.title("🏛️ BLUESTAR ULTIMATE V4.0 GPS")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Institutional Grade System | EMA Stacking | Retracement Detection</p>", unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration V3.9.5")
-        strict_mode = st.checkbox("🔥 Mode Strict", value=False)
+        st.header("⚙️ Configuration V4.0")
+        strict_mode = st.checkbox("🔥 Mode Strict", value=True)
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         st.info(f"Logs sauvegardés dans : {LOG_FILE}")
         
-    if st.button("🔍 Lancer le Scan (36 Actifs)", type="primary"):
+    if st.button("🔍 Lancer le Scan GPS (36 Actifs)", type="primary"):
         api = OandaClient()
         current_sim_time = datetime.now(pytz.utc)
         
-        with st.spinner("Analyse du marché en cours..."):
-            results = run_scan_v395(api, min_prob_display/100.0, strict_mode, current_sim_time)
+        with st.spinner("Analyse Multi-Timeframe en cours..."):
+            results = run_scan_v40(api, min_prob_display/100.0, strict_mode, current_sim_time)
         
         if not results:
-            st.warning("Aucun signal détecté (Hors Session ou Conditions non remplies).")
+            st.warning("Aucun signal détecté (Structure C ou Hors Session).")
         else:
             st.success(f"{len(results)} Opportunités détectées")
             for sig in results:
