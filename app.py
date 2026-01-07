@@ -17,7 +17,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ==========================================
 # CONFIGURATION & STYLE
 # ==========================================
-st.set_page_config(page_title="Bluestar Ultimate V3.7", layout="centered", page_icon="💎")
+st.set_page_config(page_title="Bluestar Ultimate V3.8", layout="centered", page_icon="💎")
 logging.basicConfig(level=logging.INFO)
 
 st.markdown("""
@@ -57,7 +57,7 @@ st.markdown("""
     .badge-trend { background: linear-gradient(135deg, #059669 0%, #10b981 100%); }
     .badge-weak { background: linear-gradient(135deg, #ea580c 0%, #f97316 100%); }
     .badge-blue { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); }
-    .badge-purple { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); border: 1px solid #d8b4fe; } /* Badge Divergence */
+    .badge-purple { background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%); border: 1px solid #d8b4fe; }
     .badge-gold { background: linear-gradient(135deg, #ca8a04 0%, #eab308 100%); }
     .badge-midnight { background: linear-gradient(135deg, #4338ca 0%, #6366f1 100%); border: 1px solid #818cf8; }
     .risk-box {
@@ -217,14 +217,27 @@ class QuantEngine:
             ema50 = df['close'].ewm(span=50).mean().iloc[-1]
             price = df['close'].iloc[-1]
             score = 0
+            
+            # ✅ FIX 1: Logique directionnelle symétrique
             if price > sma200: score += 1
+            else: score -= 1
+            
             if ema50 > sma200: score += 1
+            else: score -= 1
+            
+            # ✅ FIX 1 (Suite): La distance renforce la tendance existante (symétrique)
             dist = abs((price - sma200) / sma200)
-            if dist > 0.005: score += 1 
+            if dist > 0.005:
+                if score > 0: score += 1
+                elif score < 0: score -= 1
+                
             return score 
+            
         score_d = trend_score(df_d)
         score_w = trend_score(df_w)
         total = score_d + score_w
+        
+        # Les seuils restent les mêmes mais sont maintenant atteignables
         if total >= 4: return "STRONG_BULL"
         if total >= 2: return "BULL"
         if total <= -4: return "STRONG_BEAR"
@@ -248,20 +261,14 @@ class QuantEngine:
 
     @staticmethod
     def detect_rsi_divergence(df, rsi_series, lookback=15):
-        """
-        Détection de divergence RSI (Bullish & Bearish) avec Scipy.
-        """
         if len(df) < lookback + 2: return False, None
-        
         try:
             price = df['close'].values
             rsi = rsi_series.values
-            
             order = 5
             min_idx = argrelextrema(rsi, np.less, order=order)[0]
             max_idx = argrelextrema(rsi, np.greater, order=order)[0]
             
-            # --- Bullish Divergence ---
             if len(min_idx) >= 2:
                 idx1 = min_idx[-2]
                 idx2 = min_idx[-1]
@@ -269,34 +276,28 @@ class QuantEngine:
                     if price[idx2] < price[idx1] and rsi[idx2] > rsi[idx1]:
                         return True, "BULL"
             
-            # --- Bearish Divergence ---
             if len(max_idx) >= 2:
                 idx1 = max_idx[-2]
                 idx2 = max_idx[-1]
                 if idx2 > len(df) - 5:
                     if price[idx2] > price[idx1] and rsi[idx2] < rsi[idx1]:
                         return True, "BEAR"
-                        
         except Exception:
             pass
-            
         return False, None
 
-    # ✅ AMÉLIORATION 1 — HMA SLOPE (M5)
     @staticmethod
     def calculate_hma(series, period=20):
         if len(series) < period:
             return pd.Series([])
         half = int(period / 2)
         sqrt_p = int(np.sqrt(period))
-
         wma_half = series.rolling(half).apply(
             lambda x: np.dot(x, np.arange(1, half+1)) / np.arange(1, half+1).sum(), raw=True
         )
         wma_full = series.rolling(period).apply(
             lambda x: np.dot(x, np.arange(1, period+1)) / np.arange(1, period+1).sum(), raw=True
         )
-
         diff = 2 * wma_half - wma_full
         hma = diff.rolling(sqrt_p).apply(
             lambda x: np.dot(x, np.arange(1, sqrt_p+1)) / np.arange(1, sqrt_p+1).sum(), raw=True
@@ -307,22 +308,26 @@ class QuantEngine:
     def hma_slope(hma_series, lookback=5, min_slope=0):
         if len(hma_series) < lookback + 1:
             return 0
-        slope = hma_series.iloc[-1] - hma_series.iloc[-1 - lookback]
+        # ✅ FIX 3: Slope normalisée par le prix
+        slope = (hma_series.iloc[-1] - hma_series.iloc[-1 - lookback]) / hma_series.iloc[-1]
+        
         if slope > min_slope:
             return 1
         elif slope < -min_slope:
             return -1
         return 0
 
-    # ✅ AMÉLIORATION 2 — RSI COMPRESSION / EXPANSION
     @staticmethod
     def rsi_compression_expansion(rsi_series, window=14, compression=8, expansion=3):
         if len(rsi_series) < window + 2:
             return 0
         recent = rsi_series.iloc[-window:]
         rsi_range = recent.max() - recent.min()
+        
+        # ✅ FIX 2: État neutre large (retourne 2)
         if rsi_range > compression:
-            return 0
+            return 2
+            
         delta = rsi_series.iloc[-1] - rsi_series.iloc[-2]
         if delta > expansion:
             return 1
@@ -330,7 +335,6 @@ class QuantEngine:
             return -1
         return 0
 
-    # ✅ AMÉLIORATION 3A — EMA50 SLOPE
     @staticmethod
     def ema_slope(series, period=50, lookback=10):
         if len(series) < period + lookback:
@@ -343,7 +347,6 @@ class QuantEngine:
             return -1
         return 0
 
-    # ✅ AMÉLIORATION 3B — WEEKLY RANGE POSITION
     @staticmethod
     def weekly_range_position(price, df_w):
         if df_w.empty:
@@ -501,10 +504,9 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     weights.append(0.30)
     details['rsi_mom'] = abs(rsi_mom)
 
-    # ✅ AMÉLIORATION 1 — INTÉGRATION HMA20 SLOPE (M5)
+    # ✅ FIX 1: HMA SLOPE (Normalisé)
     hma_series = QuantEngine.calculate_hma(df_m5['close'], 20)
     hma_dir = QuantEngine.hma_slope(hma_series)
-
     details['hma_slope'] = hma_dir
 
     if direction == "BUY" and hma_dir < 0:
@@ -517,11 +519,15 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
         prob_factors.append(0.7)
         weights.append(0.10)
 
-    # ✅ AMÉLIORATION 2 — INTÉGRATION RSI COMPRESSION / EXPANSION
+    # ✅ FIX 2: RSI COMPRESSION / EXPANSION (Gestion état 2)
     rsi_ce = QuantEngine.rsi_compression_expansion(rsi_serie)
     details['rsi_ce'] = rsi_ce
 
-    if rsi_ce != 0:
+    if rsi_ce == 2:
+        # État neutre large : léger boost neutre
+        prob_factors.append(0.55)
+        weights.append(0.05)
+    elif rsi_ce != 0:
         if (direction == "BUY" and rsi_ce == 1) or (direction == "SELL" and rsi_ce == -1):
             prob_factors.append(0.9)
             weights.append(0.10)
@@ -554,7 +560,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
         elif mtf_bias == "NEUTRAL": mtf_score = 0.50
         else: mtf_score = 0.10
     
-    # ✅ AMÉLIORATION 3C — INTÉGRATION MTF (EMA50 + WEEKLY)
     ema50_dir = QuantEngine.ema_slope(df_d['close'])
     details['ema50_slope'] = ema50_dir
 
@@ -566,11 +571,13 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     range_pos = QuantEngine.weekly_range_position(df_m5['close'].iloc[-1], df_w)
     details['weekly_pos'] = range_pos
 
+    # ✅ FIX 4: BONUS ZONE NEUTRE WEEKLY
     if direction == "BUY" and range_pos > 0.65:
         mtf_score *= 0.8
-    if direction == "SELL" and range_pos < 0.35:
+    elif direction == "SELL" and range_pos < 0.35:
         mtf_score *= 0.8
-    # ✅ FIN AMÉLIORATION 3C
+    elif 0.35 <= range_pos <= 0.55:
+        mtf_score *= 1.05 # Bonus discret pour la zone centrale
     
     prob_factors.append(mtf_score)
     weights.append(0.20)
@@ -601,7 +608,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     prob_factors.append(midnight_score)
     weights.append(0.15)
 
-    # DIVERGENCE CHECK
     has_div, div_type = QuantEngine.detect_rsi_divergence(df_m5, rsi_serie)
     details['divergence'] = has_div
     
@@ -617,7 +623,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
     if fvg_active and ((direction=="BUY" and fvg_type=="BULL") or (direction=="SELL" and fvg_type=="BEAR")):
         extra_score += 0.3
     
-    # Bonus Divergence (+0.15)
     if has_div and ((direction=="BUY" and div_type=="BULL") or (direction=="SELL" and div_type=="BEAR")):
         extra_score += 0.15
     
@@ -626,7 +631,9 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction):
 
     total_weight = sum(weights)
     weighted_prob = sum(p * w for p, w in zip(prob_factors, weights)) / total_weight
-    final_score = max(0, weighted_prob * vol_conf)
+    
+    # ✅ FIX 5: CAP DU SCORE FINAL
+    final_score = max(0, min(1.0, weighted_prob * vol_conf))
     
     return final_score, details, atr_pct
 
@@ -645,7 +652,7 @@ def format_time_ago(detection_time):
 # ==========================================
 # SCANNER
 # ==========================================
-def run_scan_v37(api, min_prob, strict_mode):
+def run_scan_v38(api, min_prob, strict_mode):
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -821,12 +828,11 @@ def display_sig(s):
 # MAIN
 # ==========================================
 def main():
-    st.title("💎 BLUESTAR ULTIMATE V3.7")
-    # Titre mis à jour pour refléter la nature multi-facteurs
-    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Ultimate Multi-Factor Scanner | 30 Assets</p>", unsafe_allow_html=True)
+    st.title("💎 BLUESTAR ULTIMATE V3.8")
+    st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Production Grade Scanner | Logic Fixed</p>", unsafe_allow_html=True)
     
     with st.sidebar:
-        st.header("⚙️ Configuration V3.7")
+        st.header("⚙️ Configuration V3.8")
         strict_mode = st.checkbox("🔥 Mode Strict", value=False)
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         
@@ -834,7 +840,7 @@ def main():
         api = OandaClient()
         
         with st.spinner("Analyse du marché en cours..."):
-            results = run_scan_v37(api, min_prob_display/100.0, strict_mode)
+            results = run_scan_v38(api, min_prob_display/100.0, strict_mode)
         
         if not results:
             st.warning("Aucun signal détecté pour le moment (Marché calme).")
