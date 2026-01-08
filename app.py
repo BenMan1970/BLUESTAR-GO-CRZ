@@ -15,10 +15,10 @@ import pytz
 import warnings
 
 # ==========================================
-# CONFIGURATION & STYLE (THEME BLEU V4.0)
+# CONFIGURATION & STYLE (THEME BLEU V4.6)
 # ==========================================
 warnings.simplefilter(action='ignore', category=FutureWarning)
-st.set_page_config(page_title="Bluestar Ultimate V4.0", layout="centered", page_icon="🛡️")
+st.set_page_config(page_title="Bluestar Ultimate V4.6", layout="centered", page_icon="🛡️")
 
 LOG_FILE = "bluestar_v4_gps_log.csv"
 
@@ -60,26 +60,16 @@ st.markdown("""
         background-color: #161b22; border: 1px solid #334155;
         border-top: none; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; padding: 20px;
     }
-    div[data-testid="stMetricValue"] { font-size: 1.6rem; color: #f1f5f9; font-weight: 700; }
-    div[data-testid="stMetricLabel"] { color: #94a3b8; font-size: 0.9rem; }
     .badge { color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: 700; margin: 2px; display: inline-block; }
     .badge-session { background: linear-gradient(135deg, #db2777 0%, #ec4899 100%); }
-    .risk-box {
-        background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px;
-        text-align: center; border: 1px solid rgba(255,255,255,0.05);
-    }
+    .badge-blue { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); }
     .timestamp-box {
         background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; 
         padding: 8px 12px; border-radius: 6px; font-size: 0.85em;
         color: #93c5fd; margin: 10px 0; font-family: 'Courier New', monospace;
     }
-    .quality-indicator {
-        display: inline-block; padding: 3px 8px; border-radius: 4px;
-        font-size: 0.7em; font-weight: 700; margin-left: 8px;
-    }
-    .quality-high { background: #10b981; color: white; }
-    .quality-medium { background: #f59e0b; color: white; }
-    .quality-low { background: #6b7280; color: white; }
+    .inst-label { color:#94a3b8; font-size:0.8em; text-transform: uppercase; letter-spacing: 1px; }
+    .inst-val { font-size: 1.1em; font-weight: 700; color: #f1f5f9; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -274,26 +264,6 @@ class QuantEngine:
         except Exception: return None
 
     @staticmethod
-    def detect_rsi_divergence(df, rsi_series, lookback=15):
-        if len(df) < lookback + 2: return False, None
-        try:
-            price = df['close'].values
-            rsi = rsi_series.values
-            order =5
-            min_idx = argrelextrema(rsi, np.less, order=order)[0]
-            max_idx = argrelextrema(rsi, np.greater, order=order)[0]
-            if len(min_idx) >= 2:
-                idx1 = min_idx[-2]; idx2 = min_idx[-1]
-                if idx2 > len(df) - 5: 
-                    if price[idx2] < price[idx1] and rsi[idx2] > rsi[idx1]: return True, "BULL"
-            if len(max_idx) >= 2:
-                idx1 = max_idx[-2]; idx2 = max_idx[-1]
-                if idx2 > len(df) - 5:
-                    if price[idx2] > price[idx1] and rsi[idx2] < rsi[idx1]: return True, "BEAR"
-        except Exception: pass
-        return False, None
-
-    @staticmethod
     def calculate_hma(series, period=20):
         if len(series) < period: return pd.Series([])
         half = int(period / 2)
@@ -316,15 +286,6 @@ class QuantEngine:
         return 0
 
     @staticmethod
-    def ema_slope(series, period=50, lookback=10):
-        if len(series) < period + lookback: return 0
-        ema = series.ewm(span=period).mean()
-        slope = ema.iloc[-1] - ema.iloc[-1 - lookback]
-        if slope > 0: return 1
-        elif slope < 0: return -1
-        return 0
-
-    @staticmethod
     def weekly_range_position(price, df_w):
         if df_w.empty: return 0.5
         high = df_w['high'].iloc[-1]
@@ -337,7 +298,7 @@ class QuantEngine:
         if force_open: return "24/7_FORCED"
         hour = current_dt_utc.hour
         if 7 <= hour < 13: return "LDN_SESSION"
-        if 13 <= hour < 16: return "NY_OVERLAP" # 13h00 à 15h59 UTC
+        if 13 <= hour < 16: return "NY_OVERLAP"
         if 16 <= hour < 22: return "NY_SESSION"
         return None
 
@@ -351,7 +312,7 @@ def get_currency_strength_rsi(api):
 
     forex_pairs = [p for p in ASSETS if "_" in p and "XAU" not in p and "XAG" not in p and "US30" not in p]
     prices = {}
-    for pair in forex_pairs[:15]: # Limit API calls
+    for pair in forex_pairs[:15]: 
         try:
             df = api.get_candles(pair, "H1", 50)
             if df is not None and not df.empty: prices[pair] = df['close']
@@ -426,7 +387,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
     return False
 
 # ==========================================
-# PROBABILITÉ (CORRIGÉE : ADX Non-Bloquant)
+# PROBABILITÉ (V4.5 Logic)
 # ==========================================
 def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, current_time_utc, spread_pips, force_open=False):
     prob_factors = []
@@ -438,7 +399,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     atr = QuantEngine.calculate_atr(df_m5)
     atr_pct = (atr / df_m5['close'].iloc[-1]) * 100
     
-    if atr_pct < params['atr_threshold'] * 0.3: # Seuil réduit
+    if atr_pct < params['atr_threshold'] * 0.3:
         return 0, {}, atr_pct, "Low Volatility (ATR)"
     
     session = QuantEngine.check_session_killzone(current_time_utc, force_open)
@@ -447,7 +408,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     if session is None:
         return 0, {}, atr_pct, "Off Session"
     
-    # Check Spread (Un peu plus large pour laisser passer)
     spread_limit = 4.0 if params['type'] == 'FOREX' else 40.0
     if spread_pips > spread_limit:
         return 0, {}, atr_pct, f"Spread High ({spread_pips:.1f})"
@@ -458,22 +418,20 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     rsi_serie = QuantEngine.calculate_rsi(df_m5)
     rsi_val = rsi_serie.iloc[-1]
     
-    # RSI PROB (ZONE au lieu de CROSS)
     rsi_prob = 0.5
     if direction == "BUY":
         if 45 <= rsi_val <= 70: rsi_prob = 1.0
-        elif rsi_val > 70: rsi_prob = 0.4 # Overbought risk
+        elif rsi_val > 70: rsi_prob = 0.4
         else: rsi_prob = 0.2
-    else: # SELL
+    else:
         if 30 <= rsi_val <= 55: rsi_prob = 1.0
-        elif rsi_val < 30: rsi_prob = 0.4 # Oversold risk
+        elif rsi_val < 30: rsi_prob = 0.4
         else: rsi_prob = 0.2
             
     prob_factors.append(rsi_prob)
     weights.append(0.25)
     details['rsi_mom'] = rsi_val
 
-    # HMA Direction
     hma_series = QuantEngine.calculate_hma(df_m5['close'], 20)
     hma_dir = QuantEngine.hma_slope(hma_series)
     details['hma_slope'] = hma_dir
@@ -481,18 +439,16 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     prob_factors.append(hma_score)
     weights.append(0.15)
     
-    # Structure Z-Score
     z_score_struc = QuantEngine.detect_structure_zscore(df_h4, 20)
     struc_score = 0.5
     if direction == "BUY":
-        if z_score_struc <= 1.0: struc_score = 1.0 # Buy dip or normal
+        if z_score_struc <= 1.0: struc_score = 1.0
     else:
         if z_score_struc >= -1.0: struc_score = 1.0
     prob_factors.append(struc_score)
     weights.append(0.15)
     details['structure_z'] = z_score_struc
     
-    # INSTITUTIONAL GRADE (Le Coeur)
     inst_grade, inst_trend, inst_raw_score = QuantEngine.get_institutional_grade(df_d, df_w)
     details['mtf_grade'] = inst_grade
     
@@ -500,18 +456,16 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     if inst_grade == "A+": mtf_score = 1.0
     elif inst_grade == "A": mtf_score = 0.9
     elif inst_grade == "B": mtf_score = 0.7
-    else: mtf_score = 0.3 # Grade C penalize, don't kill
+    else: mtf_score = 0.3
 
-    # Direction Alignment
     is_buy = (direction == "BUY")
     if is_buy and "BULL" in inst_trend: mtf_score *= 1.1
     elif not is_buy and "BEAR" in inst_trend: mtf_score *= 1.1
-    else: mtf_score *= 0.5 # Counter trend penalty
+    else: mtf_score *= 0.5
     
     prob_factors.append(min(mtf_score, 1.0))
     weights.append(0.25)
     
-    # Midnight Open
     midnight_price = QuantEngine.get_midnight_open_ny(df_m5)
     midnight_score = 0.5 
     curr_price = df_m5['close'].iloc[-1]
@@ -524,7 +478,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     prob_factors.append(midnight_score)
     weights.append(0.10)
 
-    # ADX / FVG (Bonus)
     fvg_active, fvg_type = QuantEngine.detect_smart_fvg(df_m5, atr)
     details['fvg_align'] = fvg_active
     adx_val = QuantEngine.calculate_adx(df_h4)
@@ -532,7 +485,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     
     bonus = 0
     if adx_val > 20: bonus += 0.1
-    elif adx_val < 15: bonus -= 0.1 # Penalty for chopping
+    elif adx_val < 15: bonus -= 0.1
     
     if fvg_active and ((is_buy and fvg_type=="BULL") or (not is_buy and fvg_type=="BEAR")):
         bonus += 0.15
@@ -554,7 +507,7 @@ def format_time_ago(detection_time):
     return f"Il y a {minutes} min"
 
 # ==========================================
-# SCANNER (LOGIQUE V4.5 - ZONE DETECTION)
+# SCANNER
 # ==========================================
 def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc, force_open=False):
     cs_scores = get_currency_strength_rsi(api)
@@ -586,17 +539,13 @@ def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc, force_open=F
             
             _, spread_pips = api.get_realtime_spread(sym)
             
-            # --- NOUVELLE LOGIQUE DE DÉTECTION (ZONE) ---
             rsi_serie = QuantEngine.calculate_rsi(df_m5)
             curr_rsi = rsi_serie.iloc[-1]
             
-            # On détermine la direction POTENTIELLE basée sur le RSI actuel
-            # Pas de croisement requis, juste être dans la "Zone de Travail"
             scan_direction = None
             if 40 < curr_rsi < 75: scan_direction = "BUY"
             elif 25 < curr_rsi < 60: scan_direction = "SELL"
             
-            # Si le RSI est neutre (ex: 50 pile) on teste les deux cotés via le score
             if not scan_direction:
                 rejected_log.append(f"{sym}: RSI Neutre/Extreme ({curr_rsi:.1f})")
                 continue
@@ -660,7 +609,7 @@ def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc, force_open=F
     return sorted(signals, key=lambda x: x['prob'], reverse=True), rejected_log
 
 # ==========================================
-# AFFICHAGE
+# AFFICHAGE INSTITUTIONNEL
 # ==========================================
 def display_sig(s):
     is_buy = s['type'] == 'BUY'
@@ -698,16 +647,46 @@ def display_sig(s):
         if s['cs_aligned']: badges.append("<span class='badge badge-blue'>CS ALIGNÉ</span>")
         st.markdown(f"<div style='margin-top:10px;text-align:center'>{' '.join(badges)}</div>", unsafe_allow_html=True)
         
-        c1, c2 = st.columns(2)
-        c1.markdown(f"**STOP LOSS:** <span style='color:#ef4444'>{s['sl']:.5f}</span>", unsafe_allow_html=True)
-        c2.markdown(f"**TAKE PROFIT:** <span style='color:#10b981'>{s['tp']:.5f}</span>", unsafe_allow_html=True)
+        st.markdown("---")
+        
+        # --- BLOC INSTITUTIONNEL ---
+        k1, k2, k3 = st.columns(3)
+        
+        # 1. Midnight Open / Premium-Discount
+        with k1:
+            st.markdown("<div class='inst-label'>MIDNIGHT OPEN</div>", unsafe_allow_html=True)
+            mid = s['details']['midnight_val']
+            if mid:
+                mid_status = "PREMIUM 🔴" if s['price'] > mid else "DISCOUNT 🟢"
+                st.markdown(f"<div class='inst-val'>{mid_status}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:0.8em;color:#64748b'>{mid:.5f}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='inst-val'>--</div>", unsafe_allow_html=True)
+        
+        # 2. Risk Reward
+        with k2:
+            st.markdown("<div class='inst-label'>RISK / REWARD</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='inst-val' style='color:#f59e0b'>1 : {s['rr']}</div>", unsafe_allow_html=True)
+            
+        # 3. Structure H4
+        with k3:
+            st.markdown("<div class='inst-label'>STRUCTURE H4</div>", unsafe_allow_html=True)
+            z = s['details']['structure_z']
+            struct_txt = "EXPANSION 🌊" if abs(z) > 1.0 else "CONSOLIDATION 🧱"
+            st.markdown(f"<div class='inst-val'>{struct_txt}</div>", unsafe_allow_html=True)
+        
+        st.write("")
+        
+        ex1, ex2 = st.columns(2)
+        ex1.info(f"🛑 **SL:** {s['sl']:.5f}")
+        ex2.success(f"🎯 **TP:** {s['tp']:.5f}")
 
 # ==========================================
 # MAIN
 # ==========================================
 def main():
-    st.title("🛡️ BLUESTAR ULTIMATE V4.5")
-    st.markdown("<p style='text-align:center;color:#94a3b8;'>Zone Detection Architecture</p>", unsafe_allow_html=True)
+    st.title("🛡️ BLUESTAR ULTIMATE V4.6")
+    st.markdown("<p style='text-align:center;color:#94a3b8;'>Zone Detection & Institutional Context</p>", unsafe_allow_html=True)
     
     st.sidebar.markdown(f"🕒 **Heure UTC Scanner:** {datetime.now(pytz.utc).strftime('%H:%M')}")
 
@@ -716,13 +695,13 @@ def main():
         col_st, col_fo = st.columns(2)
         strict_mode = col_st.checkbox("🔥 Strict", value=False)
         force_open = col_fo.checkbox("🔓 24/7", value=False)
-        min_prob_display = st.slider("Confiance Min (%)", 40, 90, 60, 5) # Default lowered to 60 for wider net
+        min_prob_display = st.slider("Confiance Min (%)", 40, 90, 60, 5)
         
     if st.button("🔍 Lancer le Scan", type="primary"):
         api = OandaClient()
         current_sim_time = datetime.now(pytz.utc)
         
-        with st.spinner("Analyse approfondie (Zone Detection)..."):
+        with st.spinner("Analyse approfondie (Zone Detection + Institutional)..."):
             results, logs = run_scan_v40_blue(api, min_prob_display/100.0, strict_mode, current_sim_time, force_open)
         
         if not results:
@@ -740,3 +719,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+   
