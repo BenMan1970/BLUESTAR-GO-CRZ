@@ -241,7 +241,7 @@ class QuantEngine:
             return True, "BEAR"
         return False, None
 
-    # ✅ NOUVEAU MOTEUR INSTITUTIONNEL GPS
+    # ✅ MOTEUR INSTITUTIONNEL GPS
     @staticmethod
     def get_institutional_grade(df_d, df_w):
         """
@@ -367,10 +367,20 @@ class QuantEngine:
         return (price - low) / (high - low)
 
     @staticmethod
-    def check_session_killzone(current_dt_utc):
+    def check_session_killzone(current_dt_utc, force_open=False):
+        if force_open:
+            return "24/7_FORCED"
+        
         hour = current_dt_utc.hour
-        if 7 <= hour < 11: return "LDN_OPEN"
-        if 13 <= hour < 17: return "NY_OPEN"
+        # Plage horaire élargie pour inclure le overlap complet
+        # Londres : 07h-16h UTC
+        # NY : 13h-21h UTC
+        # On couvre de 07h à 21h UTC en continu
+        
+        if 7 <= hour < 13: return "LDN_SESSION"
+        if 13 <= hour < 16: return "NY_OVERLAP"
+        if 16 <= hour < 22: return "NY_SESSION"
+        
         return None
 
 # ==========================================
@@ -502,7 +512,7 @@ def check_dynamic_correlation_conflict(new_signal, existing_signals, cs_scores):
 # ==========================================
 # PROBABILITÉ
 # ==========================================
-def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, current_time_utc, spread_pips):
+def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, current_time_utc, spread_pips, force_open=False):
     prob_factors = []
     weights = []
     details = {}
@@ -514,7 +524,7 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
     if atr_pct < params['atr_threshold'] * 0.5:
         return 0, {}, atr_pct 
     
-    session = QuantEngine.check_session_killzone(current_time_utc)
+    session = QuantEngine.check_session_killzone(current_time_utc, force_open)
     details['session'] = session if session else "OFF-HOURS"
     
     if session is None:
@@ -567,7 +577,6 @@ def calculate_signal_probability(df_m5, df_h4, df_d, df_w, symbol, direction, cu
         elif z_score_struc == 0: struc_score = 0.5
     prob_factors.append(struc_score)
     weights.append(0.20)
-    details['structure_z'] = z_score_struc
     
     # ✅ LOGIQUE INSTITUTIONNELLE GPS INTÉGRÉE
     inst_grade, inst_trend, inst_raw_score = QuantEngine.get_institutional_grade(df_d, df_w)
@@ -689,7 +698,7 @@ def format_time_ago(detection_time):
 # ==========================================
 # SCANNER
 # ==========================================
-def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc):
+def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc, force_open=False):
     cs_scores = get_currency_strength_rsi(api)
     signals = []
     
@@ -722,20 +731,26 @@ def run_scan_v40_blue(api, min_prob, strict_mode, current_time_utc):
             _, spread_pips = api.get_realtime_spread(sym)
             
             rsi_serie = QuantEngine.calculate_rsi(df_m5)
-            if len(rsi_serie) < 3: continue
+            if len(rsi_serie) < 6: continue
             
-            rsi_mom = rsi_serie.iloc[-1] - rsi_serie.iloc[-2]
+            # 🔄 LOGIQUE RSI AMÉLIORÉE (CROSSE SUR LES 3 DERNIÈRES BOUGIES)
             scan_direction = None
             
-            if rsi_serie.iloc[-2] < 50 and rsi_serie.iloc[-1] >= 50 and rsi_mom > 0.5:
+            # Vérifier si un cross a eu lieu dans les 3 dernières bougies terminées
+            recent_cross_buy = any(rsi_serie.iloc[j] < 50 and rsi_serie.iloc[j+1] >= 50 for j in range(-4, -1))
+            recent_cross_sell = any(rsi_serie.iloc[j] > 50 and rsi_serie.iloc[j+1] <= 50 for j in range(-4, -1))
+            
+            curr_rsi = rsi_serie.iloc[-1]
+            
+            if recent_cross_buy and curr_rsi > 48:
                 scan_direction = "BUY"
-            elif rsi_serie.iloc[-2] > 50 and rsi_serie.iloc[-1] <= 50 and rsi_mom < -0.5:
+            elif recent_cross_sell and curr_rsi < 52:
                 scan_direction = "SELL"
             
             if not scan_direction: continue
             
             prob, details, atr_pct = calculate_signal_probability(
-                df_m5, df_h4, df_d, df_w, sym, scan_direction, current_time_utc, spread_pips
+                df_m5, df_h4, df_d, df_w, sym, scan_direction, current_time_utc, spread_pips, force_open
             )
             
             if prob < min_prob: continue
@@ -814,12 +829,6 @@ def display_sig(s):
     time_ago_str = format_time_ago(s['detection_time'])
     
     # Logique Grade CSS (Adaptée pour thème bleu)
-    grade_class = ""
-    if mtf_grade == "A+": grade_class = "grade-a-plus" # (Si défini dans CSS, sinon fallback)
-    elif mtf_grade == "A": grade_class = "grade-a"
-    elif mtf_grade == "B": grade_class = "grade-b"
-    
-    # Fallback CSS inline pour grade si pas dans CSS global
     grade_style = ""
     if mtf_grade == "A+": grade_style = "background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%); color:black; border:1px solid #fff;"
     elif mtf_grade == "A": grade_style = "background: linear-gradient(135deg, #a3e635 0%, #4ade80 100%); color:black;"
@@ -850,7 +859,6 @@ def display_sig(s):
         </div>""", unsafe_allow_html=True)
         
         badges = []
-        # Badge Grade GPS
         badges.append(f"<span class='badge' style='{grade_style}'>🏛️ {mtf_grade}</span>")
         
         if session_badge: badges.append(f"<span class='badge badge-session'>⚡ {session_badge}</span>")
@@ -888,9 +896,17 @@ def main():
     st.title("🛡️ BLUESTAR ULTIMATE V4.0")
     st.markdown("<p style='text-align:center;color:#94a3b8;font-size:0.9em;'>Institutional Grade System | Blue Edition</p>", unsafe_allow_html=True)
     
+    # Affichage de l'heure UTC pour debug
+    st.sidebar.markdown(f"🕒 **Heure UTC Scanner:** {datetime.now(pytz.utc).strftime('%H:%M')}")
+
     with st.sidebar:
         st.header("⚙️ Configuration V4.0")
-        strict_mode = st.checkbox("🔥 Mode Strict", value=False)
+        
+        # Boutons côte à côte
+        col_st, col_fo = st.columns(2)
+        strict_mode = col_st.checkbox("🔥 Strict", value=False)
+        force_open = col_fo.checkbox("🔓 24/7", value=False, help="Force le scan même hors session")
+        
         min_prob_display = st.slider("Confiance Min (%)", 50, 95, 70, 5)
         st.info(f"Logs sauvegardés dans : {LOG_FILE}")
         
@@ -899,7 +915,7 @@ def main():
         current_sim_time = datetime.now(pytz.utc)
         
         with st.spinner("Analyse du marché en cours..."):
-            results = run_scan_v40_blue(api, min_prob_display/100.0, strict_mode, current_sim_time)
+            results = run_scan_v40_blue(api, min_prob_display/100.0, strict_mode, current_sim_time, force_open)
         
         if not results:
             st.warning("Aucun signal détecté (Structure C ou Hors Session).")
